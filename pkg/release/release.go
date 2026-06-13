@@ -43,6 +43,24 @@ type Release struct {
 
 	Available *bool
 	Duration  float64
+
+	// Protocol distinguishes the source type: "usenet" (NZB) or "torrent".
+	// Empty is treated as "usenet" for backward compatibility.
+	Protocol string
+
+	// Torrent-only fields, populated from Torznab attributes. Zero/empty for NZBs.
+	Magnet   string // magnet: URI when the indexer provides one
+	InfoHash string // BitTorrent v1 info hash (lowercased)
+	Seeders  int    // current seeders reported by the indexer
+	Peers    int    // current leechers/peers reported by the indexer
+}
+
+// IsTorrent reports whether this release is a torrent rather than a Usenet NZB.
+func (r *Release) IsTorrent() bool {
+	if r == nil {
+		return false
+	}
+	return r.Protocol == "torrent"
 }
 
 func NormalizeTitleForDedup(s string) string {
@@ -221,4 +239,3 @@ func IsFullDiscRelease(title string) bool {
 	}
 	return false
 }
-

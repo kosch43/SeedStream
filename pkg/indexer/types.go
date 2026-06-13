@@ -143,6 +143,28 @@ func (i *Item) ToRelease() *release.Release {
 	if indexerName == "" && i.SourceIndexer != nil {
 		indexerName = i.SourceIndexer.Name()
 	}
+
+	// Torznab torrent attributes (absent for Usenet indexers).
+	magnet := i.GetAttribute("magneturl")
+	infoHash := strings.ToLower(strings.TrimSpace(i.GetAttribute("infohash")))
+	seeders := atoiOrZero(i.GetAttribute("seeders"))
+	peers := atoiOrZero(i.GetAttribute("peers"))
+	if peers == 0 {
+		peers = atoiOrZero(i.GetAttribute("leechers"))
+	}
+
+	// A result is a torrent if it advertises any torrent-specific signal: a
+	// magnet, an info hash, seeders, or a bittorrent enclosure type.
+	protocol := "usenet"
+	if magnet != "" || infoHash != "" || i.GetAttribute("seeders") != "" ||
+		strings.Contains(strings.ToLower(i.Enclosure.Type), "bittorrent") ||
+		strings.HasPrefix(strings.ToLower(i.Link), "magnet:") {
+		protocol = "torrent"
+	}
+	if magnet == "" && strings.HasPrefix(strings.ToLower(i.Link), "magnet:") {
+		magnet = i.Link
+	}
+
 	return &release.Release{
 		Title:         i.Title,
 		Link:          i.Link,
@@ -156,7 +178,22 @@ func (i *Item) ToRelease() *release.Release {
 		Grabs:         grabs,
 		Languages:     languages,
 		Duration:      i.Duration,
+		Protocol:      protocol,
+		Magnet:        magnet,
+		InfoHash:      infoHash,
+		Seeders:       seeders,
+		Peers:         peers,
 	}
+}
+
+func atoiOrZero(s string) int {
+	if s == "" {
+		return 0
+	}
+	if n, err := strconv.Atoi(strings.TrimSpace(s)); err == nil {
+		return n
+	}
+	return 0
 }
 
 func (i *Item) ReleaseDetailsURL() string {
