@@ -17,6 +17,7 @@ import (
 	"seedstream/pkg/services/metadata/tmdb"
 	"seedstream/pkg/services/metadata/tvdb"
 	"seedstream/pkg/session"
+	"seedstream/pkg/torrent"
 	"seedstream/pkg/usenet/validation"
 )
 
@@ -42,6 +43,7 @@ type Server struct {
 	tmdbClient                *tmdb.Client
 	tvdbClient                *tvdb.Client
 	streamManager             *auth.StreamManager
+	torrentManager            *torrent.Manager
 	playlistCache             sync.Map
 	rawSearchCache            sync.Map
 	recordedSuccessSessionIDs sync.Map // session ID -> struct{}; record actual playback success only once per stream
@@ -123,6 +125,9 @@ func NewServer(opts *ServerOptions) (*Server, error) {
 		attemptRecorder:      opts.AttemptRecorder,
 		availIndexerStats:    make(map[string]AvailIndexerStats),
 		uniqueIndexerHits:    make(map[string]int64),
+	}
+	if opts.Config != nil {
+		s.torrentManager = torrent.NewManager(opts.Config.TorrentClients)
 	}
 
 	if err := s.CheckPort(opts.Port); err != nil {
@@ -253,6 +258,9 @@ func (s *Server) Reload(opts *ServerOptions) {
 
 	s.config = opts.Config
 	s.baseURL = opts.BaseURL
+	if opts.Config != nil {
+		s.torrentManager = torrent.NewManager(opts.Config.TorrentClients)
+	}
 	s.indexer = opts.Indexer
 	s.validator = opts.Validator
 	s.triageService = opts.TriageService
