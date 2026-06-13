@@ -411,6 +411,10 @@ type Config struct {
 
 	Providers []Provider `json:"providers"`
 
+	// TorrentClients are download clients (qBittorrent) that receive torrent
+	// picks and keep them seeding on a seedbox. One entry per seedbox/member.
+	TorrentClients []TorrentClientConfig `json:"torrent_clients,omitempty"`
+
 	ProxyPort     int    `json:"proxy_port"`
 	ProxyHost     string `json:"proxy_host"`
 	ProxyEnabled  bool   `json:"proxy_enabled"`
