@@ -1,17 +1,15 @@
 # SeedStream
 
-SeedStream is a self-hosted streaming addon for [Stremio](https://www.stremio.com/) and [AIOStreams](https://github.com/Viren070/AIOStreams). It searches your own indexers and streams the results — **both Usenet (NZB) and torrents** — from one small service you run on your own server.
+SeedStream is a self-hosted streaming addon for [Stremio](https://www.stremio.com/) and [AIOStreams](https://github.com/Viren070/AIOStreams). It searches your own indexers and streams the results — **both Usenet (NZB) and torrents** — from a Docker container running on your seedbox or server.
 
 - **Usenet** streams on-the-fly directly from your providers (no full download needed).
-- **Torrents** are handed to a qBittorrent on your seedbox, which downloads sequentially for instant playback and **keeps seeding** so your private-tracker ratio stays healthy. SeedStream never seeds or discards data itself.
-
-One binary provides the web UI, stream management, NNTP proxy, and playback pipeline.
+- **Torrents** are handed to a qBittorrent running on your seedbox, which downloads sequentially for instant playback and **keeps seeding** so your private-tracker ratio stays healthy. SeedStream never seeds or discards data itself.
 
 ---
 
-## Install (Docker — easiest)
+## Install
 
-You need a server with **Docker** and **Docker Compose**. Then:
+You need a seedbox or server with **Docker** and **Docker Compose**. Then:
 
 ```bash
 git clone https://github.com/kosch43/SeedStream.git
@@ -19,7 +17,7 @@ cd SeedStream
 docker compose up -d --build
 ```
 
-That's it. The image builds from source on first run (a few minutes), then starts automatically and restarts on reboot.
+The image builds from source on first run (a few minutes), then starts automatically and restarts on reboot.
 
 Open **`http://<your-server-ip>:7000`** in a browser. Default login is **`admin` / `admin`** — you'll be asked to change the password on first sign-in.
 
@@ -33,19 +31,6 @@ docker compose up -d --build
 Your configuration and login live in the `./data` folder (mounted into the container), so they survive updates.
 
 > **Streaming torrents?** SeedStream serves torrent files straight from the folder your seedbox qBittorrent downloads to, so it needs to read that folder. Uncomment and edit the downloads volume in `docker-compose.yml` to mount it (read-only) at the **same path** you'll enter under Settings → Torrent Clients.
-
-### Running the binary instead of Docker
-
-Prefer no Docker? Build it directly (needs Go 1.25+ and Node 20+):
-
-```bash
-cd frontend && npm ci && npm run build && cd ..
-mkdir -p pkg/server/web/static && cp -r frontend/dist/* pkg/server/web/static/
-go build -o seedstream ./cmd/seedstream/
-./seedstream
-```
-
-Configuration can also be supplied via environment variables — see `.env.example`.
 
 ---
 
