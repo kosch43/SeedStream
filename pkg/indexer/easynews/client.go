@@ -1,0 +1,896 @@
+package easynews
+
+import (
+	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"encoding/xml"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"seedstream/pkg/core/config"
+	"seedstream/pkg/core/env"
+	"seedstream/pkg/core/logger"
+	"seedstream/pkg/indexer"
+	"seedstream/pkg/indexer/httpproxy"
+	"seedstream/pkg/media/nzb"
+	"seedstream/pkg/release"
+)
+
+const (
+	easynewsBaseURL   = "https://members.easynews.com"
+	maxResultsPerPage = 250
+)
+
+type Client struct {
+	username        string
+	password        string
+	name            string
+	grabHeader      string
+	client          *http.Client
+	downloadClient  *http.Client
+	downloadBase    string
+	searchTimeout   time.Duration
+	downloadTimeout time.Duration
+
+	apiLimit          int
+	apiUsed           int
+	apiRemaining      int
+	downloadLimit     int
+	downloadUsed      int
+	downloadRemaining int
+	searchesCount     int
+	totalResponseMS   int64
+	usageManager      *indexer.UsageManager
+	requestLimiter    *indexer.RequestLimiter
+	mu                sync.RWMutex
+}
+
+var _ indexer.Indexer = (*Client)(nil)
+
+func NewClient(username, password, name string, downloadBase string, apiLimit, downloadLimit, rateLimitRPS, timeoutSeconds int, proxyURL, grabHeader string, um *indexer.UsageManager) (*Client, error) {
+	if username == "" || password == "" {
+		return nil, fmt.Errorf("easynews username and password are required")
+	}
+	if timeoutSeconds <= 0 {
+		timeoutSeconds = config.DefaultEasynewsIndexerTimeoutSeconds
+	}
+	searchTimeout := time.Duration(timeoutSeconds) * time.Second
+	downloadTimeout := searchTimeout * 2
+
+	searchProxy := httpproxy.IndexerProxy(proxyURL)
+	searchTransport := &http.Transport{
+		Proxy:               searchProxy,
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 100,
+		MaxConnsPerHost:     100,
+		IdleConnTimeout:     90 * time.Second,
+	}
+	downloadTransport := &http.Transport{
+		Proxy:               httpproxy.WithEasynewsDownloadNoProxy(searchProxy),
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 100,
+		MaxConnsPerHost:     100,
+		IdleConnTimeout:     90 * time.Second,
+	}
+
+	c := &Client{
+		username:          username,
+		password:          password,
+		name:              name,
+		grabHeader:        grabHeader,
+		downloadBase:      downloadBase,
+		searchTimeout:     searchTimeout,
+		downloadTimeout:   downloadTimeout,
+		usageManager:      um,
+		apiLimit:          apiLimit,
+		apiUsed:           0,
+		apiRemaining:      apiLimit,
+		downloadLimit:     downloadLimit,
+		downloadUsed:      0,
+		downloadRemaining: downloadLimit,
+		requestLimiter:    indexer.NewRequestLimiter(rateLimitRPS),
+		client: &http.Client{
+			Timeout:   searchTimeout,
+			Transport: searchTransport,
+		},
+		downloadClient: &http.Client{
+			Timeout:   downloadTimeout,
+			Transport: downloadTransport,
+		},
+	}
+
+	if um != nil && name != "" {
+		usage := um.GetIndexerUsage(name)
+		c.apiUsed = usage.APIHitsUsed
+		c.downloadUsed = usage.DownloadsUsed
+
+		c.apiRemaining = apiLimit - usage.APIHitsUsed
+		c.downloadRemaining = downloadLimit - usage.DownloadsUsed
+
+		if c.apiRemaining < 0 && apiLimit > 0 {
+			c.apiRemaining = 0
+		}
+		if c.downloadRemaining < 0 && downloadLimit > 0 {
+			c.downloadRemaining = 0
+		}
+	}
+
+	return c, nil
+}
+
+func (c *Client) effectiveGrabHeader() string {
+	if h := strings.TrimSpace(c.grabHeader); h != "" {
+		return h
+	}
+	return env.IndexerGrabHeader()
+}
+
+func (c *Client) Name() string {
+	if c.name != "" {
+		return c.name
+	}
+	return "Easynews"
+}
+
+func (c *Client) GetUsage() indexer.Usage {
+	usageData := c.refreshUsageFromManager()
+
+	c.mu.RLock()
+	u := indexer.Usage{
+		APIHitsLimit:       c.apiLimit,
+		APIHitsUsed:        c.apiUsed,
+		APIHitsRemaining:   c.apiRemaining,
+		DownloadsLimit:     c.downloadLimit,
+		DownloadsUsed:      c.downloadUsed,
+		DownloadsRemaining: c.downloadRemaining,
+		SearchesCount:      c.searchesCount,
+	}
+	if c.searchesCount > 0 {
+		u.AvgResponseMS = float64(c.totalResponseMS) / float64(c.searchesCount)
+	}
+	c.mu.RUnlock()
+	if usageData != nil {
+		u.AllTimeAPIHitsUsed = usageData.AllTimeAPIHitsUsed
+		u.AllTimeDownloadsUsed = usageData.AllTimeDownloadsUsed
+	}
+	return u
+}
+
+func (c *Client) refreshUsageFromManager() *indexer.UsageData {
+	if c.usageManager == nil || c.name == "" {
+		return nil
+	}
+
+	ud := c.usageManager.GetIndexerUsage(c.name)
+	c.mu.Lock()
+	c.apiUsed = ud.APIHitsUsed
+	c.downloadUsed = ud.DownloadsUsed
+	if c.apiLimit > 0 {
+		c.apiRemaining = c.apiLimit - c.apiUsed
+		if c.apiRemaining < 0 {
+			c.apiRemaining = 0
+		}
+	}
+	if c.downloadLimit > 0 {
+		c.downloadRemaining = c.downloadLimit - c.downloadUsed
+		if c.downloadRemaining < 0 {
+			c.downloadRemaining = 0
+		}
+	}
+	c.mu.Unlock()
+
+	return ud
+}
+
+func (c *Client) recordSearchDuration(elapsed time.Duration) {
+	ms := elapsed.Milliseconds()
+	if ms < 0 {
+		ms = 0
+	}
+	c.mu.Lock()
+	c.searchesCount++
+	c.totalResponseMS += ms
+	c.mu.Unlock()
+}
+
+func (c *Client) Ping() error {
+	ctx, cancel := context.WithTimeout(context.Background(), c.searchTimeout)
+	defer cancel()
+	if err := c.requestLimiter.Wait(ctx); err != nil {
+		return err
+	}
+
+	testQuery := "dune"
+	_, _, err := c.searchInternal(ctx, testQuery, "", "", config.SeriesSearchScopeNone, "", false)
+	if err != nil {
+		return fmt.Errorf("easynews credentials invalid: %w", err)
+	}
+	return nil
+}
+
+func (c *Client) Search(req indexer.SearchRequest) (*indexer.SearchResponse, error) {
+	if err := c.checkAPILimit(); err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), c.searchTimeout)
+	defer cancel()
+	if err := c.requestLimiter.Wait(ctx); err != nil {
+		return nil, err
+	}
+
+	query := prepareEasynewsQuery(req.Query, req.SearchMode, req.OptionalOverrides)
+
+	season := req.Season
+	episode := req.Episode
+	searchURL := buildEasynewsSearchURL(query, season, episode, req.SeriesSearchScope, req.Cat)
+
+	logger.Debug("Search request",
+		"stream", req.StreamLabel,
+		"request", req.RequestLabel,
+		"mode", func() string {
+			if strings.EqualFold(strings.TrimSpace(req.SearchMode), "id") {
+				return "id"
+			}
+			return "text"
+		}(),
+		"indexer", c.name,
+		"type", "easynews",
+		"url", searchURL,
+		"gps", buildEasynewsGPSQuery(query, season, episode, req.SeriesSearchScope, req.Cat),
+	)
+
+	startedAt := time.Now()
+	results, totalResults, err := c.searchInternal(ctx, query, season, episode, req.SeriesSearchScope, req.Cat, false)
+	if err != nil {
+		return nil, fmt.Errorf("easynews search failed: %w", err)
+	}
+
+	c.mu.Lock()
+	c.apiUsed++
+	if c.apiRemaining > 0 {
+		c.apiRemaining--
+	}
+	c.mu.Unlock()
+
+	if c.usageManager != nil && c.name != "" {
+		c.usageManager.IncrementUsed(c.name, 1, 0)
+	}
+
+	items := make([]indexer.Item, 0, len(results))
+	for _, result := range results {
+		item := indexer.Item{
+			Title:         result.Title,
+			Link:          result.DownloadURL,
+			GUID:          result.GUID,
+			PubDate:       result.PubDate,
+			Size:          result.Size,
+			SourceIndexer: c,
+			Duration:      result.DurationSeconds,
+		}
+		items = append(items, item)
+	}
+	if totalResults <= 0 {
+		totalResults = len(items)
+	}
+	logger.Debug("Search request result",
+		"stream", req.StreamLabel,
+		"request", req.RequestLabel,
+		"mode", func() string {
+			if strings.EqualFold(strings.TrimSpace(req.SearchMode), "id") {
+				return "id"
+			}
+			return "text"
+		}(),
+		"indexer", c.name,
+		"type", "easynews",
+		"filtered_results", len(items),
+		"result_offset", 0,
+		"total_results", totalResults,
+		"duration_ms", time.Since(startedAt).Milliseconds(),
+	)
+	c.recordSearchDuration(time.Since(startedAt))
+
+	return &indexer.SearchResponse{
+		Channel: indexer.Channel{
+			Items: items,
+		},
+	}, nil
+}
+
+func prepareEasynewsQuery(baseQuery, searchMode string, overrides *config.IndexerSearchConfig) string {
+	query := release.NormalizeTitleForSearchQuery(baseQuery)
+	extraTerms := ""
+	if overrides != nil && overrides.ExtraSearchTerms != nil {
+		extraTerms = strings.TrimSpace(*overrides.ExtraSearchTerms)
+	}
+	if extraTerms != "" {
+		if strings.EqualFold(strings.TrimSpace(searchMode), "id") {
+			if query != "" {
+				query = extraTerms + " " + query
+			} else {
+				query = extraTerms
+			}
+		} else {
+			if query != "" {
+				query = query + " " + extraTerms
+			} else {
+				query = extraTerms
+			}
+		}
+	}
+	return query
+}
+
+func (c *Client) DownloadNZB(ctx context.Context, nzbURL string) ([]byte, error) {
+	if err := c.checkDownloadLimit(); err != nil {
+		return nil, err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, c.downloadTimeout)
+	defer cancel()
+	if err := c.requestLimiter.Wait(ctx); err != nil {
+		return nil, err
+	}
+
+	parsedURL, err := url.Parse(nzbURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid NZB URL: %w", err)
+	}
+
+	payloadToken := parsedURL.Query().Get("payload")
+	if payloadToken == "" {
+		return nil, fmt.Errorf("missing payload token in URL")
+	}
+
+	payload, err := decodePayload(payloadToken)
+	if err != nil {
+		return nil, fmt.Errorf("invalid payload token: %w", err)
+	}
+
+	nzbData, err := c.downloadNZBInternal(ctx, payload)
+	if err != nil {
+		return nil, fmt.Errorf("failed to download NZB: %w", err)
+	}
+
+	c.mu.Lock()
+	c.apiUsed++
+	c.downloadUsed++
+	if c.apiRemaining > 0 {
+		c.apiRemaining--
+	}
+	if c.downloadRemaining > 0 {
+		c.downloadRemaining--
+	}
+	c.mu.Unlock()
+
+	if c.usageManager != nil && c.name != "" {
+		c.usageManager.IncrementUsed(c.name, 1, 1)
+	}
+
+	return nzbData, nil
+}
+
+func buildEasynewsGPSQuery(query, season, episode, scope, category string) string {
+	query = release.NormalizeTitleForSearchQuery(query)
+	if !strings.HasPrefix(strings.TrimSpace(category), "5") {
+		return query
+	}
+	switch config.NormalizeSeriesSearchScope(scope) {
+	case config.SeriesSearchScopeSeasonEpisode:
+		if season == "" || episode == "" {
+			return query
+		}
+		seasonNum, seasonErr := strconv.Atoi(season)
+		episodeNum, episodeErr := strconv.Atoi(episode)
+		suffix := fmt.Sprintf("S%sE%s", season, episode)
+		if seasonErr == nil && episodeErr == nil {
+			suffix = fmt.Sprintf("S%02dE%02d", seasonNum, episodeNum)
+		}
+		if easynewsQueryContainsToken(query, suffix) {
+			return query
+		}
+		if query == "" {
+			return suffix
+		}
+		return fmt.Sprintf("%s %s", query, suffix)
+	case config.SeriesSearchScopeSeason:
+		if season == "" {
+			return query
+		}
+		seasonNum, seasonErr := strconv.Atoi(season)
+		suffix := fmt.Sprintf("S%s", season)
+		if seasonErr == nil {
+			suffix = fmt.Sprintf("S%02d", seasonNum)
+		}
+		if easynewsQueryContainsToken(query, suffix) {
+			return query
+		}
+		if query == "" {
+			return suffix
+		}
+		return fmt.Sprintf("%s %s", query, suffix)
+	default:
+		return query
+	}
+}
+
+func easynewsQueryContainsToken(query, token string) bool {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return false
+	}
+	for _, part := range strings.Fields(query) {
+		if strings.EqualFold(strings.TrimSpace(part), token) {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Client) searchInternal(ctx context.Context, query, season, episode, scope, category string, strictMode bool) ([]easynewsResult, int, error) {
+	searchURL := buildEasynewsSearchURL(query, season, episode, scope, category)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", searchURL, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	req.SetBasicAuth(c.username, c.password)
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, 0, fmt.Errorf("easynews search request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 401 || resp.StatusCode == 403 {
+		return nil, 0, fmt.Errorf("easynews rejected credentials")
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, 0, fmt.Errorf("easynews search failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var data easynewsSearchResponse
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return nil, 0, fmt.Errorf("failed to parse Easynews response: %w", err)
+	}
+
+	results := c.filterAndMapResults(data, query, season, episode, strictMode)
+
+	return results, data.Results, nil
+}
+
+func buildEasynewsSearchURL(query, season, episode, scope, category string) string {
+	params := url.Values{}
+	params.Set("fly", "2")
+	params.Set("sb", "1")
+	params.Set("pno", "1")
+	params.Set("pby", strconv.Itoa(maxResultsPerPage))
+	params.Set("u", "1")
+	params.Set("chxu", "1")
+	params.Set("chxgx", "1")
+	params.Set("st", "basic")
+	params.Set("gps", buildEasynewsGPSQuery(query, season, episode, scope, category))
+	params.Set("vv", "1")
+	params.Set("safeO", "0")
+	params.Set("s1", "relevance")
+	params.Set("s1d", "-")
+	params.Add("fty[]", "VIDEO")
+
+	return fmt.Sprintf("%s/2.0/search/solr-search/?%s", easynewsBaseURL, params.Encode())
+}
+
+func (c *Client) downloadNZBInternal(ctx context.Context, payload map[string]interface{}) ([]byte, error) {
+	hash, _ := payload["hash"].(string)
+	filename, _ := payload["filename"].(string)
+	ext, _ := payload["ext"].(string)
+	sig, _ := payload["sig"].(string)
+	title, _ := payload["title"].(string)
+
+	if hash == "" {
+		return nil, fmt.Errorf("missing hash in payload")
+	}
+
+	nzbEntries := buildNZBPayload([]easynewsItem{
+		{Hash: hash, Filename: filename, Ext: ext, Sig: sig},
+	}, title)
+
+	form := url.Values{}
+	for key, value := range nzbEntries {
+		form.Set(key, value)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", easynewsBaseURL+"/2.0/api/dl-nzb", strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, err
+	}
+
+	req.SetBasicAuth(c.username, c.password)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("User-Agent", c.effectiveGrabHeader())
+	resp, err := c.downloadClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("easynews NZB download request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("easynews NZB download failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	nzbData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read NZB data: %w", err)
+	}
+
+	nzbData = injectEasynewsSubject(nzbData, filename, ext)
+
+	return nzbData, nil
+}
+
+func (c *Client) checkAPILimit() error {
+	c.refreshUsageFromManager()
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.apiLimit > 0 && c.apiRemaining <= 0 {
+		return fmt.Errorf("API limit reached for %s", c.Name())
+	}
+	return nil
+}
+
+func (c *Client) checkDownloadLimit() error {
+	c.refreshUsageFromManager()
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.downloadLimit > 0 && c.downloadRemaining <= 0 {
+		return fmt.Errorf("download limit reached for %s", c.Name())
+	}
+	return nil
+}
+
+type easynewsSearchResponse struct {
+	Data     []interface{} `json:"data"`
+	Results  int           `json:"results"`
+	ThumbURL string        `json:"thumbURL"`
+}
+
+type easynewsResult struct {
+	Title           string
+	DownloadURL     string
+	GUID            string
+	PubDate         string
+	Size            int64
+	DurationSeconds float64
+}
+
+type easynewsItem struct {
+	Hash     string
+	Filename string
+	Ext      string
+	Sig      string
+	Size     int64
+	Subject  string
+	Poster   string
+	Posted   string
+	Duration interface{}
+}
+
+func (c *Client) filterAndMapResults(data easynewsSearchResponse, query, season, episode string, strictMode bool) []easynewsResult {
+	results := make([]easynewsResult, 0)
+
+	disallowedExts := map[string]bool{
+		".rar": true, ".zip": true, ".exe": true, ".jpg": true, ".png": true,
+	}
+	allowedVideoExts := map[string]bool{
+		".mkv": true, ".mp4": true, ".m4v": true, ".avi": true, ".ts": true,
+		".mov": true, ".wmv": true, ".mpg": true, ".mpeg": true, ".flv": true, ".webm": true,
+	}
+
+	for _, entry := range data.Data {
+		var item easynewsItem
+
+		if arr, ok := entry.([]interface{}); ok && len(arr) >= 12 {
+			if hash, ok := arr[0].(string); ok {
+				item.Hash = hash
+			}
+			if subject, ok := arr[6].(string); ok {
+				item.Subject = subject
+			}
+			if filename, ok := arr[10].(string); ok {
+				item.Filename = filename
+			}
+			if ext, ok := arr[11].(string); ok {
+				item.Ext = ext
+			}
+			if poster, ok := arr[7].(string); ok {
+				item.Poster = poster
+			}
+			if posted, ok := arr[8].(string); ok {
+				item.Posted = posted
+			}
+
+			if len(arr) > 12 {
+				if sizeVal, ok := arr[12].(float64); ok {
+					item.Size = int64(sizeVal)
+				} else if sizeVal, ok := arr[12].(int64); ok {
+					item.Size = sizeVal
+				} else if sizeVal, ok := arr[12].(int); ok {
+					item.Size = int64(sizeVal)
+				}
+			}
+			if len(arr) > 14 {
+				item.Duration = arr[14]
+			}
+		} else if obj, ok := entry.(map[string]interface{}); ok {
+
+			if hash, ok := obj["hash"].(string); ok {
+				item.Hash = hash
+			}
+			if subject, ok := obj["subject"].(string); ok {
+				item.Subject = subject
+			}
+			if fn, ok := obj["fn"].(string); ok {
+				item.Filename = fn
+			}
+			if ext, ok := obj["extension"].(string); ok {
+				item.Ext = ext
+			}
+			if size, ok := obj["size"].(float64); ok {
+				item.Size = int64(size)
+			}
+			if sig, ok := obj["sig"].(string); ok {
+				item.Sig = sig
+			}
+			if poster, ok := obj["poster"].(string); ok {
+				item.Poster = poster
+			}
+			if rt, ok := obj["runtime"].(float64); ok {
+				item.Duration = rt
+			}
+			if ts, ok := obj["timestamp"].(float64); ok {
+				item.Posted = time.Unix(int64(ts), 0).Format("2006-01-02 15:04:05")
+			}
+		}
+
+		if item.Hash == "" {
+			continue
+		}
+
+		extLower := strings.ToLower(item.Ext)
+		if !strings.HasPrefix(extLower, ".") {
+			extLower = "." + extLower
+		}
+		if disallowedExts[extLower] {
+			continue
+		}
+		if extLower != "" && !allowedVideoExts[extLower] {
+			continue
+		}
+
+		durationSeconds := parseDuration(item.Duration)
+		if durationSeconds != nil && *durationSeconds < 60 {
+			continue
+		}
+
+		title := item.Filename
+		if item.Ext != "" {
+			if !strings.HasPrefix(item.Ext, ".") {
+				title += "." + item.Ext
+			} else {
+				title += item.Ext
+			}
+		}
+		if title == "" {
+			title = item.Subject
+		}
+		if title == "" {
+			title = item.Hash
+		}
+
+		titleLower := strings.ToLower(title)
+		if strings.Contains(titleLower, "sample") {
+			continue
+		}
+
+		finalTitle := title
+		if finalTitle == "" {
+			finalTitle = item.Subject
+		}
+		if finalTitle == "" {
+			finalTitle = fmt.Sprintf("Easynews-%s", item.Hash[:min(8, len(item.Hash))])
+		}
+
+		payload := map[string]interface{}{
+			"hash":     item.Hash,
+			"filename": item.Filename,
+			"ext":      item.Ext,
+			"sig":      item.Sig,
+			"title":    finalTitle,
+		}
+		payloadToken := encodePayload(payload)
+		downloadURL := fmt.Sprintf("%s/easynews/nzb?payload=%s", c.downloadBase, url.QueryEscape(payloadToken))
+
+		pubDate := time.Now().Format(time.RFC1123Z)
+		if item.Posted != "" {
+			if t, err := time.Parse("2006-01-02 15:04:05", item.Posted); err == nil {
+				pubDate = t.Format(time.RFC1123Z)
+			}
+		}
+
+		var durSec float64
+		if durationSeconds != nil && *durationSeconds > 0 {
+			durSec = float64(*durationSeconds)
+		}
+
+		results = append(results, easynewsResult{
+			Title:           finalTitle,
+			DownloadURL:     downloadURL,
+			GUID:            fmt.Sprintf("easynews-%s", item.Hash),
+			PubDate:         pubDate,
+			Size:            item.Size,
+			DurationSeconds: durSec,
+		})
+	}
+
+	return results
+}
+
+func parseDuration(raw interface{}) *int64 {
+	if raw == nil {
+		return nil
+	}
+
+	switch v := raw.(type) {
+	case float64:
+		if v > 0 {
+			sec := int64(v)
+			return &sec
+		}
+	case int64:
+		if v > 0 {
+			return &v
+		}
+	case int:
+		if v > 0 {
+			sec := int64(v)
+			return &sec
+		}
+	case string:
+
+		if num, err := strconv.ParseInt(v, 10, 64); err == nil && num > 0 {
+			return &num
+		}
+
+		if strings.Contains(v, ":") {
+			parts := strings.Split(v, ":")
+			if len(parts) == 3 {
+				h, _ := strconv.Atoi(parts[0])
+				m, _ := strconv.Atoi(parts[1])
+				s, _ := strconv.Atoi(parts[2])
+				total := int64(h*3600 + m*60 + s)
+				if total > 0 {
+					return &total
+				}
+			} else if len(parts) == 2 {
+				m, _ := strconv.Atoi(parts[0])
+				s, _ := strconv.Atoi(parts[1])
+				total := int64(m*60 + s)
+				if total > 0 {
+					return &total
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func encodePayload(payload map[string]interface{}) string {
+	jsonData, _ := json.Marshal(payload)
+	encoded := base64.URLEncoding.EncodeToString(jsonData)
+	return strings.TrimRight(encoded, "=")
+}
+
+func decodePayload(token string) (map[string]interface{}, error) {
+
+	padLen := (4 - len(token)%4) % 4
+	token += strings.Repeat("=", padLen)
+
+	decoded, err := base64.URLEncoding.DecodeString(token)
+	if err != nil {
+		return nil, err
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal(decoded, &payload); err != nil {
+		return nil, err
+	}
+
+	return payload, nil
+}
+
+func buildNZBPayload(items []easynewsItem, name string) map[string]string {
+	result := map[string]string{
+		"autoNZB": "1",
+	}
+
+	for i, item := range items {
+		key := strconv.Itoa(i)
+		if item.Sig != "" {
+			key = fmt.Sprintf("%d&sig=%s", i, item.Sig)
+		}
+		value := buildValueToken(item)
+		result[key] = value
+	}
+
+	if name != "" {
+		result["nameZipQ0"] = name
+	}
+
+	return result
+}
+
+func buildValueToken(item easynewsItem) string {
+	fnB64 := base64.StdEncoding.EncodeToString([]byte(item.Filename))
+	fnB64 = strings.TrimRight(fnB64, "=")
+	extB64 := base64.StdEncoding.EncodeToString([]byte(item.Ext))
+	extB64 = strings.TrimRight(extB64, "=")
+	return fmt.Sprintf("%s|%s:%s", item.Hash, fnB64, extB64)
+}
+
+func injectEasynewsSubject(data []byte, filename, ext string) []byte {
+	if filename == "" && ext == "" {
+		return data
+	}
+	subject := filename
+	if ext != "" {
+		normalizedExt := ext
+		if !strings.HasPrefix(normalizedExt, ".") {
+			normalizedExt = "." + normalizedExt
+		}
+		if !strings.HasSuffix(strings.ToLower(subject), strings.ToLower(normalizedExt)) {
+			subject += normalizedExt
+		}
+	}
+	if subject == "" {
+		return data
+	}
+
+	parsed, err := nzb.Parse(bytes.NewReader(data))
+	if err != nil {
+		logger.Debug("injectEasynewsSubject: failed to parse NZB, returning raw data", "err", err)
+		return data
+	}
+
+	for i := range parsed.Files {
+		parsed.Files[i].Subject = subject
+	}
+
+	out, err := xml.MarshalIndent(parsed, "", "  ")
+	if err != nil {
+		logger.Debug("injectEasynewsSubject: failed to re-marshal NZB", "err", err)
+		return data
+	}
+	return append([]byte(xml.Header), out...)
+}

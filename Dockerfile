@@ -1,7 +1,13 @@
-FROM node:20-alpine
+ARG TARGETARCH
+
+FROM alpine:latest
+RUN apk add --no-cache ca-certificates tzdata
 WORKDIR /app
-COPY package*.json ./
-RUN npm install --omit=dev
-COPY src ./src
-EXPOSE 7700
-CMD ["node", "src/index.js"]
+
+ARG TARGETARCH
+# Copy the pre-built binary based on the target architecture
+COPY dist/linux_${TARGETARCH}/seedstream .
+
+EXPOSE 7000
+EXPOSE 119
+CMD ["./seedstream"]

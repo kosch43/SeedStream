@@ -1,181 +1,145 @@
 # SeedStream
 
-A **self-hosted Stremio addon** that streams from **private trackers** using your own **Prowlarr** + **qBittorrent** — no debrid required. Designed to run on a **single VPS**: it includes a **built-in file server**, so there's no separate nginx to configure. Works as a custom addon in **AIOStreams**, and in **Nuvio** / Stremio. Each person runs their own instance with their own credentials; nothing is shared or centrally hosted.
+[![Buy Me A Coffee](https://img.shields.io/badge/buy%20me%20a%20coffee-donate-yellow.svg)](https://buymeacoffee.com/gaisberg)
+[![Discord](https://img.shields.io/badge/discord-join-7289DA.svg?logo=discord&logoColor=white)](https://snzb.stream/discord)
 
-It separates **search** from **download**:
+SeedStream is a stream-based Usenet addon for Stremio clients and [AIOStreams](https://github.com/Viren070/AIOStreams). It searches your configured indexers, checks availability via [AvailNZB](https://check.snzb.stream), and streams releases on-the-fly from your Usenet providers. One binary provides the addon UI, stream management, NNTP proxy, and playback pipeline behind a single IP. No extra containers, just your Usenet provider(s) and indexer(s).
 
-1. **Search** — Stremio asks for streams → addon queries **Prowlarr** → returns releases.
-2. **Play** — you pick one → addon adds it to **qBittorrent** (sequential + first/last piece priority), waits for a small head buffer, then streams it from its **built-in file server** with **HTTP range** support.
 
-## Architecture (single VPS)
+## What it does
 
-```
-Stremio / Nuvio / AIOStreams
-        |  /stream      |  /play -> /files
-        v               v
-   SeedStream  --------------------> Prowlarr      (search your trackers)
-        |  (built-in file server,    qBittorrent   (download + seed; reuse if present)
-        |   serves qBit's dir
-        |   with HTTP ranges)
-        v
-   Your player streams + seeks
-```
+- **Stream-based addon** — Define global providers, indexers, and search requests once, then create one or more streams that decide which of those resources are used for a given manifest token.
+- **Works with Stremio and AIOStreams** — Use SeedStream directly as a Stremio-compatible addon, or plug it into [AIOStreams](https://github.com/Viren070/AIOStreams) and let AIOStreams do the final presentation and triage.
+- **NNTP proxy** — Standard NNTP (default port 119) for SABnzbd or NZBGet. Same provider pool as the addon.
+- **AvailNZB** — Community availability database. Bad releases are skipped; success/failure is reported on play so the shared DB stays current.
+- **Single binary** — Docker image or native Windows/Linux/macOS. No other containers required.
 
-Everything is one container talking to two others on the same box. The only thing
-that must be shared is read access to qBit's download directory, which the
-included compose handles for you.
 
-## Quick start (fresh VPS — turnkey)
+## Release types we don't support
 
-Brings up Prowlarr + qBittorrent + SeedStream together.
+Streaming is done on-the-fly from archive segments. That only works when the inner file is stored uncompressed:
 
-```bash
-git clone https://github.com/youruser/seedstream.git
-cd seedstream
-cp .env.example .env
+- **Compressed RAR** — RAR must be STORE (no compression). Compressed RAR releases will not play.
+- **Compressed 7z** — Same idea: only uncompressed (copy/store) 7z content is streamable.
 
-# 1. Start the stack
-docker compose -f docker-compose.full.yml up -d --build
 
-# 2. Configure the two services (one time):
-#    - Prowlarr  http://<vps>:9696  -> add your indexers, copy the API key
-#    - qBittorrent http://<vps>:8080 -> log in, set a permanent password
-#      (linuxserver qBit prints a temporary password: `docker logs seedstream-qbit`)
+## Run it
 
-# 3. Put the API key + qBit password in .env, plus ADDON_BASE_URL and ADDON_SECRET.
-#    Leave FILE_SERVER_BASE_URL blank (use the built-in server).
+**Docker (recommended):**
 
-# 4. Apply and verify
-docker compose -f docker-compose.full.yml up -d
-curl https://stream.yourdomain.com/<secret>/check
+```yaml
+services:
+  seedstream:
+    image: ghcr.io/gaisberg/seedstream:latest
+    container_name: seedstream
+    restart: unless-stopped
+    ports:
+      - "7000:7000"
+      - "119:119"
+    volumes:
+      - /path/to/config:/app/data
 ```
 
-`.env` is pre-pointed at the bundled services (`http://prowlarr:9696`,
-`http://qbittorrent:8080`, `QBIT_SAVE_PATH=/downloads/seedstream`), so you only
-fill in credentials + your public URL.
+Or run the binary from the [releases](https://github.com/Gaisberg/seedstream/releases) page (Windows, Linux, macOS). See `.env.example` for config via environment variables.
 
-## Quick start (you already run Prowlarr + qBittorrent)
+## Upgrade note
 
-```bash
-cp .env.example .env
-# Point PROWLARR_URL / QBIT_URL at your existing services.
-# Set QBIT_SAVE_PATH to where qBit saves, and SEEDSTREAM_DOWNLOADS to its parent
-# (mounted read-only so SeedStream can serve files). Leave FILE_SERVER_BASE_URL blank.
-docker compose up -d --build
-curl https://stream.yourdomain.com/<secret>/check
+When updating from older device-based versions:
+
+- Global configuration is kept.
+- Providers and indexers are kept.
+- Legacy device entries are intentionally reset and are **not** migrated to the new stream model.
+- After updating, recreate your streams in the UI.
+
+For Docker, keep your existing `/app/data` volume mounted so `config.json` and the rest of the persistent state survive the container update.
+
+**First use:**
+
+1. Open `http://localhost:7000`. Default login is `admin` / `admin`; you'll be asked to change the password.
+2. Go to **Settings → Network** and set your addon **Base URL** and **Port**.
+  - If using Tailscale, use the IP address of the machine running SeedStream. Example: `http://100.64.0.1:7000`
+  - If using a domain name, make sure it is reachable from the client or AIOStreams host. Example: `http://seedstream.example.com:7000` or `https://seedstream.example.com`
+3. Go to **Settings → Providers** and add at least one Usenet provider (host, port, username, password, connections).
+4. Go to **Settings → Indexers** and add at least one Newznab-compatible indexer (URL + API key).
+5. Go to **Settings → Search Requests** and create at least one movie and/or TV request.
+6. Go to **Streams** and create a stream.
+  - Choose which providers, indexers, and search requests belong to that stream.
+  - Configure the stream's **General** options such as indexer mode, search request mode, results mode, failover, and AvailNZB behavior.
+7. Save the stream and copy its manifest URL from the install action or stream list.
+8. Add that manifest URL to your Stremio client or [AIOStreams](https://github.com/Viren070/AIOStreams).
+
+### Force password reset on next startup
+
+If you need to force the admin account to land on the password-change screen after restart, set:
+
+```env
+ADMIN_FORCE_PASSWORD_RESET=true
 ```
 
-| Var | What |
-|-----|------|
-| `ADDON_BASE_URL` | Public HTTPS URL of this instance |
-| `ADDON_SECRET` | Optional secret path gating the whole addon (recommended) |
-| `PROWLARR_URL` / `PROWLARR_API_KEY` | Your Prowlarr |
-| `QBIT_URL` / `QBIT_USERNAME` / `QBIT_PASSWORD` | Your qBittorrent |
-| `QBIT_SAVE_PATH` | Where qBit saves; SeedStream serves files from here |
-| `FILE_SERVER_BASE_URL` | **Leave blank** to use the built-in server |
-| `SEEDSTREAM_DOWNLOADS` | (standalone compose) qBit download dir to mount read-only |
+After the password has been changed, remove or disable this env var.
+When it remains enabled, SeedStream will keep forcing the password-reset prompt on startup.
 
-## Verify your setup
 
-The startup log validates Prowlarr + qBit and reports the file server mode.
-You can also hit:
+## Stream model
 
-```
-https://stream.yourdomain.com/<secret>/check
-```
+SeedStream now separates global configuration from per-stream behavior:
 
-It returns the status of Prowlarr, qBittorrent, and the file server, so a bad
-credential or path shows up immediately. Fix anything that says `FAIL` first.
+- **Settings → Providers** stores all Usenet providers globally.
+- **Settings → Indexers** stores all supported indexers globally.
+- **Settings → Search Requests** stores reusable movie and TV search templates globally.
+- **Streams** chooses which providers, indexers, and search requests are active for a specific manifest token.
 
-## Install the addon
+Each stream also controls how its search pipeline behaves:
 
-In Stremio / Nuvio, or as a custom addon in **AIOStreams**, add:
+- **Indexers** — `Combine` or `Failover`
+- **Search requests** — `Combine` or `First hit`
+- **Results** — how the final stream list is returned
+- **Failover** — whether playback should walk fallback slots internally
+- **AvailNZB** — whether AvailNZB is allowed for that stream, in addition to the global setting
 
-```
-https://stream.yourdomain.com/<secret>/manifest.json
-```
+This makes it possible to run multiple different manifests from one SeedStream instance, each with different search behavior and provider/indexer selection.
 
-(Drop `/<secret>` if you left `ADDON_SECRET` blank.) AIOStreams only *consumes*
-the addon — all the work runs on your instance.
 
-## Reverse proxy
+## Using with AIOStreams
 
-Point your TLS reverse proxy (Caddy/nginx/Traefik) at the container's `:7700`
-and set `ADDON_BASE_URL` to the public URL. Players reject plain HTTP.
+[AIOStreams](https://github.com/Viren070/AIOStreams) is THE way to use SeedStream. It consolidates multiple Stremio addons into a single super-addon with advanced filtering, sorting, and formatting — all configured in one place.
 
-## Progressive playback — what you get
+**Setup:**
 
-Sequential download + the range-serving file server give **fast-start
-progressive playback**: it begins after a small buffer, and seeking *backward*
-into downloaded parts works. Seeking *forward* into a not-yet-downloaded region
-waits for that part to arrive. On a VPS with well-seeded content this is rarely
-felt — the file finishes in seconds-to-a-minute, after which seek-anywhere just
-works. (True seek-anywhere from byte zero needs a piece-prioritizing engine like
-TorrServer, which won't seed for your tracker ratio — so qBit-sequential is the
-right trade here.)
+1. In SeedStream, create or choose the stream you want AIOStreams to use.
+2. Copy that stream's manifest URL (for example `https://your-host:7000/<token>/manifest.json`).
+3. In AIOStreams, add the SeedStream preset and paste the manifest URL.
+4. **No Usenet service required in AIOStreams** — SeedStream handles all Usenet provider connections, NZB fetching, and streaming internally. Skip the AIOStreams Usenet service configuration entirely.
+5. Configure your filtering, sorting, and stream formatting rules in the AIOStreams UI. AIOStreams will aggregate SeedStream results alongside any other addons you use and apply your rules uniformly.
 
-## Speed features
+If you want an AIO-oriented stream, create a dedicated stream for it and configure that stream accordingly. Stream behavior is no longer driven by User-Agent detection.
 
-- **Torrent reuse / fast path** — if a release is already on the box and past the
-  buffer threshold, `/play` redirects **instantly**. Big win for repeat plays.
-- **Search caching** — identical Prowlarr queries are cached, which also reduces
-  load on your trackers.
-- **Keep-warm seeding** — torrents stay seeding (good for ratio / H&R), so
-  they're instantly available next time.
-- **Bounded disk cache** — already-downloaded torrents are your "instant replay"
-  cache, kept fast but capped by `CACHE_MAX_GB` / `CACHE_MAX_AGE_DAYS`, evicting
-  the least-recently-played first (like rclone's `vfs-cache-max-size`/`-age`).
-  Eviction is **ratio-safe**: a torrent is never deleted until it has met
-  `MIN_SEED_HOURS` of seed time, so the cache can't cause a hit-and-run penalty.
-- **Per-box concurrency cap** so simultaneous streams don't pin the box.
 
-## Scaling / external file server
+## AvailNZB
 
-The built-in server is fine for personal and small use. If you expect heavy or
-many concurrent streams, set `FILE_SERVER_BASE_URL` to put **nginx** in front of
-the same directory (see `nginx.example.conf`). The play redirect then targets
-nginx instead of the built-in server.
+[AvailNZB](https://check.snzb.stream) is a community availability database. SeedStream doesn't download or validate NZBs before showing results — it builds an ordered play list from indexer search plus AvailNZB (skipping releases already reported bad), then tries on play. Success/failure is reported so the shared DB stays current.
 
-## Media matching
+AvailNZB is controlled at two levels:
 
-Search results are parsed and filtered so you get the right release, ranked by quality — not just a raw seeder-sorted list. For each release SeedStream:
+- **Global** in **Settings → Advanced**
+- **Per stream** in **Streams → Add/Change → General**
 
-- **Parses** the release name into resolution, source (REMUX/BluRay/WEB-DL/…), video codec, HDR/Dolby Vision, audio (Atmos/DTS-HD/…), language, release group, and season/episode.
-- **Verifies the match** against the request: movies are checked by title **and year** (so *The Mummy* 1999 won't return the 2017 film), and episodes are checked by season + episode — including **season packs** and episode ranges that cover the requested episode. Wrong years, wrong seasons, and wrong episodes are dropped.
-- **Ranks by quality**, then health: resolution first, then source/HDR, then seeders. CAM/TS/screener rips are dropped by default.
-- **Dedupes** identical releases returned by multiple indexers.
-- **Picks the right file**: when you pick a season pack, the requested episode is served — not the largest file in the pack.
-- **Labels cleanly**: each stream shows resolution + HDR as the badge and source • codec • audio • group on the detail line, instead of the raw scene name only.
+AvailNZB is only used when both the global setting and the stream setting allow it.
 
-Tune it with `MIN_SEEDERS`, `RESOLUTIONS` (allowlist), `PREFERRED_RESOLUTION` (e.g. cap to `1080p`), and `EXCLUDE_CAM` — see `.env.example`.
 
-**ID matching (automatic).** Many indexers attach an IMDb ID to each result. SeedStream uses the IMDb ID Stremio already provides to (a) drop results whose ID doesn't match and confirm those that do, and (b) issue a best-effort ID-based search alongside the text search for indexers that support it. No configuration needed.
+## Troubleshooting
 
-**TMDB (optional) — better foreign/localized matching.** Set `TMDB_API_KEY` to also search and match on a title's alternative names. Without it, a release named under its original-language title (e.g. *Parasite* released as *Gisaengchung*) gets dropped on the title check; with it, SeedStream searches the original title too and accepts releases matching any known AKA. Falls back to Cinemeta when the key is absent or a lookup fails.
+If you're stuck, please either open a [GitHub issue](https://github.com/Gaisberg/seedstream/issues) or report it in the [Discord](https://snzb.stream/discord) `#help` channel (they sync via [GitThread](https://gitthreadsync.snzb.stream/)). Include downloaded logs when relevant, and include the copied bad match report from **NZB History** when the issue is about a wrong or poor release match. Sensitive data should be automatically redacted but please double-check before posting.
 
-**TVDB + AniList (optional) — anime and TV.** Anime release groups number episodes by *absolute* count (e.g. `Attack on Titan - 26`), which doesn't match Stremio's season/episode. Set `TVDB_API_KEY` and SeedStream maps the requested season/episode to its absolute number (the same approach Sonarr uses) — so anime episodes get **verified** instead of shown as "unverified", and season packs serve the correct absolute episode. TVDB also adds series title aliases, which helps regular TV matching too. Set `ANILIST_API_KEY` to also pull anime title synonyms (romaji/native). Both are optional and degrade gracefully.
 
-Remaining anime caveat: when no episode-number source matches (e.g. a release with no parseable number, or a show whose IMDb and TVDB season numbering disagree), the release is still shown as **(unverified)** rather than dropped. The numbering schemes across IMDb/TVDB/release groups aren't perfectly consistent, so this improves anime matching substantially but isn't bulletproof.
+## Support
 
-## Notes & limitations
+If SeedStream is useful to you, you can support development here:
 
-- One video file is served per stream — the largest for movies, or the requested
-  episode for season packs (see Media matching above).
-- `QBIT_SAVE_PATH` must be an absolute path the SeedStream container can read.
-- **qBit must be able to reach the download URL.** Private trackers work as long as
-  qBit can fetch the magnet/.torrent Prowlarr returns. If Prowlarr's download URLs
-  point at its own base URL (e.g. `localhost:9696`), a qBit running in a separate
-  container can't reach that — set Prowlarr's URL base to something both containers
-  can resolve (the service name, or the host's LAN IP).
-- **Respect your trackers' rules.** This downloads to *your* box and seeds there
-  like any normal client; it doesn't bypass ratio, H&R, or freeleech rules.
+**[Buy Me A Coffee](https://buymeacoffee.com/gaisberg)**
 
-## Roadmap ideas
 
-- Per-cour anime numbering (AniDB-style) for shows where IMDb/TVDB seasons diverge
-- Optional debrid fast-path (check cache, fall back to qBit)
-- Optional debrid fast-path (check cache, fall back to qBit)
+## Credits
 
-## License
-
-MIT
+- [javi11](https://github.com/javi11) for Go-based RAR and 7z streaming ([altmount](https://github.com/javi11/altmount)).
+- [Augment](https://www.augmentcode.com/) for helping with the project.

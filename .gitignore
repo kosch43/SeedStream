@@ -1,4 +1,13 @@
-node_modules/
+seedstream.exe
+seedstream.exe~
 .env
-.env.test
+.git
+dist/
+config.json
+pkg/server/web/static
+state.json
 *.log
+.augment
+seedstream.db*
+releasepipeline/seedstream
+cmd/seedstream/seedstream
