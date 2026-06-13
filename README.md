@@ -1,145 +1,124 @@
 # SeedStream
 
-[![Buy Me A Coffee](https://img.shields.io/badge/buy%20me%20a%20coffee-donate-yellow.svg)](https://buymeacoffee.com/gaisberg)
-[![Discord](https://img.shields.io/badge/discord-join-7289DA.svg?logo=discord&logoColor=white)](https://snzb.stream/discord)
+SeedStream is a self-hosted streaming addon for [Stremio](https://www.stremio.com/) and [AIOStreams](https://github.com/Viren070/AIOStreams). It searches your own indexers and streams the results — **both Usenet (NZB) and torrents** — from one small service you run on your own server.
 
-SeedStream is a stream-based Usenet addon for Stremio clients and [AIOStreams](https://github.com/Viren070/AIOStreams). It searches your configured indexers, checks availability via [AvailNZB](https://check.snzb.stream), and streams releases on-the-fly from your Usenet providers. One binary provides the addon UI, stream management, NNTP proxy, and playback pipeline behind a single IP. No extra containers, just your Usenet provider(s) and indexer(s).
+- **Usenet** streams on-the-fly directly from your providers (no full download needed).
+- **Torrents** are handed to a qBittorrent on your seedbox, which downloads sequentially for instant playback and **keeps seeding** so your private-tracker ratio stays healthy. SeedStream never seeds or discards data itself.
 
+One binary provides the web UI, stream management, NNTP proxy, and playback pipeline.
 
-## What it does
+---
 
-- **Stream-based addon** — Define global providers, indexers, and search requests once, then create one or more streams that decide which of those resources are used for a given manifest token.
-- **Works with Stremio and AIOStreams** — Use SeedStream directly as a Stremio-compatible addon, or plug it into [AIOStreams](https://github.com/Viren070/AIOStreams) and let AIOStreams do the final presentation and triage.
-- **NNTP proxy** — Standard NNTP (default port 119) for SABnzbd or NZBGet. Same provider pool as the addon.
-- **AvailNZB** — Community availability database. Bad releases are skipped; success/failure is reported on play so the shared DB stays current.
-- **Single binary** — Docker image or native Windows/Linux/macOS. No other containers required.
+## Install (Docker — easiest)
 
+You need a server with **Docker** and **Docker Compose**. Then:
 
-## Release types we don't support
-
-Streaming is done on-the-fly from archive segments. That only works when the inner file is stored uncompressed:
-
-- **Compressed RAR** — RAR must be STORE (no compression). Compressed RAR releases will not play.
-- **Compressed 7z** — Same idea: only uncompressed (copy/store) 7z content is streamable.
-
-
-## Run it
-
-**Docker (recommended):**
-
-```yaml
-services:
-  seedstream:
-    image: ghcr.io/gaisberg/seedstream:latest
-    container_name: seedstream
-    restart: unless-stopped
-    ports:
-      - "7000:7000"
-      - "119:119"
-    volumes:
-      - /path/to/config:/app/data
+```bash
+git clone https://github.com/kosch43/SeedStream.git
+cd SeedStream
+docker compose up -d --build
 ```
 
-Or run the binary from the [releases](https://github.com/Gaisberg/seedstream/releases) page (Windows, Linux, macOS). See `.env.example` for config via environment variables.
+That's it. The image builds from source on first run (a few minutes), then starts automatically and restarts on reboot.
 
-## Upgrade note
+Open **`http://<your-server-ip>:7000`** in a browser. Default login is **`admin` / `admin`** — you'll be asked to change the password on first sign-in.
 
-When updating from older device-based versions:
+To update later:
 
-- Global configuration is kept.
-- Providers and indexers are kept.
-- Legacy device entries are intentionally reset and are **not** migrated to the new stream model.
-- After updating, recreate your streams in the UI.
+```bash
+git pull
+docker compose up -d --build
+```
 
-For Docker, keep your existing `/app/data` volume mounted so `config.json` and the rest of the persistent state survive the container update.
+Your configuration and login live in the `./data` folder (mounted into the container), so they survive updates.
 
-**First use:**
+> **Streaming torrents?** SeedStream serves torrent files straight from the folder your seedbox qBittorrent downloads to, so it needs to read that folder. Uncomment and edit the downloads volume in `docker-compose.yml` to mount it (read-only) at the **same path** you'll enter under Settings → Torrent Clients.
 
-1. Open `http://localhost:7000`. Default login is `admin` / `admin`; you'll be asked to change the password.
-2. Go to **Settings → Network** and set your addon **Base URL** and **Port**.
-  - If using Tailscale, use the IP address of the machine running SeedStream. Example: `http://100.64.0.1:7000`
-  - If using a domain name, make sure it is reachable from the client or AIOStreams host. Example: `http://seedstream.example.com:7000` or `https://seedstream.example.com`
-3. Go to **Settings → Providers** and add at least one Usenet provider (host, port, username, password, connections).
-4. Go to **Settings → Indexers** and add at least one Newznab-compatible indexer (URL + API key).
-5. Go to **Settings → Search Requests** and create at least one movie and/or TV request.
-6. Go to **Streams** and create a stream.
-  - Choose which providers, indexers, and search requests belong to that stream.
-  - Configure the stream's **General** options such as indexer mode, search request mode, results mode, failover, and AvailNZB behavior.
-7. Save the stream and copy its manifest URL from the install action or stream list.
-8. Add that manifest URL to your Stremio client or [AIOStreams](https://github.com/Viren070/AIOStreams).
+### Running the binary instead of Docker
 
-### Force password reset on next startup
+Prefer no Docker? Build it directly (needs Go 1.25+ and Node 20+):
 
-If you need to force the admin account to land on the password-change screen after restart, set:
+```bash
+cd frontend && npm ci && npm run build && cd ..
+mkdir -p pkg/server/web/static && cp -r frontend/dist/* pkg/server/web/static/
+go build -o seedstream ./cmd/seedstream/
+./seedstream
+```
+
+Configuration can also be supplied via environment variables — see `.env.example`.
+
+---
+
+## First-time setup
+
+After logging in:
+
+1. **Settings → Network** — set your addon **Base URL** and **Port** (how clients reach this server). Examples: `http://192.168.1.50:7000`, `http://seedstream.example.com:7000`, or `https://seedstream.example.com` behind a reverse proxy.
+2. **Settings → Indexers** — add your indexers (URL + API key). A Prowlarr/Jackett **Torznab** feed gives you torrents; a **Newznab** feed gives you Usenet. SeedStream auto-detects which is which.
+3. **For Usenet:** **Settings → Providers** — add at least one Usenet provider (host, port, login, connections).
+4. **For torrents:** **Settings → Torrent Clients** — add your seedbox qBittorrent (WebUI URL, login, category, and the save path SeedStream can read).
+5. **Settings → Search** — create at least one movie and/or TV search request.
+6. **Streams** — create a stream, choose which indexers/providers/clients it uses, then copy its manifest URL.
+7. Add that manifest URL to your **Stremio** client or **AIOStreams**.
+
+### Force a password reset on next startup
 
 ```env
 ADMIN_FORCE_PASSWORD_RESET=true
 ```
 
-After the password has been changed, remove or disable this env var.
-When it remains enabled, SeedStream will keep forcing the password-reset prompt on startup.
+Set this, restart, change the password, then remove it (otherwise it keeps prompting on every startup).
 
+---
+
+## How streaming works
+
+**Torrents** download to your seedbox qBittorrent with sequential + first/last-piece priority, so the start of the file is ready fast. SeedStream streams that file with HTTP range support while qBittorrent keeps seeding it. This is what protects your ratio on private trackers.
+
+**Usenet** streams on-the-fly from archive segments. That only works when the inner file is stored **uncompressed**:
+
+- **Compressed RAR** won't play — RAR must be STORE (no compression).
+- **Compressed 7z** won't play — only uncompressed (copy/store) content is streamable.
+
+---
 
 ## Stream model
 
-SeedStream now separates global configuration from per-stream behavior:
+SeedStream separates global configuration from per-stream behavior:
 
-- **Settings → Providers** stores all Usenet providers globally.
-- **Settings → Indexers** stores all supported indexers globally.
-- **Settings → Search Requests** stores reusable movie and TV search templates globally.
-- **Streams** chooses which providers, indexers, and search requests are active for a specific manifest token.
+- **Settings → Providers / Indexers / Torrent Clients / Search** store resources globally.
+- **Streams** choose which of those resources are active for a specific manifest token.
 
-Each stream also controls how its search pipeline behaves:
+Each stream also controls its search pipeline: indexer mode (`Combine` / `Failover`), search request mode (`Combine` / `First hit`), results mode, internal failover, and AvailNZB behavior. This lets one SeedStream instance serve multiple manifests with different behavior.
 
-- **Indexers** — `Combine` or `Failover`
-- **Search requests** — `Combine` or `First hit`
-- **Results** — how the final stream list is returned
-- **Failover** — whether playback should walk fallback slots internally
-- **AvailNZB** — whether AvailNZB is allowed for that stream, in addition to the global setting
-
-This makes it possible to run multiple different manifests from one SeedStream instance, each with different search behavior and provider/indexer selection.
-
+---
 
 ## Using with AIOStreams
 
-[AIOStreams](https://github.com/Viren070/AIOStreams) is THE way to use SeedStream. It consolidates multiple Stremio addons into a single super-addon with advanced filtering, sorting, and formatting — all configured in one place.
-
-**Setup:**
+[AIOStreams](https://github.com/Viren070/AIOStreams) consolidates multiple Stremio addons into one super-addon with advanced filtering, sorting, and formatting.
 
 1. In SeedStream, create or choose the stream you want AIOStreams to use.
-2. Copy that stream's manifest URL (for example `https://your-host:7000/<token>/manifest.json`).
+2. Copy that stream's manifest URL (e.g. `https://your-host:7000/<token>/manifest.json`).
 3. In AIOStreams, add the SeedStream preset and paste the manifest URL.
-4. **No Usenet service required in AIOStreams** — SeedStream handles all Usenet provider connections, NZB fetching, and streaming internally. Skip the AIOStreams Usenet service configuration entirely.
-5. Configure your filtering, sorting, and stream formatting rules in the AIOStreams UI. AIOStreams will aggregate SeedStream results alongside any other addons you use and apply your rules uniformly.
+4. No Usenet service needed in AIOStreams — SeedStream handles providers, NZB fetching, and streaming internally.
+5. Configure filtering/sorting/formatting in the AIOStreams UI.
 
-If you want an AIO-oriented stream, create a dedicated stream for it and configure that stream accordingly. Stream behavior is no longer driven by User-Agent detection.
-
+---
 
 ## AvailNZB
 
-[AvailNZB](https://check.snzb.stream) is a community availability database. SeedStream doesn't download or validate NZBs before showing results — it builds an ordered play list from indexer search plus AvailNZB (skipping releases already reported bad), then tries on play. Success/failure is reported so the shared DB stays current.
+[AvailNZB](https://check.snzb.stream) is a community Usenet-availability database. SeedStream builds an ordered play list from indexer search plus AvailNZB (skipping releases reported bad), then tries on play and reports success/failure so the shared DB stays current. It's controlled globally in **Settings → Advanced** and per stream in **Streams → General**, and only used when both allow it.
 
-AvailNZB is controlled at two levels:
-
-- **Global** in **Settings → Advanced**
-- **Per stream** in **Streams → Add/Change → General**
-
-AvailNZB is only used when both the global setting and the stream setting allow it.
-
+---
 
 ## Troubleshooting
 
-If you're stuck, please either open a [GitHub issue](https://github.com/Gaisberg/seedstream/issues) or report it in the [Discord](https://snzb.stream/discord) `#help` channel (they sync via [GitThread](https://gitthreadsync.snzb.stream/)). Include downloaded logs when relevant, and include the copied bad match report from **NZB History** when the issue is about a wrong or poor release match. Sensitive data should be automatically redacted but please double-check before posting.
+Open a [GitHub issue](https://github.com/kosch43/SeedStream/issues). Include downloaded logs when relevant, and the copied bad-match report from **NZB History** for wrong/poor release matches. Sensitive data is auto-redacted — double-check before posting.
 
-
-## Support
-
-If SeedStream is useful to you, you can support development here:
-
-**[Buy Me A Coffee](https://buymeacoffee.com/gaisberg)**
-
+---
 
 ## Credits
 
+SeedStream is a fork of **[StreamNZB](https://github.com/Gaisberg/streamnzb)** by Gaisberg (GPL-3.0), extended with torrent streaming. Licensed under GPL-3.0 — see [LICENSE](LICENSE).
+
 - [javi11](https://github.com/javi11) for Go-based RAR and 7z streaming ([altmount](https://github.com/javi11/altmount)).
-- [Augment](https://www.augmentcode.com/) for helping with the project.

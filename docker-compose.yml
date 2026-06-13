@@ -1,0 +1,27 @@
+# SeedStream — self-hosted, builds from source. No prebuilt image needed.
+#
+#   docker compose up -d --build
+#
+# Then open http://<your-server-ip>:7000  (default login admin / admin).
+services:
+  seedstream:
+    build:
+      context: .
+      dockerfile: Dockerfile.source
+    image: seedstream:local
+    container_name: seedstream
+    restart: unless-stopped
+    environment:
+      - TZ=Etc/UTC
+    ports:
+      - "7000:7000"   # addon UI + Stremio / AIOStreams manifest
+      - "119:119"     # NNTP proxy for SABnzbd / NZBGet (optional; remove if unused)
+    volumes:
+      # Persists config.json, login, and state across container updates. Keep it.
+      - ./data:/app/data
+
+      # TORRENTS ONLY: SeedStream serves torrent files straight from the path your
+      # seedbox qBittorrent downloads to, so it must be able to read that path.
+      # Mount it read-only at the SAME path you enter in Settings -> Torrent Clients.
+      # Example (uncomment and edit):
+      # - /mnt/seedbox/downloads:/mnt/seedbox/downloads:ro

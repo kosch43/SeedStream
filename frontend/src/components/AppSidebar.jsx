@@ -1,6 +1,6 @@
 import {
   LayoutDashboard, Settings, LogOut,
-  Sun, Moon, Monitor, Zap, FileText, Coffee, User, MoreVertical, History, ChartColumn, AlertTriangle, PlayCircle
+  Sun, Moon, Monitor, Zap, FileText, User, MoreVertical, History, ChartColumn, AlertTriangle, PlayCircle
 } from "lucide-react"
 import {
   Sidebar,
@@ -133,17 +133,6 @@ export function AppSidebar({
       </SidebarContent>
 
       <SidebarFooter>
-        <SidebarMenu>
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              tooltip="Buy me a coffee"
-              onClick={() => window.open('https://buymeacoffee.com/gaisberg', '_blank')}
-            >
-              <Coffee className="size-4" />
-              <span>Buy me a coffee</span>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        </SidebarMenu>
         {currentUser && currentUser !== 'legacy' && (
           <div className="mt-2 pt-2 border-t border-sidebar-border">
             <DropdownMenu>
