@@ -1,10 +1,12 @@
 'use strict';
 const express = require('express');
 const axios = require('axios');
+const path = require('path');
 const fs = require('fs');
 const { cfg, validate } = require('./config');
 const prowlarr = require('./prowlarr');
 const qbit = require('./qbit');
+const sabnzbd = require('./sabnzbd');
 const matcher = require('./matcher');
 const tmdb = require('./tmdb');
 const tvdb = require('./tvdb');
@@ -32,9 +34,9 @@ app.use((req, res, next) => {
 
 const manifest = {
   id: 'community.seedstream',
-  version: '0.8.0',
+  version: '0.9.0',
   name: 'SeedStream',
-  description: 'Private-tracker streaming via your own Prowlarr + qBittorrent. Built-in file server, sequential progressive playback, torrent reuse. Runs on a single VPS.',
+  description: 'Private-tracker torrents + Usenet NZBs via Prowlarr, qBittorrent & SABnzbd. Sequential download, built-in file server. AIOStreams & Nuvio compatible.',
   resources: ['stream'],
   types: ['movie', 'series'],
   catalogs: [],
@@ -43,13 +45,6 @@ const manifest = {
 };
 
 function secretSeg() { return cfg.addonSecret ? `/${cfg.addonSecret}` : ''; }
-
-function humanSize(b) {
-  if (!b) return '?';
-  const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0, n = b;
-  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
-  return `${n.toFixed(1)} ${u[i]}`;
-}
 
 async function metaInfo(type, imdbId) {
   try {
@@ -73,10 +68,6 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     const season = seasonStr != null ? parseInt(seasonStr, 10) : null;
     const episode = episodeStr != null ? parseInt(episodeStr, 10) : null;
 
-    // Metadata: Cinemeta (always, free) enriched with optional providers.
-    //  TMDB    -> alternative titles (AKAs) for foreign/localized releases
-    //  TVDB    -> absolute-episode mapping for anime + series aliases
-    //  AniList -> anime title synonyms (romaji/native)
     const cm = await metaInfo(type, imdbId);
     const tm = tmdb.enabled() ? await tmdb.lookup(type, imdbId) : null;
 
@@ -84,14 +75,11 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     if (!primaryName) return res.json({ streams: [] });
     const year = (tm && tm.year) || (cm && cm.year) || null;
 
-    // TVDB (series only): absolute episode + aliases. tvdb_id from TMDB is a free hint.
     const tv = (type === 'series')
       ? await tvdb.lookup(type, imdbId, tm && tm.tvdbId, season, episode)
       : null;
     const absoluteEpisode = tv ? tv.absoluteEpisode : null;
 
-    // AniList (series only): merge synonyms only if they actually correspond to this
-    // title (guards against a fuzzy match to a different anime for non-anime shows).
     let aniTitles = [];
     let aniRomaji = null;
     if (type === 'series') {
@@ -102,32 +90,46 @@ app.get('/stream/:type/:id.json', async (req, res) => {
       }
     }
 
-    // Titles the matcher will accept (all known names), deduped.
     const matchTitles = uniq([
       ...(tm ? tm.titles : []),
       ...(tv ? tv.titles : []),
       ...aniTitles,
       cm && cm.name,
     ].filter(Boolean));
-    // Titles to actually search with: primary + original-language + romaji (bounded).
+
     const searchTitles = uniq([primaryName, tm && tm.originalTitle, aniRomaji].filter(Boolean)).slice(0, 3);
 
-    // Build the query set (text + best-effort ID + absolute for anime), parallel, merge.
-    const queries = [];
+    // Build torrent query set.
+    const torrentQueries = [];
+    // Build NZB query set (same structure, different indexers).
+    const nzbQueries = [];
+
     if (type === 'series' && season != null && episode != null) {
       const ss = String(season).padStart(2, '0');
       const ee = String(episode).padStart(2, '0');
-      for (const t of searchTitles) queries.push(prowlarr.search(`${t} S${ss}E${ee}`, type));
-      queries.push(prowlarr.search(`${searchTitles[0]} S${ss}`, type)); // season pack
-      queries.push(prowlarr.searchById(imdbId, type, season, episode));
+      for (const t of searchTitles) {
+        torrentQueries.push(prowlarr.search(`${t} S${ss}E${ee}`, type));
+        nzbQueries.push(prowlarr.searchNzb(`${t} S${ss}E${ee}`, type));
+      }
+      torrentQueries.push(prowlarr.search(`${searchTitles[0]} S${ss}`, type)); // season pack
+      nzbQueries.push(prowlarr.searchNzb(`${searchTitles[0]} S${ss}`, type));
+      torrentQueries.push(prowlarr.searchById(imdbId, type, season, episode));
+      nzbQueries.push(prowlarr.searchNzbById(imdbId, type, season, episode));
       if (absoluteEpisode != null) {
-        queries.push(prowlarr.search(`${searchTitles[0]} ${absoluteEpisode}`, type)); // anime absolute
+        torrentQueries.push(prowlarr.search(`${searchTitles[0]} ${absoluteEpisode}`, type));
+        nzbQueries.push(prowlarr.searchNzb(`${searchTitles[0]} ${absoluteEpisode}`, type));
       }
     } else {
-      for (const t of searchTitles) queries.push(prowlarr.search(year ? `${t} ${year}` : t, type));
-      queries.push(prowlarr.searchById(imdbId, type));
+      for (const t of searchTitles) {
+        torrentQueries.push(prowlarr.search(year ? `${t} ${year}` : t, type));
+        nzbQueries.push(prowlarr.searchNzb(year ? `${t} ${year}` : t, type));
+      }
+      torrentQueries.push(prowlarr.searchById(imdbId, type));
+      nzbQueries.push(prowlarr.searchNzbById(imdbId, type));
     }
-    const releases = (await Promise.all(queries)).flat();
+
+    const allResults = await Promise.all([...torrentQueries, ...nzbQueries]);
+    const releases = allResults.flat();
 
     const request = { type, titles: matchTitles, year, season, episode, imdbId, absoluteEpisode };
     const ranked = matcher.rankAndFilter(releases, request, {
@@ -141,8 +143,15 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     const streams = ranked.map((item) => {
       const r = item.raw;
       const payload = Buffer.from(JSON.stringify({
-        magnet: r.magnet, downloadUrl: r.downloadUrl, infoHash: r.infoHash,
-        type, season, episode, abs: absoluteEpisode,
+        magnet: r.magnet,
+        downloadUrl: r.downloadUrl,
+        infoHash: r.infoHash,
+        sourceType: r.sourceType || 'torrent',
+        title: r.title,
+        type,
+        season,
+        episode,
+        abs: absoluteEpisode,
       })).toString('base64url');
       const { name, title } = matcher.buildLabel(item);
       return {
@@ -165,10 +174,8 @@ function uniq(arr) {
   return out;
 }
 
-// True if `name` shares most of its significant tokens with any candidate title.
-// Used to confirm an AniList fuzzy match really corresponds to the requested show.
 function titleOverlap(name, candidates) {
-  const norm = s => (s || '').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
+  const norm = s => (s || '').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '')
     .replace(/[^a-z0-9]+/g, ' ').trim();
   const tok = norm(name).split(' ').filter(t => t.length > 1);
   if (!tok.length) return false;
@@ -179,13 +186,11 @@ function titleOverlap(name, candidates) {
   });
 }
 
-// ---- Play / redirect (with reuse fast-path) ----
-app.get('/play/:payload', async (req, res) => {
+// ---- Play — torrent path ----
+async function handleTorrentPlay(req, res, ref) {
   const boxKey = cfg.qbit.url;
   let acquired = false;
   try {
-    const ref = JSON.parse(Buffer.from(req.params.payload, 'base64url').toString());
-
     const existing = await qbit.findExisting(ref.infoHash);
     if (existing) {
       const files = await qbit.getFiles(existing.hash);
@@ -194,7 +199,7 @@ app.get('/play/:payload', async (req, res) => {
         const done = (vid.progress || 0) * (vid.size || 0);
         if (done >= cfg.bufferMb * 1024 * 1024 || vid.progress >= 0.999) {
           cacheManager.recordPlay(existing.hash);
-          return res.redirect(302, fileUrl(vid.name));
+          return res.redirect(302, torrentFileUrl(vid.name));
         }
       }
     }
@@ -210,38 +215,88 @@ app.get('/play/:payload', async (req, res) => {
     for (let i = 0; i < 20; i++) {
       files = await qbit.getFiles(hash);
       if (files.length) break;
-      await new Promise(r => setTimeout(r, 750));
+      await sleep(750);
     }
     const vid = matcher.pickFile(files, ref);
     if (!vid) return res.status(404).send('no video file in torrent');
 
     const ready = await qbit.waitForBuffer(hash, vid._idx);
-    if (!ready) {
-      // Buffer didn't fill in time. Don't redirect to an underfilled file —
-      // tell the player to retry; by then more has downloaded and the reuse
-      // fast-path above will serve it immediately.
-      return res.status(504).send('still buffering, try again in a moment');
-    }
+    if (!ready) return res.status(504).send('still buffering, try again in a moment');
+
     cacheManager.recordPlay(hash);
-    return res.redirect(302, fileUrl(vid.name));
+    return res.redirect(302, torrentFileUrl(vid.name));
   } catch (e) {
-    console.error('play error:', e.message);
+    console.error('torrent play error:', e.message);
     return res.status(500).send('play error: ' + e.message);
   } finally {
     if (acquired) guard.release(boxKey);
   }
+}
+
+// ---- Play — NZB path ----
+async function handleNzbPlay(req, res, ref) {
+  if (!sabnzbd.enabled()) {
+    return res.status(503).send('SABnzbd not configured (set SABNZBD_URL + SABNZBD_API_KEY)');
+  }
+  if (!ref.downloadUrl) {
+    return res.status(400).send('NZB result has no downloadUrl');
+  }
+  try {
+    // Check history for an already-completed download we can reuse.
+    const existing = await sabnzbd.findCompleted(ref.title || '').catch(() => null);
+    if (existing && existing.storage) {
+      const vid = sabnzbd.findVideoFile(existing.storage, cfg.videoExts);
+      if (vid) return res.redirect(302, nzbFileUrl(vid.path));
+    }
+
+    // Queue the NZB in SABnzbd.
+    const nzoId = await sabnzbd.addNzb(ref.downloadUrl, ref.title);
+
+    // Wait for SABnzbd to finish downloading + repairing.
+    const storageDir = await sabnzbd.waitForComplete(nzoId, cfg.nzb.timeoutSec * 1000);
+    if (!storageDir) {
+      return res.status(504).send('NZB still downloading — try again in a moment');
+    }
+
+    const vid = sabnzbd.findVideoFile(storageDir, cfg.videoExts);
+    if (!vid) return res.status(404).send('no video file in NZB download');
+
+    return res.redirect(302, nzbFileUrl(vid.path));
+  } catch (e) {
+    console.error('nzb play error:', e.message);
+    return res.status(500).send('nzb play error: ' + e.message);
+  }
+}
+
+// ---- Play dispatcher ----
+app.get('/play/:payload', async (req, res) => {
+  let ref;
+  try {
+    ref = JSON.parse(Buffer.from(req.params.payload, 'base64url').toString());
+  } catch {
+    return res.status(400).send('bad payload');
+  }
+  if (ref.sourceType === 'nzb') return handleNzbPlay(req, res, ref);
+  return handleTorrentPlay(req, res, ref);
 });
 
-// Build the playback URL: external file server if configured, else our own.
-function fileUrl(name) {
+// ---- File URLs ----
+function torrentFileUrl(name) {
   const encoded = name.split('/').map(encodeURIComponent).join('/');
   if (cfg.fileServerBaseUrl) return `${cfg.fileServerBaseUrl}/${encoded}`;
   return `${cfg.addonBaseUrl}${secretSeg()}/files/${encoded}`;
 }
 
-// ---- Built-in file server (single-VPS default) ----
-// Serves files from QBIT_SAVE_PATH with HTTP range support. res.sendFile handles
-// Range headers + Accept-Ranges, and the `root` option blocks path traversal.
+function nzbFileUrl(absPath) {
+  const savePath = cfg.sabnzbd.savePath;
+  const rel = (savePath && absPath.startsWith(savePath))
+    ? absPath.slice(savePath.length).replace(/^\//, '')
+    : path.basename(absPath);
+  const encoded = rel.split('/').map(encodeURIComponent).join('/');
+  return `${cfg.addonBaseUrl}${secretSeg()}/nzb-files/${encoded}`;
+}
+
+// ---- Built-in file server: torrents ----
 app.get('/files/*', (req, res) => {
   if (cfg.fileServerBaseUrl) return res.status(404).send('external file server configured');
   let rel;
@@ -258,19 +313,50 @@ app.get('/files/*', (req, res) => {
   });
 });
 
+// ---- Built-in file server: NZB downloads ----
+app.get('/nzb-files/*', (req, res) => {
+  if (!cfg.sabnzbd.savePath) return res.status(503).send('SABNZBD_COMPLETE_PATH not configured');
+  let rel;
+  try { rel = decodeURIComponent(req.params[0] || ''); }
+  catch { return res.status(400).end(); }
+  if (!rel || rel.includes('\0')) return res.status(400).end();
+  res.sendFile(rel, {
+    root: cfg.sabnzbd.savePath,
+    acceptRanges: true,
+    dotfiles: 'deny',
+    cacheControl: false,
+  }, (err) => {
+    if (err && !res.headersSent) res.status(err.status === 416 ? 416 : 404).end();
+  });
+});
+
 // ---- Config check ----
 app.get('/check', async (req, res) => {
-  const out = { prowlarr: null, qbit: null, fileServer: null };
+  const out = { prowlarr: null, qbit: null, sabnzbd: null, fileServer: null };
+
   try { await prowlarr.ping(); out.prowlarr = 'ok'; }
   catch (e) { out.prowlarr = 'FAIL: ' + e.message; }
-  try { await qbit.ping(); out.qbit = 'ok'; }
-  catch (e) { out.qbit = 'FAIL: ' + e.message; }
+
+  if (cfg.qbit.url) {
+    try { await qbit.ping(); out.qbit = 'ok'; }
+    catch (e) { out.qbit = 'FAIL: ' + e.message; }
+  } else {
+    out.qbit = 'not configured (torrent disabled)';
+  }
+
+  if (sabnzbd.enabled()) {
+    try { await sabnzbd.ping(); out.sabnzbd = cfg.nzb.indexerIds.length ? 'ok' : 'ok (no NZB indexer IDs configured — NZB search disabled)'; }
+    catch (e) { out.sabnzbd = 'FAIL: ' + e.message; }
+  } else {
+    out.sabnzbd = 'not configured (usenet disabled)';
+  }
+
   if (cfg.fileServerBaseUrl) {
     try {
       const r = await axios.head(cfg.fileServerBaseUrl, { timeout: 8000, validateStatus: () => true });
       out.fileServer = `external, reachable (HTTP ${r.status})`;
     } catch (e) { out.fileServer = 'FAIL: ' + e.message; }
-  } else {
+  } else if (cfg.qbit.savePath) {
     try {
       await fs.promises.access(cfg.qbit.savePath, fs.constants.R_OK);
       out.fileServer = `internal, serving ${cfg.qbit.savePath}`;
@@ -278,10 +364,22 @@ app.get('/check', async (req, res) => {
       out.fileServer = `FAIL: cannot read QBIT_SAVE_PATH (${cfg.qbit.savePath}): ${e.message}`;
     }
   }
+
+  if (cfg.sabnzbd.savePath) {
+    try {
+      await fs.promises.access(cfg.sabnzbd.savePath, fs.constants.R_OK);
+      out.nzbFileServer = `internal, serving ${cfg.sabnzbd.savePath}`;
+    } catch (e) {
+      out.nzbFileServer = `FAIL: cannot read SABNZBD_COMPLETE_PATH (${cfg.sabnzbd.savePath}): ${e.message}`;
+    }
+  }
+
   res.json(out);
 });
 
 app.get('/health', (req, res) => res.json({ ok: true }));
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 app.listen(cfg.port, async () => {
   console.log(`\nSeedStream v${manifest.version} on :${cfg.port}`);
@@ -291,12 +389,32 @@ app.listen(cfg.port, async () => {
     console.warn('      Fill these in .env, then restart.');
   } else {
     console.log(`  Manifest: ${cfg.addonBaseUrl}${secretSeg()}/manifest.json`);
-    console.log(`  File server: ${cfg.fileServerBaseUrl ? 'external (' + cfg.fileServerBaseUrl + ')' : 'built-in, serving ' + cfg.qbit.savePath}`);
+
+    const torrentEnabled = !!(cfg.qbit.url && cfg.qbit.savePath);
+    const nzbEnabled = sabnzbd.enabled() && cfg.nzb.indexerIds.length > 0;
+    console.log(`  Modes: ${[torrentEnabled && 'Torrent', nzbEnabled && 'Usenet/NZB'].filter(Boolean).join(' + ')}`);
+
+    if (cfg.fileServerBaseUrl) {
+      console.log(`  File server (torrent): external (${cfg.fileServerBaseUrl})`);
+    } else if (torrentEnabled) {
+      console.log(`  File server (torrent): built-in, serving ${cfg.qbit.savePath}`);
+    }
+    if (nzbEnabled) {
+      console.log(`  File server (NZB):     built-in, serving ${cfg.sabnzbd.savePath}`);
+    }
+
     console.log('  Validating services...');
     try { await prowlarr.ping(); console.log('    [ok] Prowlarr'); }
     catch (e) { console.warn('    [FAIL] Prowlarr: ' + e.message); }
-    try { await qbit.ping(); console.log('    [ok] qBittorrent'); }
-    catch (e) { console.warn('    [FAIL] qBittorrent: ' + e.message); }
+    if (torrentEnabled) {
+      try { await qbit.ping(); console.log('    [ok] qBittorrent'); }
+      catch (e) { console.warn('    [FAIL] qBittorrent: ' + e.message); }
+    }
+    if (sabnzbd.enabled()) {
+      try { await sabnzbd.ping(); console.log('    [ok] SABnzbd'); }
+      catch (e) { console.warn('    [FAIL] SABnzbd: ' + e.message); }
+    }
+
     if (cacheManager.enabled()) {
       const caps = [cfg.cache.maxGb > 0 && `${cfg.cache.maxGb}GB`, cfg.cache.maxAgeDays > 0 && `${cfg.cache.maxAgeDays}d`]
         .filter(Boolean).join(' / ');
