@@ -1,0 +1,46 @@
+# Turnkey full stack for a fresh VPS: Prowlarr + qBittorrent + SeedStream.
+# Bring it up, finish a little config (add your trackers in Prowlarr, set the
+# qBit password), put those in .env, then restart seedstream. See README.
+services:
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: seedstream-prowlarr
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+    volumes:
+      - ./data/prowlarr:/config
+    ports:
+      - "9696:9696"
+    restart: unless-stopped
+
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    container_name: seedstream-qbit
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+      - WEBUI_PORT=8080
+    volumes:
+      - ./data/qbittorrent:/config
+      - ./downloads:/downloads
+    ports:
+      - "8080:8080"
+      - "6881:6881"
+      - "6881:6881/udp"
+    restart: unless-stopped
+
+  seedstream:
+    build: .
+    container_name: seedstream
+    env_file: .env
+    volumes:
+      - ./downloads:/downloads:ro   # read-only: serve files, never modify
+    ports:
+      - "7700:7700"
+    depends_on:
+      - prowlarr
+      - qbittorrent
+    restart: unless-stopped

@@ -1,0 +1,17 @@
+# SeedStream only — connect to your EXISTING Prowlarr + qBittorrent on the VPS.
+# SeedStream serves video itself, so it needs read access to qBit's download dir.
+#
+# QBIT_SAVE_PATH must be an ABSOLUTE path, and SeedStream reads files from exactly
+# where qBit writes them — so the same absolute path is used on both sides of the
+# mount. The simplest setup uses one path everywhere (host + qBit + SeedStream);
+# if your qBit container uses a different internal path, align them to match.
+services:
+  seedstream:
+    build: .
+    container_name: seedstream
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "7700:7700"
+    volumes:
+      - "${QBIT_SAVE_PATH:?set QBIT_SAVE_PATH to an absolute path in .env}:${QBIT_SAVE_PATH}:ro"
