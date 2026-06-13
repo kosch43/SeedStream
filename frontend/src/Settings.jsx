@@ -1,8 +1,9 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react'
 import { useForm, useFieldArray } from 'react-hook-form'
-import { AlertTriangle, Network, SlidersHorizontal, Server, Globe, Search, Loader2, Save } from "lucide-react"
+import { AlertTriangle, Network, SlidersHorizontal, Server, Globe, Search, Loader2, Save, HardDrive } from "lucide-react"
 import { IndexerSettings } from "@/components/IndexerSettings"
 import { ProviderSettings } from "@/components/ProviderSettings"
+import { TorrentClientSettings } from "@/components/TorrentClientSettings"
 import { SearchQuerySettings } from "@/components/SearchQuerySettings"
 import { NetworkSettingsSection } from "@/components/NetworkSettingsSection"
 import { AdvancedSettingsSection } from "@/components/AdvancedSettingsSection"
@@ -19,6 +20,7 @@ const TABS = [
   { id: 'network', label: 'Network', icon: Network },
   { id: 'indexers', label: 'Indexers', icon: Server },
   { id: 'providers', label: 'Providers', icon: Globe },
+  { id: 'torrent_clients', label: 'Torrent Clients', icon: HardDrive },
   { id: 'search_query', label: 'Search', icon: Search },
   { id: 'advanced', label: 'Advanced', icon: SlidersHorizontal },
 ]
@@ -96,6 +98,7 @@ function Settings({
     defaultValues: {
       providers: [],
       indexers: [],
+      torrent_clients: [],
       movie_search_queries: [],
       series_search_queries: []
     }
@@ -111,6 +114,11 @@ function Settings({
   const { fields: indexerFields, append: appendIndexer, remove: removeIndexer, update: updateIndexer, replace: replaceIndexers } = useFieldArray({
     control,
     name: 'indexers'
+  })
+
+  const { fields: torrentClientFields, append: appendTorrentClient, remove: removeTorrentClient, update: updateTorrentClient, replace: replaceTorrentClients } = useFieldArray({
+    control,
+    name: 'torrent_clients'
   })
 
   const { fields: movieSearchQueryFields, append: appendMovieSearchQuery, remove: removeMovieSearchQuery, update: updateMovieSearchQuery } = useFieldArray({
@@ -167,6 +175,16 @@ function Settings({
           disable_id_search: idx.disable_id_search === true,
           disable_string_search: idx.disable_string_search === true
         })) || [],
+        torrent_clients: initialConfig.torrent_clients?.map((tc) => ({
+          name: tc.name || '',
+          type: tc.type || 'qbittorrent',
+          url: tc.url || '',
+          username: tc.username || '',
+          password: tc.password || '',
+          category: tc.category || 'seedstream',
+          save_path: tc.save_path || '',
+          enabled: tc.enabled !== false,
+        })) || [],
         movie_search_queries: initialConfig.movie_search_queries?.map((query) => ({
           name: query.name || '',
           search_mode: query.search_mode || 'id',
@@ -192,6 +210,7 @@ function Settings({
       reset({
         providers: formattedData.providers,
         indexers: formattedData.indexers,
+        torrent_clients: formattedData.torrent_clients,
         movie_search_queries: formattedData.movie_search_queries,
         series_search_queries: formattedData.series_search_queries,
       })
@@ -437,6 +456,29 @@ function Settings({
               replace={replace}
               onClearStatus={clearTransientStatus}
               onPersist={(nextProviders) => submitSettings({ providers: nextProviders }, 'providers')}
+              onStatus={(status) => showFooterStatus(status)}
+            />
+          </div>
+        )}
+
+        {activeTab === 'torrent_clients' && (
+          <div className="space-y-4">
+            {envOverrides.includes('torrent_clients') && (
+              <div className="rounded-lg border border-border bg-muted/50 p-3">
+                <p className="text-sm text-muted-foreground flex items-center gap-2">
+                  <AlertTriangle className="h-4 w-4 shrink-0" />
+                  Torrent client list is overwritten by environment variables on restart.
+                </p>
+              </div>
+            )}
+            <TorrentClientSettings
+              fields={torrentClientFields}
+              append={appendTorrentClient}
+              update={updateTorrentClient}
+              remove={removeTorrentClient}
+              replace={replaceTorrentClients}
+              onClearStatus={clearTransientStatus}
+              onPersist={(nextClients) => submitSettings({ torrent_clients: nextClients }, 'torrent_clients')}
               onStatus={(status) => showFooterStatus(status)}
             />
           </div>
