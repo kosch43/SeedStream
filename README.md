@@ -119,6 +119,6 @@ Open a [GitHub issue](https://github.com/kosch43/SeedStream/issues). Include dow
 
 ## Credits
 
-SeedStream is a fork of **[StreamNZB](https://github.com/Gaisberg/streamnzb)** by Gaisberg (GPL-3.0), extended with torrent streaming. Licensed under GPL-3.0 — see [LICENSE](LICENSE).
+SeedStream is built and maintained by **Kosch**, with torrent streaming added on top of the open-source **StreamNZB** project. Licensed under GPL-3.0 — see [LICENSE](LICENSE).
 
 - [javi11](https://github.com/javi11) for Go-based RAR and 7z streaming ([altmount](https://github.com/javi11/altmount)).
