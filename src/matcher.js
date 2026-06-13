@@ -176,7 +176,8 @@ function rankAndFilter(releases, req, opts) {
     if (!m) continue;
     if (opts.excludeCam && isCam(p, r.title || '')) continue;
     if (opts.resolutions && opts.resolutions.length && !opts.resolutions.includes(resLower(p))) continue;
-    if ((r.seeders || 0) < (opts.minSeeders || 0)) continue;
+    // Seeder floor only applies to torrents; NZBs don't have seeders.
+    if (r.sourceType !== 'nzb' && (r.seeders || 0) < (opts.minSeeders || 0)) continue;
 
     const key = r.infoHash || `${norm(r.title)}|${r.size || 0}`;
     if (seen.has(key)) continue;
@@ -184,7 +185,12 @@ function rankAndFilter(releases, req, opts) {
 
     scored.push({ raw: r, parsed: p, conf: CONF_RANK[m.confidence], pack: !!m.pack, score: scoreOf(p, r.title || '', opts) });
   }
-  scored.sort((a, b) => b.conf - a.conf || b.score - a.score || (b.raw.seeders || 0) - (a.raw.seeders || 0));
+  // Torrents rank first (seeders as final tiebreak), then NZBs (quality order).
+  scored.sort((a, b) => {
+    const aIsNzb = a.raw.sourceType === 'nzb' ? 1 : 0;
+    const bIsNzb = b.raw.sourceType === 'nzb' ? 1 : 0;
+    return b.conf - a.conf || aIsNzb - bIsNzb || b.score - a.score || (b.raw.seeders || 0) - (a.raw.seeders || 0);
+  });
   return scored.slice(0, opts.maxResults);
 }
 
@@ -234,15 +240,20 @@ function pickFile(files, req) {
 
 function buildLabel(item) {
   const p = item.parsed, r = item.raw, raw = r.title || '';
+  const isNzb = r.sourceType === 'nzb';
   const res = (p.resolution || '').toLowerCase();
   const hdr = hdrLabel(p);
   const nameTag = [res, hdr].filter(Boolean).join(' ');
-  const name = nameTag ? `SeedStream ${nameTag}` : 'SeedStream';
+  const prefix = isNzb ? 'SeedStream NZB' : 'SeedStream';
+  const name = nameTag ? `${prefix} ${nameTag}` : prefix;
 
-  const meta = [sourceLabel(p), p.videoCodec, audioLabel(p, raw), langLabel(p), cleanGroup(p.group) && `🏷 ${cleanGroup(p.group)}`]
+  const meta = [sourceLabel(p), p.videoCodec, audioLabel(p, raw), langLabel(p), cleanGroup(p.group) && `[${cleanGroup(p.group)}]`]
     .filter(Boolean).join(' • ');
   const tags = `${item.pack ? ' [PACK]' : ''}${item.conf <= 1 ? ' (unverified)' : ''}`;
-  const title = `${raw}${tags}\n${meta}\n👤 ${r.seeders || 0}  💾 ${humanSize(r.size)}`;
+  const seedLine = isNzb
+    ? `NZB via ${r.indexer}  💾 ${humanSize(r.size)}`
+    : `👤 ${r.seeders || 0}  💾 ${humanSize(r.size)}`;
+  const title = `${raw}${tags}\n${meta}\n${seedLine}`;
   return { name, title };
 }
 

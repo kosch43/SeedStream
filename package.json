@@ -1,7 +1,7 @@
 {
   "name": "seedstream",
-  "version": "0.8.0",
-  "description": "Self-hosted Stremio addon: stream from private trackers via Prowlarr + qBittorrent (seedbox), with sequential download buffering. AIOStreams & Nuvio compatible.",
+  "version": "0.9.0",
+  "description": "Self-hosted Stremio addon: stream torrents (Prowlarr + qBittorrent) AND Usenet NZBs (SABnzbd) side by side. AIOStreams & Nuvio compatible.",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js"

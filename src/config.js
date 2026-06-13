@@ -17,6 +17,7 @@ const cfg = {
   prowlarr: {
     url: clean(process.env.PROWLARR_URL),
     apiKey: process.env.PROWLARR_API_KEY || '',
+    // Prowlarr indexer IDs for TORRENT searches (comma-separated).
     indexerIds: (process.env.PROWLARR_INDEXER_IDS || '')
       .split(',').map(s => s.trim()).filter(Boolean),
   },
@@ -40,6 +41,7 @@ const cfg = {
     apiKey: (process.env.ANILIST_API_KEY || '').trim(),
   },
 
+  // ---- Torrent downloader (qBittorrent) ----
   qbit: {
     url: clean(process.env.QBIT_URL),
     username: process.env.QBIT_USERNAME || '',
@@ -50,6 +52,27 @@ const cfg = {
 
   // nginx (or seedbox personal web server) exposing QBIT_SAVE_PATH with ranges.
   fileServerBaseUrl: clean(process.env.FILE_SERVER_BASE_URL),
+
+  // ---- Usenet downloader (SABnzbd) ----
+  sabnzbd: {
+    url: clean(process.env.SABNZBD_URL),
+    apiKey: process.env.SABNZBD_API_KEY || '',
+    // Absolute path SABnzbd writes completed downloads to (same path seen inside
+    // this container). Must contain the category subfolder if SABNZBD_CATEGORY is set.
+    savePath: process.env.SABNZBD_COMPLETE_PATH || '',
+    category: process.env.SABNZBD_CATEGORY || 'seedstream',
+  },
+
+  // ---- Usenet search (NZB via Prowlarr) ----
+  nzb: {
+    // Prowlarr indexer IDs for USENET (NZB) searches (comma-separated).
+    // Set this to enable NZB results alongside torrents. Leave blank to disable.
+    indexerIds: (process.env.NZB_INDEXER_IDS || '')
+      .split(',').map(s => s.trim()).filter(Boolean),
+    // How long to wait for SABnzbd to finish before returning 504. Usenet is
+    // usually fast (seconds for small files, a few minutes for large ones).
+    timeoutSec: parseInt(process.env.NZB_TIMEOUT_SEC || '600', 10),
+  },
 
   bufferMb: parseInt(process.env.BUFFER_MB || '32', 10),
   bufferTimeoutSec: parseInt(process.env.BUFFER_TIMEOUT_SEC || '90', 10),
@@ -69,14 +92,11 @@ const cfg = {
 
   videoExts: ['mkv', 'mp4', 'avi', 'm4v', 'mov', 'wmv', 'flv', 'webm', 'ts', 'm2ts'],
 
-  // ---- disk cache / retention (NzbDAV vfs-cache-max-size/age equivalent) ----
-  // Already-downloaded torrents stay seeding so replays are instant; this bounds
-  // that cache by evicting the least-recently-played ones. Ratio-safe: a torrent
-  // is never evicted until it has met MIN_SEED_HOURS of seed time.
+  // ---- disk cache / retention ----
   cache: {
-    maxGb: parseFloat(process.env.CACHE_MAX_GB || '0'),            // 0 = unlimited
-    maxAgeDays: parseFloat(process.env.CACHE_MAX_AGE_DAYS || '0'), // 0 = no age limit
-    minSeedHours: parseFloat(process.env.MIN_SEED_HOURS || '72'),  // protect ratio/H&R
+    maxGb: parseFloat(process.env.CACHE_MAX_GB || '0'),
+    maxAgeDays: parseFloat(process.env.CACHE_MAX_AGE_DAYS || '0'),
+    minSeedHours: parseFloat(process.env.MIN_SEED_HOURS || '72'),
     sweepMinutes: parseInt(process.env.CACHE_SWEEP_MINUTES || '15', 10),
   },
 };
@@ -84,17 +104,23 @@ const cfg = {
 // Returns a list of missing required settings (empty = all good).
 function validate() {
   const missing = [];
+  const torrentOk = cfg.qbit.url && cfg.qbit.username && cfg.qbit.password && cfg.qbit.savePath;
+  const nzbOk = cfg.sabnzbd.url && cfg.sabnzbd.apiKey && cfg.sabnzbd.savePath && cfg.nzb.indexerIds.length;
+
   const checks = {
     ADDON_BASE_URL: cfg.addonBaseUrl,
     PROWLARR_URL: cfg.prowlarr.url,
     PROWLARR_API_KEY: cfg.prowlarr.apiKey,
-    QBIT_URL: cfg.qbit.url,
-    QBIT_USERNAME: cfg.qbit.username,
-    QBIT_PASSWORD: cfg.qbit.password,
-    QBIT_SAVE_PATH: cfg.qbit.savePath,
-    // FILE_SERVER_BASE_URL is optional: if unset, SeedStream serves files itself.
   };
   for (const [k, v] of Object.entries(checks)) if (!v) missing.push(k);
+
+  if (!torrentOk && !nzbOk) {
+    // Need at least one download backend fully configured.
+    if (!cfg.qbit.url) missing.push('QBIT_URL (or configure SABnzbd for NZB-only mode)');
+    if (!cfg.qbit.username) missing.push('QBIT_USERNAME');
+    if (!cfg.qbit.password) missing.push('QBIT_PASSWORD');
+    if (!cfg.qbit.savePath) missing.push('QBIT_SAVE_PATH');
+  }
   return missing;
 }
 

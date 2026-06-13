@@ -1,10 +1,10 @@
-# SeedStream only — connect to your EXISTING Prowlarr + qBittorrent on the VPS.
-# SeedStream serves video itself, so it needs read access to qBit's download dir.
+# SeedStream only — connect to your EXISTING Prowlarr + qBittorrent + SABnzbd.
+# Supports torrents AND/OR Usenet NZBs.
 #
-# QBIT_SAVE_PATH must be an ABSOLUTE path, and SeedStream reads files from exactly
-# where qBit writes them — so the same absolute path is used on both sides of the
-# mount. The simplest setup uses one path everywhere (host + qBit + SeedStream);
-# if your qBit container uses a different internal path, align them to match.
+# Mount whichever download paths apply to your setup:
+#   - QBIT_SAVE_PATH for torrent downloads (set in .env)
+#   - SABNZBD_COMPLETE_PATH for NZB completed downloads (set in .env)
+# Each must be an absolute path and mounted at the same path inside the container.
 services:
   seedstream:
     build: .
@@ -14,4 +14,7 @@ services:
     ports:
       - "7700:7700"
     volumes:
-      - "${QBIT_SAVE_PATH:?set QBIT_SAVE_PATH to an absolute path in .env}:${QBIT_SAVE_PATH}:ro"
+      # Torrent downloads — comment out if running NZB-only.
+      - "${QBIT_SAVE_PATH:-/tmp/qbit-placeholder}:${QBIT_SAVE_PATH:-/tmp/qbit-placeholder}:ro"
+      # NZB completed downloads — comment out if running torrent-only.
+      - "${SABNZBD_COMPLETE_PATH:-/tmp/nzb-placeholder}:${SABNZBD_COMPLETE_PATH:-/tmp/nzb-placeholder}:ro"
