@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.0.0 (2026-06-13)
+
+SeedStream's first release. SeedStream is a fork of
+[StreamNZB](https://github.com/Gaisberg/streamnzb) (GPL-3.0) that adds torrent
+streaming alongside the original on-the-fly Usenet support, re-baselined to
+1.0.0. Prior history below is StreamNZB's.
+
+### Features
+
+* **torrents:** stream torrents via a seedbox qBittorrent — sequential download
+  for instant playback while the torrent keeps seeding for private-tracker
+  ratio (SeedStream never seeds or discards data itself)
+* **torrents:** Torznab/Prowlarr torrent indexers work through the existing
+  Indexers UI; results are auto-detected and labelled as torrents
+* **settings:** new Torrent Clients tab to register seedbox qBittorrent
+  instances (URL, credentials, category, save path)
+* **branding:** rebranded StreamNZB → SeedStream across the Go backend and React UI
+
+---
+
 ## [4.7.0](https://github.com/Gaisberg/streamnzb/compare/v4.6.0...v4.7.0) (2026-06-01)
 
 
