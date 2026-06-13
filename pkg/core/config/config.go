@@ -1280,6 +1280,13 @@ func (c *Config) RedactForAPI() Config {
 		redactedIndexer.ProxyURL = RedactProxyURLForAPI(indexer.ProxyURL)
 		out.Indexers[i] = redactedIndexer
 	}
+	out.TorrentClients = make([]TorrentClientConfig, len(c.TorrentClients))
+	for i, tc := range c.TorrentClients {
+		redacted := tc
+		redacted.Username = ""
+		redacted.Password = ""
+		out.TorrentClients[i] = redacted
+	}
 	return out
 }
 
