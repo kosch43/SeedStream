@@ -35,23 +35,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	adminUsername := s.config.GetAdminUsername()
-	if req.Username != adminUsername {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(LoginResponse{
-			Success: false,
-			Error:   "Invalid credentials",
-		})
-		return
-	}
-
 	stream, err := s.streamManager.Authenticate(req.Username, req.Password, adminUsername, s.config.AdminPasswordHash, s.config.AdminToken)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(LoginResponse{
-			Success: false,
-			Error:   "Invalid credentials",
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "Invalid credentials",
 		})
 		return
 	}
@@ -66,17 +56,21 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		MaxAge:   86400 * 7,
 	})
 
-	var mustChangePassword bool
-	if stream.Username == s.config.GetAdminUsername() {
+	isAdmin := stream.Username == adminUsername
+	mustChangePassword := false
+	if isAdmin {
 		mustChangePassword = s.config.AdminMustChangePassword
+	} else {
+		mustChangePassword = stream.MustChangePassword
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(LoginResponse{
-		Success:            true,
-		Token:              stream.Token,
-		User:               stream.Username,
-		MustChangePassword: mustChangePassword,
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":              true,
+		"token":                stream.Token,
+		"user":                 stream.Username,
+		"is_admin":             isAdmin,
+		"must_change_password": mustChangePassword,
 	})
 }
 
@@ -132,12 +126,16 @@ func (s *Server) handleAuthCheck(w http.ResponseWriter, r *http.Request) {
 
 	if ok {
 		var mustChangePassword bool
-		if stream.Username == s.config.GetAdminUsername() {
+		isAdmin := stream.Username == s.config.GetAdminUsername()
+		if isAdmin {
 			mustChangePassword = s.config.AdminMustChangePassword
+		} else {
+			mustChangePassword = stream.MustChangePassword
 		}
 		out := map[string]interface{}{
 			"authenticated":        true,
 			"username":             stream.Username,
+			"is_admin":             isAdmin,
 			"must_change_password": mustChangePassword,
 		}
 		if !authViaCookie {
@@ -220,4 +218,40 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		"success": true,
 		"message": "Password updated successfully",
 	})
+}
+
+func (s *Server) handleMemberChangePassword(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	stream, _ := auth.StreamFromContext(r)
+	if stream == nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	// Admin uses the existing /api/auth/change-password endpoint
+	if stream.Username == s.config.GetAdminUsername() {
+		http.Error(w, "Use /api/auth/change-password for admin", http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+	if len(strings.TrimSpace(req.Password)) < 6 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Password must be at least 6 characters"})
+		return
+	}
+	if err := s.streamManager.SetStreamPassword(stream.Username, req.Password); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
 }

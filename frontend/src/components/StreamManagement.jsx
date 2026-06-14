@@ -899,6 +899,10 @@ function StreamManagement({ globalConfig, movieSearchQueries = [], seriesSearchQ
   const [deleteTarget, setDeleteTarget] = useState('')
   const [regenerateTarget, setRegenerateTarget] = useState('')
   const [expandedStreams, setExpandedStreams] = useState({})
+  const [setPasswordTarget, setSetPasswordTarget] = useState('')
+  const [setPasswordValue, setSetPasswordValue] = useState('')
+  const [setPasswordSaving, setSetPasswordSaving] = useState(false)
+  const [setPasswordError, setSetPasswordError] = useState('')
 
   const indexerNames = useMemo(
     () => (globalConfig?.indexers || []).map((indexer) => indexer.name).filter(Boolean),
@@ -1189,6 +1193,26 @@ function StreamManagement({ globalConfig, movieSearchQueries = [], seriesSearchQ
     }
   }
 
+  const handleSetStreamPassword = async (username, password) => {
+    setSetPasswordSaving(true)
+    setSetPasswordError('')
+    try {
+      await apiFetch(`/api/streams/${encodeURIComponent(username)}/set-password`, {
+        method: 'POST',
+        body: JSON.stringify({ password }),
+      })
+      const status = { type: 'success', message: `Password set for "${username}"` }
+      showStatus(status)
+      showFooterStatus(status)
+      setSetPasswordTarget('')
+      setSetPasswordValue('')
+    } catch (err) {
+      setSetPasswordError(err.message || 'Failed to set password')
+    } finally {
+      setSetPasswordSaving(false)
+    }
+  }
+
   const toggleExpandedStream = (username) => {
     setExpandedStreams((current) => ({
       ...current,
@@ -1246,6 +1270,22 @@ function StreamManagement({ globalConfig, movieSearchQueries = [], seriesSearchQ
                                 </Button>
                               </TooltipTrigger>
                               <TooltipContent>Edit stream</TooltipContent>
+                            </Tooltip>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  size="sm"
+                                  onClick={() => { setSetPasswordTarget(stream.username); setSetPasswordValue(''); setSetPasswordError('') }}
+                                  disabled={actionLoading !== null || loading}
+                                  className="h-9 px-2 text-xs"
+                                  aria-label={`Set password for ${stream.username}`}
+                                >
+                                  Set Password
+                                </Button>
+                              </TooltipTrigger>
+                              <TooltipContent>Set member login password</TooltipContent>
                             </Tooltip>
                             <Tooltip>
                               <TooltipTrigger asChild>
@@ -1479,6 +1519,44 @@ function StreamManagement({ globalConfig, movieSearchQueries = [], seriesSearchQ
           }
         }}
       />
+      <Dialog open={Boolean(setPasswordTarget)} onOpenChange={(nextOpen) => {
+        if (!nextOpen) { setSetPasswordTarget(''); setSetPasswordValue(''); setSetPasswordError('') }
+      }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Set Password for {setPasswordTarget}</DialogTitle>
+            <DialogDescription>Set a login password for this member. They will use this to log into the web UI.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            <div className="space-y-2">
+              <Label htmlFor="set-password-input">New Password</Label>
+              <Input
+                id="set-password-input"
+                type="password"
+                placeholder="At least 6 characters"
+                value={setPasswordValue}
+                onChange={e => setSetPasswordValue(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter' && setPasswordValue.trim().length >= 6) void handleSetStreamPassword(setPasswordTarget, setPasswordValue.trim()) }}
+                autoFocus
+              />
+            </div>
+            {setPasswordError && (
+              <div className="text-sm text-destructive">{setPasswordError}</div>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => { setSetPasswordTarget(''); setSetPasswordValue(''); setSetPasswordError('') }}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => void handleSetStreamPassword(setPasswordTarget, setPasswordValue.trim())}
+              disabled={setPasswordSaving || setPasswordValue.trim().length < 6}
+            >
+              {setPasswordSaving ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Saving...</> : 'Set Password'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </TooltipProvider>
   )
 }

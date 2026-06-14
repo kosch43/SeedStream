@@ -492,6 +492,8 @@ type StreamEntry struct {
 	TorrentClient       *TorrentClientConfig           `json:"torrent_client,omitempty"`
 	ProwlarrURL         string                         `json:"prowlarr_url,omitempty"`
 	ProwlarrAPIKey      string                         `json:"prowlarr_api_key,omitempty"`
+	PasswordHash        string                         `json:"password_hash,omitempty"`
+	MustChangePassword  bool                           `json:"must_change_password,omitempty"`
 }
 
 func (sq *SearchQueryConfig) AsIndexerSearchConfig() *IndexerSearchConfig {

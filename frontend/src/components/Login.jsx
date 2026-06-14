@@ -33,7 +33,7 @@ export default function Login({ onLogin, version }) {
         if (data.token) {
           localStorage.setItem('auth_token', data.token)
         }
-        onLogin(data.user, data.token, data.must_change_password || false)
+        onLogin(data.user, data.token, data.must_change_password || false, data.is_admin !== false)
       } else {
         setError(data.error || 'Login failed')
       }
