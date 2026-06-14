@@ -11,3 +11,4 @@ state.json
 seedstream.db*
 releasepipeline/seedstream
 cmd/seedstream/seedstream
+.claude/
