@@ -12,6 +12,7 @@ import { NZBHistoryPage } from "@/components/NZBHistoryPage"
 import { ProfilePage } from "@/components/ProfilePage"
 import { DirectPlayPage } from "@/components/DirectPlayPage"
 import StreamManagement from './components/StreamManagement'
+import MemberSetupPage from './components/MemberSetupPage'
 import { apiFetch, getApiUrl, UNAUTHORIZED_EVENT } from './api'
 import { AlertCircle, Loader2 } from "lucide-react"
 
@@ -21,6 +22,7 @@ import { isAvailNZBEnabled } from './lib/availnzb'
 function App() {
   const [authChecked, setAuthChecked] = useState(false)
   const [authenticated, setAuthenticated] = useState(false)
+  const [isAdmin, setIsAdmin] = useState(true)
   const [currentUser, setCurrentUser] = useState(null)
   const [authToken, setAuthToken] = useState(localStorage.getItem('auth_token') || '')
   const [mustChangePassword, setMustChangePassword] = useState(false)
@@ -32,6 +34,8 @@ function App() {
   const [availNZBStatusError, setAvailNZBStatusError] = useState('')
   const availNZBStatusLoadedRef = useRef(false)
   const availNZBStatusLoadingRef = useRef(false)
+
+  const shouldRunAdminRuntime = authenticated && isAdmin
 
   const {
     stats,
@@ -51,7 +55,7 @@ function App() {
     nzbAttemptsRefreshTrigger,
     sendCommand,
   } = useAdminRuntime({
-    authenticated,
+    authenticated: shouldRunAdminRuntime,
     authToken,
     hasLoggedOutRef,
     setAuthenticated,
@@ -97,6 +101,7 @@ function App() {
           setAuthToken(restoredToken)
           setAuthenticated(true)
           setCurrentUser(data.username)
+          setIsAdmin(data.is_admin !== false)
           setMustChangePassword(data.must_change_password || false)
           if (restoredToken) {
             localStorage.setItem('auth_token', restoredToken)
@@ -117,11 +122,12 @@ function App() {
       })
   }, [])
 
-  const handleLogin = (username, token, mustChange) => {
+  const handleLogin = (username, token, mustChange, isAdminFlag) => {
     hasLoggedOutRef.current = false
     setAuthenticated(true)
     setCurrentUser(username)
     setAuthToken(token)
+    setIsAdmin(isAdminFlag !== false)
     setMustChangePassword(mustChange)
     localStorage.setItem('auth_token', token)
   }
@@ -221,6 +227,16 @@ function App() {
 
   if (!authenticated) {
     return <Login onLogin={handleLogin} version={version} />
+  }
+
+  if (authenticated && !isAdmin) {
+    return <MemberSetupPage
+      currentUser={currentUser}
+      authToken={authToken}
+      onLogout={handleLogout}
+      mustChangePassword={mustChangePassword}
+      onPasswordChanged={() => setMustChangePassword(false)}
+    />
   }
 
   if (mustChangePassword && currentUser) {

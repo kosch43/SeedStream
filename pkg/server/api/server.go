@@ -383,5 +383,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/api/logs/download", authMiddleware(http.HandlerFunc(s.handleDownloadLogs)))
 	mux.Handle("/api/nzb-attempts", authMiddleware(http.HandlerFunc(s.handleNZBAttempts)))
 
+	mux.Handle("/api/member/setup", authMiddleware(http.HandlerFunc(s.handleMemberSetup)))
+	mux.Handle("/api/member/change-password", authMiddleware(http.HandlerFunc(s.handleMemberChangePassword)))
+
 	return mux
 }

@@ -52,6 +52,8 @@ type Stream struct {
 	TorrentClient       *config.TorrentClientConfig           `json:"torrent_client,omitempty"`
 	ProwlarrURL         string                                `json:"prowlarr_url,omitempty"`
 	ProwlarrAPIKey      string                                `json:"prowlarr_api_key,omitempty"`
+	PasswordHash        string                                `json:"password_hash,omitempty"`
+	MustChangePassword  bool                                  `json:"must_change_password,omitempty"`
 }
 
 type StreamManager struct {
@@ -169,6 +171,8 @@ func (dm *StreamManager) load() error {
 				TorrentClient:       d.TorrentClient,
 				ProwlarrURL:         d.ProwlarrURL,
 				ProwlarrAPIKey:      d.ProwlarrAPIKey,
+				PasswordHash:        d.PasswordHash,
+				MustChangePassword:  d.MustChangePassword,
 			}
 			if dm.streams[k].IndexerOverrides == nil {
 				dm.streams[k].IndexerOverrides = make(map[string]config.IndexerSearchConfig)
@@ -218,6 +222,8 @@ func (dm *StreamManager) syncStreamsFromConfigLocked() bool {
 			TorrentClient:       e.TorrentClient,
 			ProwlarrURL:         e.ProwlarrURL,
 			ProwlarrAPIKey:      e.ProwlarrAPIKey,
+			PasswordHash:        e.PasswordHash,
+			MustChangePassword:  e.MustChangePassword,
 		}
 	}
 	if _, exists := dm.streams["admin"]; exists {
@@ -256,6 +262,8 @@ func (dm *StreamManager) saveLocked() error {
 				TorrentClient:       d.TorrentClient,
 				ProwlarrURL:         d.ProwlarrURL,
 				ProwlarrAPIKey:      d.ProwlarrAPIKey,
+				PasswordHash:        d.PasswordHash,
+				MustChangePassword:  d.MustChangePassword,
 			}
 		}
 		return dm.cfg.Save()
@@ -311,7 +319,27 @@ func (dm *StreamManager) Authenticate(loginUsername, password, adminUsername, ad
 		}, nil
 	}
 
-	return nil, fmt.Errorf("invalid credentials")
+	// Check member streams
+	dm.mu.RLock()
+	defer dm.mu.RUnlock()
+	stream, ok := dm.streams[strings.ToLower(loginUsername)]
+	if !ok {
+		// also check case-insensitive by iterating
+		for _, s := range dm.streams {
+			if strings.EqualFold(s.Username, loginUsername) {
+				stream = s
+				ok = true
+				break
+			}
+		}
+	}
+	if !ok || stream.PasswordHash == "" {
+		return nil, fmt.Errorf("invalid credentials")
+	}
+	if HashPassword(password) != stream.PasswordHash {
+		return nil, fmt.Errorf("invalid credentials")
+	}
+	return stream, nil
 }
 
 func (dm *StreamManager) AuthenticateToken(token string, adminUsername, adminToken string) (*Stream, error) {
@@ -626,9 +654,24 @@ func (dm *StreamManager) UpdateStreamConfig(username string, streamConfig *Strea
 	stream.TorrentClient = streamConfig.TorrentClient
 	stream.ProwlarrURL = strings.TrimSpace(streamConfig.ProwlarrURL)
 	stream.ProwlarrAPIKey = strings.TrimSpace(streamConfig.ProwlarrAPIKey)
+	stream.PasswordHash = streamConfig.PasswordHash
+	stream.MustChangePassword = streamConfig.MustChangePassword
 
 	if err := dm.saveLocked(); err != nil {
 		return fmt.Errorf("failed to save stream config: %w", err)
 	}
 	return nil
+}
+
+// SetStreamPassword sets a hashed password for a member stream and clears MustChangePassword.
+func (dm *StreamManager) SetStreamPassword(username, password string) error {
+	dm.mu.Lock()
+	defer dm.mu.Unlock()
+	stream, exists := dm.streams[username]
+	if !exists {
+		return fmt.Errorf("stream not found")
+	}
+	stream.PasswordHash = HashPassword(password)
+	stream.MustChangePassword = false
+	return dm.saveLocked()
 }

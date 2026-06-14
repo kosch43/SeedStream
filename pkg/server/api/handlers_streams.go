@@ -196,19 +196,21 @@ func (s *Server) handleStreamByUsername(w http.ResponseWriter, r *http.Request) 
 			"message": fmt.Sprintf("Stream %s deleted successfully", username),
 		})
 	case http.MethodPost:
-		if suffix != "regenerate-token" {
-			http.Error(w, "Not found", http.StatusNotFound)
-			return
-		}
-		token, err := s.streamManager.RegenerateToken(username)
-		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
+		if suffix == "regenerate-token" {
+			token, err := s.streamManager.RegenerateToken(username)
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-			return
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "token": token})
+		} else if suffix == "set-password" {
+			s.handleStreamSetPassword(w, r)
+		} else {
+			http.Error(w, "Not found", http.StatusNotFound)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "token": token})
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -305,4 +307,42 @@ func (s *Server) handlePutStreamConfigs(w http.ResponseWriter, r *http.Request) 
 		"status":  "success",
 		"message": "Stream configurations saved successfully. Search cache cleared.",
 	})
+}
+
+func (s *Server) handleStreamSetPassword(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	adminStream, _ := auth.StreamFromContext(r)
+	if adminStream == nil || adminStream.Username != s.config.GetAdminUsername() {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+	path := trimStreamAPIPath(r.URL.Path)
+	parts := strings.SplitN(path, "/", 2)
+	username := parts[0]
+	if username == "" {
+		http.Error(w, "username required", http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+	if len(strings.TrimSpace(req.Password)) < 6 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Password must be at least 6 characters"})
+		return
+	}
+	if err := s.streamManager.SetStreamPassword(username, req.Password); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
 }
