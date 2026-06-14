@@ -49,6 +49,7 @@ type Stream struct {
 	IndexerSelections   []string                              `json:"indexer_selections,omitempty"`
 	MovieSearchQueries  []string                              `json:"movie_search_queries,omitempty"`
 	SeriesSearchQueries []string                              `json:"series_search_queries,omitempty"`
+	TorrentClient       *config.TorrentClientConfig           `json:"torrent_client,omitempty"`
 }
 
 type StreamManager struct {
@@ -163,6 +164,7 @@ func (dm *StreamManager) load() error {
 				IndexerSelections:   append([]string(nil), d.IndexerSelections...),
 				MovieSearchQueries:  append([]string(nil), d.MovieSearchQueries...),
 				SeriesSearchQueries: append([]string(nil), d.SeriesSearchQueries...),
+				TorrentClient:       d.TorrentClient,
 			}
 			if dm.streams[k].IndexerOverrides == nil {
 				dm.streams[k].IndexerOverrides = make(map[string]config.IndexerSearchConfig)
@@ -209,6 +211,7 @@ func (dm *StreamManager) syncStreamsFromConfigLocked() bool {
 			IndexerSelections:   append([]string(nil), e.IndexerSelections...),
 			MovieSearchQueries:  append([]string(nil), e.MovieSearchQueries...),
 			SeriesSearchQueries: append([]string(nil), e.SeriesSearchQueries...),
+			TorrentClient:       e.TorrentClient,
 		}
 	}
 	if _, exists := dm.streams["admin"]; exists {
@@ -244,6 +247,7 @@ func (dm *StreamManager) saveLocked() error {
 				IndexerSelections:   append([]string(nil), d.IndexerSelections...),
 				MovieSearchQueries:  append([]string(nil), d.MovieSearchQueries...),
 				SeriesSearchQueries: append([]string(nil), d.SeriesSearchQueries...),
+				TorrentClient:       d.TorrentClient,
 			}
 		}
 		return dm.cfg.Save()
@@ -611,6 +615,7 @@ func (dm *StreamManager) UpdateStreamConfig(username string, streamConfig *Strea
 	stream.IndexerSelections = append([]string(nil), streamConfig.IndexerSelections...)
 	stream.MovieSearchQueries = append([]string(nil), streamConfig.MovieSearchQueries...)
 	stream.SeriesSearchQueries = append([]string(nil), streamConfig.SeriesSearchQueries...)
+	stream.TorrentClient = streamConfig.TorrentClient
 
 	if err := dm.saveLocked(); err != nil {
 		return fmt.Errorf("failed to save stream config: %w", err)

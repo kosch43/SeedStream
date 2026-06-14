@@ -97,10 +97,10 @@ type PrepareResult struct {
 // qBittorrent (adding it if needed), waits for the chosen file's head to buffer,
 // and returns the file's absolute path for range serving. The torrent is left
 // running so it keeps seeding.
-func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, season, episode int, bufferBytes int64, timeout time.Duration) (*PrepareResult, error) {
-	if !m.Enabled() {
-		return nil, fmt.Errorf("no torrent client configured")
-	}
+//
+// clientOverride, if non-nil, is used instead of the global client list. This
+// lets each stream route to its own seedbox qBittorrent.
+func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, season, episode int, bufferBytes int64, timeout time.Duration, clientOverride *config.TorrentClientConfig) (*PrepareResult, error) {
 	if rel == nil || !rel.IsTorrent() {
 		return nil, fmt.Errorf("release is not a torrent")
 	}
@@ -118,10 +118,24 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 		timeout = DefaultPrepareTimeout
 	}
 
-	// Use the first client for now. Per-seedbox routing (each member's own
-	// client) is selected upstream once stream-level client selection exists.
-	entry := m.clients[0]
-	c := entry.client
+	// Resolve which qBittorrent client to use: prefer the stream-level override
+	// so each member can point to their own seedbox, fall back to the first
+	// globally configured client.
+	var c *qbittorrent.Client
+	if clientOverride != nil && strings.TrimSpace(clientOverride.URL) != "" {
+		c = qbittorrent.New(qbittorrent.Options{
+			BaseURL:  clientOverride.URL,
+			Username: clientOverride.Username,
+			Password: clientOverride.Password,
+			Category: clientOverride.CategoryOrDefault(),
+			SavePath: clientOverride.SavePath,
+		})
+	} else {
+		if !m.Enabled() {
+			return nil, fmt.Errorf("no torrent client configured")
+		}
+		c = m.clients[0].client
+	}
 
 	hash := strings.ToLower(strings.TrimSpace(rel.InfoHash))
 

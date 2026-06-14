@@ -1162,7 +1162,7 @@ func (s *Server) handlePlay(w http.ResponseWriter, r *http.Request, streamConfig
 	// is downloaded and seeded by a seedbox qBittorrent, and we serve it from
 	// disk with range support.
 	if sess.Release != nil && sess.Release.IsTorrent() {
-		s.handleTorrentPlay(w, r, sess)
+		s.handleTorrentPlay(w, r, sess, streamConfig)
 		return
 	}
 
