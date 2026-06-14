@@ -85,6 +85,7 @@ func (s *Server) handleStreamsList(w http.ResponseWriter, r *http.Request) {
 			"movie_search_queries":  d.MovieSearchQueries,
 			"series_search_queries": d.SeriesSearchQueries,
 			"torrent_client":        redactStreamTorrentClient(d.TorrentClient),
+			"prowlarr_url":          d.ProwlarrURL,
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -173,6 +174,7 @@ func (s *Server) handleStreamByUsername(w http.ResponseWriter, r *http.Request) 
 			"movie_search_queries":  d.MovieSearchQueries,
 			"series_search_queries": d.SeriesSearchQueries,
 			"torrent_client":        redactStreamTorrentClient(d.TorrentClient),
+			"prowlarr_url":          d.ProwlarrURL,
 		})
 	case http.MethodDelete:
 		if suffix != "" {
@@ -237,6 +239,8 @@ func (s *Server) handlePutStreamConfigs(w http.ResponseWriter, r *http.Request) 
 		MovieSearchQueries  []string                              `json:"movie_search_queries"`
 		SeriesSearchQueries []string                              `json:"series_search_queries"`
 		TorrentClient       *config.TorrentClientConfig           `json:"torrent_client"`
+		ProwlarrURL         string                                `json:"prowlarr_url"`
+		ProwlarrAPIKey      string                                `json:"prowlarr_api_key"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&streamConfigs); err != nil {
 		s.writeSaveStatus(w, "error", "Invalid stream config data", nil)
@@ -275,6 +279,8 @@ func (s *Server) handlePutStreamConfigs(w http.ResponseWriter, r *http.Request) 
 			MovieSearchQueries:  dc.MovieSearchQueries,
 			SeriesSearchQueries: dc.SeriesSearchQueries,
 			TorrentClient:       dc.TorrentClient,
+			ProwlarrURL:         dc.ProwlarrURL,
+			ProwlarrAPIKey:      dc.ProwlarrAPIKey,
 		}); err != nil {
 			errors = append(errors, fmt.Sprintf("Failed to update stream config for %s: %v", username, err))
 			continue

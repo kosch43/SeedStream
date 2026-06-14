@@ -490,6 +490,8 @@ type StreamEntry struct {
 	MovieSearchQueries  []string                       `json:"movie_search_queries,omitempty"`
 	SeriesSearchQueries []string                       `json:"series_search_queries,omitempty"`
 	TorrentClient       *TorrentClientConfig           `json:"torrent_client,omitempty"`
+	ProwlarrURL         string                         `json:"prowlarr_url,omitempty"`
+	ProwlarrAPIKey      string                         `json:"prowlarr_api_key,omitempty"`
 }
 
 func (sq *SearchQueryConfig) AsIndexerSearchConfig() *IndexerSearchConfig {

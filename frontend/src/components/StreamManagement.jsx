@@ -65,6 +65,8 @@ function normalizeStreamDraft(draft) {
     movie_search_queries: uniquePreserveOrder(draft?.movie_search_queries),
     series_search_queries: uniquePreserveOrder(draft?.series_search_queries),
     torrent_client: normalizeTorrentClient(draft?.torrent_client),
+    prowlarr_url: draft?.prowlarr_url || '',
+    prowlarr_api_key: draft?.prowlarr_api_key || '',
   }
 }
 
@@ -85,6 +87,8 @@ function buildStreamDraft(stream) {
     movie_search_queries: stream?.movie_search_queries || [],
     series_search_queries: stream?.series_search_queries || [],
     torrent_client: stream?.torrent_client || null,
+    prowlarr_url: stream?.prowlarr_url || '',
+    prowlarr_api_key: stream?.prowlarr_api_key || '',
   })
 }
 
@@ -122,6 +126,8 @@ function buildStreamStateFromDraft(username, token, draft, existingOverrides = {
     movie_search_queries: draft.movie_search_queries || [],
     series_search_queries: draft.series_search_queries || [],
     torrent_client: torrentClient,
+    prowlarr_url: draft.prowlarr_url || '',
+    prowlarr_api_key: draft.prowlarr_api_key || '',
   }
 }
 
@@ -355,7 +361,7 @@ const STREAM_DIALOG_TABS = [
   { id: 'indexers', label: 'Indexers' },
   { id: 'movie', label: 'Movie' },
   { id: 'tv', label: 'TV' },
-  { id: 'torrent', label: 'Torrent' },
+  { id: 'torrent', label: 'Connections' },
 ]
 
 function defaultStreamName(index) {
@@ -759,10 +765,37 @@ function StreamDialog({
           )}
 
           {activeTab === 'torrent' && (
-            <div className="space-y-4">
-              <p className="text-sm text-muted-foreground">
-                Enter the qBittorrent WebUI details for this stream's seedbox. Leave the URL blank to use the global client configured in Settings → Torrent Clients.
-              </p>
+            <div className="space-y-6">
+              <div className="space-y-3">
+                <div className="text-sm font-medium">Prowlarr</div>
+                <p className="text-sm text-muted-foreground">
+                  Enter this member's Prowlarr URL and API key. Searches for this stream will go to their Prowlarr instead of the global indexers. Leave blank to use global indexers.
+                </p>
+                <div className="space-y-1.5">
+                  <Label>Prowlarr URL</Label>
+                  <Input
+                    value={draft.prowlarr_url || ''}
+                    onChange={(e) => setDraft((cur) => ({ ...cur, prowlarr_url: e.target.value }))}
+                    placeholder="http://prowlarr.example.com:9696"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>API key</Label>
+                  <Input
+                    type="password"
+                    value={draft.prowlarr_api_key || ''}
+                    onChange={(e) => setDraft((cur) => ({ ...cur, prowlarr_api_key: e.target.value }))}
+                    placeholder="••••••••••••••••••••••••••••••••"
+                    autoComplete="new-password"
+                  />
+                </div>
+              </div>
+
+              <div className="border-t border-border/60 pt-4 space-y-3">
+                <div className="text-sm font-medium">qBittorrent</div>
+                <p className="text-sm text-muted-foreground">
+                  Enter the qBittorrent WebUI details for this stream's seedbox. Leave the URL blank to use the global client configured in Settings → Torrent Clients.
+                </p>
               <div className="space-y-3">
                 <div className="space-y-1.5">
                   <Label>qBittorrent URL</Label>
@@ -809,6 +842,7 @@ function StreamDialog({
                     placeholder="/mnt/seedbox/downloads"
                   />
                 </div>
+              </div>
               </div>
             </div>
           )}

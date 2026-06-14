@@ -379,6 +379,8 @@ func (s *Server) handleSaveStreamConfigsWS(conn *websocket.Conn, client *Client,
 		MovieSearchQueries  []string                              `json:"movie_search_queries"`
 		SeriesSearchQueries []string                              `json:"series_search_queries"`
 		TorrentClient       *config.TorrentClientConfig           `json:"torrent_client"`
+		ProwlarrURL         string                                `json:"prowlarr_url"`
+		ProwlarrAPIKey      string                                `json:"prowlarr_api_key"`
 	}
 	if err := json.Unmarshal(payload, &streamConfigs); err != nil {
 		trySendWS(client, WSMessage{Type: "save_status", Payload: json.RawMessage(`{"status":"error","message":"Invalid stream config data"}`)})
@@ -415,6 +417,8 @@ func (s *Server) handleSaveStreamConfigsWS(conn *websocket.Conn, client *Client,
 			MovieSearchQueries:  streamConfig.MovieSearchQueries,
 			SeriesSearchQueries: streamConfig.SeriesSearchQueries,
 			TorrentClient:       streamConfig.TorrentClient,
+			ProwlarrURL:         streamConfig.ProwlarrURL,
+			ProwlarrAPIKey:      streamConfig.ProwlarrAPIKey,
 		}); err != nil {
 			errors = append(errors, fmt.Sprintf("Failed to update stream config for %s: %v", username, err))
 		}

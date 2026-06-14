@@ -11,6 +11,7 @@ import (
 	"seedstream/pkg/core/config"
 	"seedstream/pkg/core/logger"
 	"seedstream/pkg/indexer"
+	"seedstream/pkg/indexer/newznab"
 	"seedstream/pkg/release"
 	"seedstream/pkg/search"
 	"seedstream/pkg/services/availnzb"
@@ -1013,7 +1014,8 @@ func (s *Server) runConfiguredSearchRequests(contentType, id, streamLabel string
 				reqVariant.Query = queryVariant
 			}
 			executedRequests++
-			releases, runErr := search.RunIndexerSearches(s.indexer, reqVariant, contentType)
+			idxrForSearch := s.streamIndexer(stream, &reqVariant)
+			releases, runErr := search.RunIndexerSearches(idxrForSearch, reqVariant, contentType)
 			if runErr != nil {
 				return nil, executedRequests, runErr
 			}
@@ -1036,6 +1038,26 @@ func (s *Server) runConfiguredSearchRequests(contentType, id, streamLabel string
 		s.addUniqueIndexerHits(map[string]int{idxName: 1})
 	}
 	return indexerReleases, executedRequests, nil
+}
+
+// streamIndexer returns the indexer to use for a search request. When the
+// stream has its own Prowlarr URL configured, a one-off Torznab client is
+// created from it and EffectiveByIndexer is cleared so the per-stream
+// Prowlarr is not filtered out. Otherwise the global server indexer is used.
+func (s *Server) streamIndexer(stream *auth.Stream, req *indexer.SearchRequest) indexer.Indexer {
+	if stream == nil || strings.TrimSpace(stream.ProwlarrURL) == "" {
+		return s.indexer
+	}
+	client := newznab.NewClient(config.IndexerConfig{
+		Name:   "prowlarr:" + stream.Username,
+		URL:    stream.ProwlarrURL,
+		APIKey: stream.ProwlarrAPIKey,
+		Type:   "torznab",
+	}, nil)
+	if req != nil {
+		req.EffectiveByIndexer = nil
+	}
+	return indexer.NewAggregator(client)
 }
 
 func singleIndexerFromReleases(releases []*release.Release) (string, bool) {
