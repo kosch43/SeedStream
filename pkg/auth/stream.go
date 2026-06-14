@@ -50,6 +50,8 @@ type Stream struct {
 	MovieSearchQueries  []string                              `json:"movie_search_queries,omitempty"`
 	SeriesSearchQueries []string                              `json:"series_search_queries,omitempty"`
 	TorrentClient       *config.TorrentClientConfig           `json:"torrent_client,omitempty"`
+	ProwlarrURL         string                                `json:"prowlarr_url,omitempty"`
+	ProwlarrAPIKey      string                                `json:"prowlarr_api_key,omitempty"`
 }
 
 type StreamManager struct {
@@ -165,6 +167,8 @@ func (dm *StreamManager) load() error {
 				MovieSearchQueries:  append([]string(nil), d.MovieSearchQueries...),
 				SeriesSearchQueries: append([]string(nil), d.SeriesSearchQueries...),
 				TorrentClient:       d.TorrentClient,
+				ProwlarrURL:         d.ProwlarrURL,
+				ProwlarrAPIKey:      d.ProwlarrAPIKey,
 			}
 			if dm.streams[k].IndexerOverrides == nil {
 				dm.streams[k].IndexerOverrides = make(map[string]config.IndexerSearchConfig)
@@ -212,6 +216,8 @@ func (dm *StreamManager) syncStreamsFromConfigLocked() bool {
 			MovieSearchQueries:  append([]string(nil), e.MovieSearchQueries...),
 			SeriesSearchQueries: append([]string(nil), e.SeriesSearchQueries...),
 			TorrentClient:       e.TorrentClient,
+			ProwlarrURL:         e.ProwlarrURL,
+			ProwlarrAPIKey:      e.ProwlarrAPIKey,
 		}
 	}
 	if _, exists := dm.streams["admin"]; exists {
@@ -248,6 +254,8 @@ func (dm *StreamManager) saveLocked() error {
 				MovieSearchQueries:  append([]string(nil), d.MovieSearchQueries...),
 				SeriesSearchQueries: append([]string(nil), d.SeriesSearchQueries...),
 				TorrentClient:       d.TorrentClient,
+				ProwlarrURL:         d.ProwlarrURL,
+				ProwlarrAPIKey:      d.ProwlarrAPIKey,
 			}
 		}
 		return dm.cfg.Save()
@@ -616,6 +624,8 @@ func (dm *StreamManager) UpdateStreamConfig(username string, streamConfig *Strea
 	stream.MovieSearchQueries = append([]string(nil), streamConfig.MovieSearchQueries...)
 	stream.SeriesSearchQueries = append([]string(nil), streamConfig.SeriesSearchQueries...)
 	stream.TorrentClient = streamConfig.TorrentClient
+	stream.ProwlarrURL = strings.TrimSpace(streamConfig.ProwlarrURL)
+	stream.ProwlarrAPIKey = strings.TrimSpace(streamConfig.ProwlarrAPIKey)
 
 	if err := dm.saveLocked(); err != nil {
 		return fmt.Errorf("failed to save stream config: %w", err)
