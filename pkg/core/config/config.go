@@ -489,6 +489,7 @@ type StreamEntry struct {
 	IndexerOverrides    map[string]IndexerSearchConfig `json:"indexer_overrides,omitempty"`
 	MovieSearchQueries  []string                       `json:"movie_search_queries,omitempty"`
 	SeriesSearchQueries []string                       `json:"series_search_queries,omitempty"`
+	TorrentClient       *TorrentClientConfig           `json:"torrent_client,omitempty"`
 }
 
 func (sq *SearchQueryConfig) AsIndexerSearchConfig() *IndexerSearchConfig {

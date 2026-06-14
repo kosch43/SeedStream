@@ -36,6 +36,17 @@ function uniquePreserveOrder(values) {
   return next
 }
 
+function normalizeTorrentClient(tc) {
+  if (!tc) return { url: '', username: '', password: '', category: '', save_path: '' }
+  return {
+    url: tc.url || tc.URL || '',
+    username: tc.username || tc.Username || '',
+    password: tc.password || tc.Password || '',
+    category: tc.category || tc.Category || '',
+    save_path: tc.save_path || tc.SavePath || '',
+  }
+}
+
 function normalizeStreamDraft(draft) {
   const normalizedFilterSortingMode = draft?.filter_sorting_mode === 'aiostreams' ? 'aiostreams' : 'none'
   return {
@@ -53,6 +64,7 @@ function normalizeStreamDraft(draft) {
     indexer_overrides: draft?.indexer_overrides || {},
     movie_search_queries: uniquePreserveOrder(draft?.movie_search_queries),
     series_search_queries: uniquePreserveOrder(draft?.series_search_queries),
+    torrent_client: normalizeTorrentClient(draft?.torrent_client),
   }
 }
 
@@ -72,6 +84,7 @@ function buildStreamDraft(stream) {
     indexer_overrides: stream?.indexer_overrides || {},
     movie_search_queries: stream?.movie_search_queries || [],
     series_search_queries: stream?.series_search_queries || [],
+    torrent_client: stream?.torrent_client || null,
   })
 }
 
@@ -83,6 +96,15 @@ function buildIndexerOverrides(selectedIndexerNames, existingOverrides = {}) {
 }
 
 function buildStreamStateFromDraft(username, token, draft, existingOverrides = {}) {
+  const tc = draft.torrent_client
+  const torrentClient = tc && tc.url ? {
+    type: 'qbittorrent',
+    url: tc.url,
+    username: tc.username || '',
+    password: tc.password || '',
+    category: tc.category || '',
+    save_path: tc.save_path || '',
+  } : null
   return {
     username,
     token: token || '',
@@ -99,6 +121,7 @@ function buildStreamStateFromDraft(username, token, draft, existingOverrides = {
     indexer_overrides: buildIndexerOverrides(draft.indexers || [], draft.indexer_overrides || existingOverrides),
     movie_search_queries: draft.movie_search_queries || [],
     series_search_queries: draft.series_search_queries || [],
+    torrent_client: torrentClient,
   }
 }
 
@@ -332,6 +355,7 @@ const STREAM_DIALOG_TABS = [
   { id: 'indexers', label: 'Indexers' },
   { id: 'movie', label: 'Movie' },
   { id: 'tv', label: 'TV' },
+  { id: 'torrent', label: 'Torrent' },
 ]
 
 function defaultStreamName(index) {
@@ -732,6 +756,61 @@ function StreamDialog({
               onMove={(fromIndex, toIndex) => moveListValue('series_search_queries', fromIndex, toIndex)}
               error={fieldErrors.series_search_queries}
             />
+          )}
+
+          {activeTab === 'torrent' && (
+            <div className="space-y-4">
+              <p className="text-sm text-muted-foreground">
+                Enter the qBittorrent WebUI details for this stream's seedbox. Leave the URL blank to use the global client configured in Settings → Torrent Clients.
+              </p>
+              <div className="space-y-3">
+                <div className="space-y-1.5">
+                  <Label>qBittorrent URL</Label>
+                  <Input
+                    value={draft.torrent_client?.url || ''}
+                    onChange={(e) => setDraft((cur) => ({ ...cur, torrent_client: { ...normalizeTorrentClient(cur.torrent_client), url: e.target.value } }))}
+                    placeholder="http://seedbox.example.com:8080"
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <Label>Username</Label>
+                    <Input
+                      value={draft.torrent_client?.username || ''}
+                      onChange={(e) => setDraft((cur) => ({ ...cur, torrent_client: { ...normalizeTorrentClient(cur.torrent_client), username: e.target.value } }))}
+                      placeholder="admin"
+                      autoComplete="off"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Password</Label>
+                    <Input
+                      type="password"
+                      value={draft.torrent_client?.password || ''}
+                      onChange={(e) => setDraft((cur) => ({ ...cur, torrent_client: { ...normalizeTorrentClient(cur.torrent_client), password: e.target.value } }))}
+                      placeholder="••••••••"
+                      autoComplete="new-password"
+                    />
+                  </div>
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Category <span className="text-muted-foreground font-normal">(optional)</span></Label>
+                  <Input
+                    value={draft.torrent_client?.category || ''}
+                    onChange={(e) => setDraft((cur) => ({ ...cur, torrent_client: { ...normalizeTorrentClient(cur.torrent_client), category: e.target.value } }))}
+                    placeholder="seedstream"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Save path <span className="text-muted-foreground font-normal">(the path SeedStream can read)</span></Label>
+                  <Input
+                    value={draft.torrent_client?.save_path || ''}
+                    onChange={(e) => setDraft((cur) => ({ ...cur, torrent_client: { ...normalizeTorrentClient(cur.torrent_client), save_path: e.target.value } }))}
+                    placeholder="/mnt/seedbox/downloads"
+                  />
+                </div>
+              </div>
+            </div>
           )}
 
         </div>
