@@ -10,9 +10,11 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { ConfirmDialog } from "@/components/ConfirmDialog"
 import { Download, Plus, Settings, Trash2 } from "lucide-react"
 
+// Presets provide starting-point URLs; credentials are always entered by the user.
 const TRACKER_PRESETS = [
-  { name: 'Jackett (all indexers)', url: 'http://localhost:9117', api_path: '/api/v2.0/indexers/all/results/torznab', timeout_seconds: 10, api_hits_day: 0 },
-  { name: 'Generic Torznab Tracker', url: '', api_path: '/api', timeout_seconds: 10, api_hits_day: 0 },
+  { name: 'Jackett (all indexers)', url: 'http://localhost:9117', api_path: '/api/v2.0/indexers/all/results/torznab', timeout_seconds: 10 },
+  { name: 'Prowlarr', url: 'http://localhost:9696', api_path: '/1/api', timeout_seconds: 10 },
+  { name: 'Generic Torznab', url: '', api_path: '/api', timeout_seconds: 10 },
 ]
 
 function normalizeName(value) {
@@ -25,6 +27,10 @@ function normalizeTrackerDraft(draft) {
     name: (v.name || '').trim(),
     url: (v.url || '').trim(),
     api_path: v.api_path || '/api',
+    // passkey: the user-specific token a private tracker issues for its Torznab/RSS
+    // feed. It is sent as the ?apikey= parameter on every Torznab request, which is
+    // how the tracker ties the search back to your account. Stored as api_key in
+    // IndexerConfig so the existing newznab/Torznab client picks it up automatically.
     api_key: v.api_key || '',
     type: 'torznab',
     api_hits_day: Number(v.api_hits_day || 0),
@@ -51,6 +57,7 @@ function formatLimitValue(value) {
 function summarizeTracker(tracker) {
   const parts = []
   if (tracker.url) parts.push(tracker.url)
+  parts.push(tracker.api_key ? 'Passkey: set' : 'Passkey: none')
   if (tracker.timeout_seconds > 0) parts.push(`Timeout: ${tracker.timeout_seconds}s`)
   else parts.push('Timeout: 10s default')
   parts.push(`Hits/day: ${formatLimitValue(tracker.api_hits_day)}`)
@@ -95,10 +102,7 @@ function TrackerDialog({ open, onOpenChange, initialValue, onSave, onClearStatus
 
   const requestClose = () => {
     if (saving) return
-    if (isDirty) {
-      setShowDiscardConfirm(true)
-      return
-    }
+    if (isDirty) { setShowDiscardConfirm(true); return }
     onClearStatus?.()
     onOpenChange(false)
   }
@@ -116,12 +120,8 @@ function TrackerDialog({ open, onOpenChange, initialValue, onSave, onClearStatus
     const nextFieldErrors = {}
     if (!draft.name?.trim()) nextFieldErrors.name = 'Tracker name is required'
     if (!draft.url?.trim()) nextFieldErrors.url = 'URL is required'
-    if (!draft.api_key?.trim()) nextFieldErrors.api_key = 'API key / passkey is required'
     if (duplicateName) nextFieldErrors.name = 'A tracker with this name already exists'
-    if (duplicateTracker) {
-      nextFieldErrors.url = `An identical tracker already exists: "${duplicateTracker.name}".`
-      nextFieldErrors.api_key = `An identical tracker already exists: "${duplicateTracker.name}".`
-    }
+    if (duplicateTracker) nextFieldErrors.url = `An identical tracker already exists: "${duplicateTracker.name}".`
     if (Object.keys(nextFieldErrors).length > 0) {
       setFieldErrors(nextFieldErrors)
       setSaveError(firstFieldErrorMessage(nextFieldErrors, 'Please review the highlighted fields.'))
@@ -165,14 +165,21 @@ function TrackerDialog({ open, onOpenChange, initialValue, onSave, onClearStatus
 
         <div className="min-h-0 flex-1 overflow-y-auto pr-1">
           <div className="space-y-4">
-            {/* Name row */}
+
+            {/* Name */}
             <div className="rounded-md border border-border/60 p-3">
               <div className={rowClass}>
                 <div className={labelClass}>
                   <Label className="text-sm font-medium">Name</Label>
                 </div>
                 <div className={controlNameClass}>
-                  <Input ref={nameInputRef} className={`h-9 ${fieldClass('name')}`} value={draft.name} onChange={(e) => update('name', e.target.value)} placeholder="e.g. My Private Tracker" />
+                  <Input
+                    ref={nameInputRef}
+                    className={`h-9 ${fieldClass('name')}`}
+                    value={draft.name}
+                    onChange={(e) => update('name', e.target.value)}
+                    placeholder="e.g. TorrentLeech"
+                  />
                   {!editing && (
                     <TooltipProvider delayDuration={100}>
                       <Tooltip open={presetTooltipOpen && !presetMenuOpen} onOpenChange={setPresetTooltipOpen}>
@@ -199,7 +206,6 @@ function TrackerDialog({ open, onOpenChange, initialValue, onSave, onClearStatus
                                   url: preset.url,
                                   api_path: preset.api_path,
                                   timeout_seconds: Number(preset.timeout_seconds || 0),
-                                  api_hits_day: Number(preset.api_hits_day || 0),
                                 }))
                                 requestAnimationFrame(() => {
                                   nameInputRef.current?.focus()
@@ -219,13 +225,13 @@ function TrackerDialog({ open, onOpenChange, initialValue, onSave, onClearStatus
               </div>
             </div>
 
-            {/* URL / API Path / Passkey */}
+            {/* URL / API Path */}
             <div className="rounded-md border border-border/60">
               <div className="p-3">
                 <div className={rowClass}>
                   <div className={labelClass}>
                     <Label className="text-sm font-medium">URL</Label>
-                    <p className="mt-1 text-xs text-muted-foreground">Base URL of the tracker</p>
+                    <p className="mt-1 text-xs text-muted-foreground">Base URL of the tracker or aggregator</p>
                   </div>
                   <div className={controlWideClass}>
                     <Input className={`h-9 ${fieldClass('url')}`} value={draft.url} onChange={(e) => update('url', e.target.value)} placeholder="https://tracker.example.com" autoComplete="off" />
@@ -236,24 +242,27 @@ function TrackerDialog({ open, onOpenChange, initialValue, onSave, onClearStatus
                 <div className="absolute left-3 right-3 top-0 border-t border-border/60" />
                 <div className={rowClass}>
                   <div className={labelClass}>
-                    <Label className="text-sm font-medium">API Path</Label>
-                    <p className="mt-1 text-xs text-muted-foreground">Torznab endpoint path</p>
+                    <Label className="text-sm font-medium">Torznab Path</Label>
+                    <p className="mt-1 text-xs text-muted-foreground">API path for the Torznab endpoint</p>
                   </div>
                   <div className={controlWideClass}>
                     <Input className={`h-9 ${fieldClass('api_path')}`} value={draft.api_path} onChange={(e) => update('api_path', e.target.value)} placeholder="/api" autoComplete="off" />
                   </div>
                 </div>
               </div>
-              <div className="relative p-3">
-                <div className="absolute left-3 right-3 top-0 border-t border-border/60" />
-                <div className={rowClass}>
-                  <div className={labelClass}>
-                    <Label className="text-sm font-medium">API Key / Passkey</Label>
-                    <p className="mt-1 text-xs text-muted-foreground">Sent as <code>?apikey=</code> parameter</p>
-                  </div>
-                  <div className={controlWideClass}>
-                    <Input className={`h-9 ${fieldClass('api_key')}`} type="password" value={draft.api_key} onChange={(e) => update('api_key', e.target.value)} autoComplete="off" />
-                  </div>
+            </div>
+
+            {/* Passkey — the credential a private tracker issues for its Torznab feed */}
+            <div className="rounded-md border border-border/60 p-3">
+              <div className={rowClass}>
+                <div className={labelClass}>
+                  <Label className="text-sm font-medium">Passkey</Label>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    The token your tracker issues for its Torznab/RSS feed (sometimes called RSS key or API key on the tracker's profile page). Sent as <code>?apikey=</code> on every request. Leave blank for public trackers.
+                  </p>
+                </div>
+                <div className={controlWideClass}>
+                  <Input className={`h-9 ${fieldClass('api_key')}`} type="password" value={draft.api_key} onChange={(e) => update('api_key', e.target.value)} autoComplete="off" />
                 </div>
               </div>
             </div>
@@ -263,7 +272,7 @@ function TrackerDialog({ open, onOpenChange, initialValue, onSave, onClearStatus
               <div className={rowClass}>
                 <div className={labelClass}>
                   <Label className="text-sm font-medium">HTTP(S) Proxy</Label>
-                  <p className="mt-1 text-xs text-muted-foreground">Optional proxy override</p>
+                  <p className="mt-1 text-xs text-muted-foreground">Optional per-tracker proxy override</p>
                 </div>
                 <div className={controlWideClass}>
                   <Input className={`h-9 ${fieldClass('proxy_url')}`} value={draft.proxy_url} onChange={(e) => update('proxy_url', e.target.value)} placeholder="http://proxy:8888" autoComplete="off" />
@@ -271,7 +280,7 @@ function TrackerDialog({ open, onOpenChange, initialValue, onSave, onClearStatus
               </div>
             </div>
 
-            {/* Rate limits / timeouts */}
+            {/* Rate limits */}
             <div className="rounded-md border border-border/60">
               <div className="p-3">
                 <div className={rowClass}>
@@ -306,6 +315,7 @@ function TrackerDialog({ open, onOpenChange, initialValue, onSave, onClearStatus
                 </div>
               </div>
             </div>
+
           </div>
         </div>
 
@@ -398,7 +408,9 @@ export function TorrentTrackerSettings({ fields = [], append, update, replace, o
             <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-3">
               <div className="min-w-0 space-y-0.5">
                 <CardTitle>Torrent Trackers</CardTitle>
-                <CardDescription>Add torrent trackers with native Torznab APIs. SeedStream searches them directly — no Prowlarr required.</CardDescription>
+                <CardDescription>
+                  Add torrent trackers directly — no Prowlarr required. Enter the passkey from your tracker's profile page; public trackers need none.
+                </CardDescription>
               </div>
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -412,7 +424,7 @@ export function TorrentTrackerSettings({ fields = [], append, update, replace, o
           </CardHeader>
           <CardContent className="space-y-3">
             {trackers.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No torrent trackers configured. Add trackers that support the Torznab API.</p>
+              <p className="text-sm text-muted-foreground">No torrent trackers configured yet.</p>
             ) : (
               trackers.map((tracker, index) => {
                 const normalized = normalizeTrackerDraft(tracker)
@@ -504,7 +516,7 @@ export function TorrentTrackerSettings({ fields = [], append, update, replace, o
           onSave={handleCreate}
           onClearStatus={onClearStatus}
           title="Add Torrent Tracker"
-          description="Add a tracker with a native Torznab API. The API key / passkey is sent as ?apikey= on every request."
+          description="Add a torrent tracker with a Torznab feed. Enter the passkey from your tracker's profile page (leave blank for public trackers)."
           saveLabel="Save"
           editing={false}
         />
