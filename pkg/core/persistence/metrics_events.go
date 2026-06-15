@@ -222,6 +222,119 @@ func (m *StateManager) GetIndexerStats(from, to *time.Time) ([]IndexerStatsRow, 
 	return out, nil
 }
 
+// TimeDistributionStats holds per-hour and per-weekday counts for searches and
+// successful downloads over a [from,to) window.
+type TimeDistributionStats struct {
+	SearchesByHour     [24]int64 `json:"searches_by_hour"`
+	SearchesByWeekday  [7]int64  `json:"searches_by_weekday"`
+	DownloadsByHour    [24]int64 `json:"downloads_by_hour"`
+	DownloadsByWeekday [7]int64  `json:"downloads_by_weekday"`
+}
+
+// GetTimeDistribution aggregates search and download events into hour-of-day and
+// day-of-week buckets over the [from,to) window. SQLite's strftime is used so
+// the bucketing respects the UTC epoch stored in the ts column.
+func (m *StateManager) GetTimeDistribution(from, to *time.Time) (*TimeDistributionStats, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	lo, hi := eventRange(from, to)
+	out := &TimeDistributionStats{}
+
+	// Searches by hour using SQLite strftime
+	rows, err := m.db.Query(`
+		SELECT CAST(strftime('%H', datetime(ts, 'unixepoch')) AS INTEGER) as hour, COUNT(*) as cnt
+		FROM indexer_search_events WHERE ts >= ? AND ts < ?
+		GROUP BY hour`, lo, hi)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var h, cnt int
+		if err := rows.Scan(&h, &cnt); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if h >= 0 && h < 24 {
+			out.SearchesByHour[h] = int64(cnt)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Searches by weekday (0=Sunday in SQLite strftime('%w'))
+	rows, err = m.db.Query(`
+		SELECT CAST(strftime('%w', datetime(ts, 'unixepoch')) AS INTEGER) as wday, COUNT(*) as cnt
+		FROM indexer_search_events WHERE ts >= ? AND ts < ?
+		GROUP BY wday`, lo, hi)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var w, cnt int
+		if err := rows.Scan(&w, &cnt); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if w >= 0 && w < 7 {
+			out.SearchesByWeekday[w] = int64(cnt)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Downloads by hour (success=1 only)
+	rows, err = m.db.Query(`
+		SELECT CAST(strftime('%H', datetime(ts, 'unixepoch')) AS INTEGER) as hour, COUNT(*) as cnt
+		FROM indexer_download_events WHERE ts >= ? AND ts < ? AND success = 1
+		GROUP BY hour`, lo, hi)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var h, cnt int
+		if err := rows.Scan(&h, &cnt); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if h >= 0 && h < 24 {
+			out.DownloadsByHour[h] = int64(cnt)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Downloads by weekday
+	rows, err = m.db.Query(`
+		SELECT CAST(strftime('%w', datetime(ts, 'unixepoch')) AS INTEGER) as wday, COUNT(*) as cnt
+		FROM indexer_download_events WHERE ts >= ? AND ts < ? AND success = 1
+		GROUP BY wday`, lo, hi)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var w, cnt int
+		if err := rows.Scan(&w, &cnt); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if w >= 0 && w < 7 {
+			out.DownloadsByWeekday[w] = int64(cnt)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return out, nil
+}
+
 // GetProviderStats aggregates per-provider access deltas over the [from,to)
 // window. Only measured values are returned. data_share_pct is the share of
 // downloaded bytes across all providers in the window.

@@ -75,20 +75,6 @@ function rangeFromPreset(preset) {
   }
 }
 
-// User-selectable bar-chart metric for the indexer section. No fabricated
-// metrics: every option maps to a measured/aggregated value from the backend.
-const indexerMetricOptions = {
-  uniqueness: { label: 'Uniqueness score', key: 'uniquenessScore' },
-  searches: { label: 'Searches', key: 'searches' },
-  searchShare: { label: 'Search share %', key: 'searchSharePct' },
-  response: { label: 'Avg response (ms)', key: 'avgResponseMs' },
-  results: { label: 'Avg results', key: 'avgResults' },
-  success: { label: 'Success %', key: 'successRatePct' },
-  downloads: { label: 'Downloads', key: 'downloads' },
-  downloadShare: { label: 'Download share %', key: 'downloadSharePct' },
-  uniqueDownloads: { label: 'Unique downloads', key: 'uniqueDownloads' },
-}
-
 function normalizeIndexerRow(item) {
   const name = String(pick(item, 'indexer_name', 'IndexerName', '') || '').trim()
   if (!name) return null
@@ -121,6 +107,35 @@ function normalizeProviderRow(item) {
   }
 }
 
+// Compute weighted average response time across all indexers that have data.
+function computeWindowAvgResponseMs(rows) {
+  let totalWeightedMs = 0
+  let totalSearches = 0
+  for (const row of rows) {
+    if (row.avgResponseMs > 0 && row.searches > 0) {
+      totalWeightedMs += row.avgResponseMs * row.searches
+      totalSearches += row.searches
+    }
+  }
+  if (totalSearches === 0) return 0
+  return totalWeightedMs / totalSearches
+}
+
+// All indexer table columns (used for sorting and rendering).
+const INDEXER_COLUMNS = [
+  { key: 'name',             label: 'Indexer',           align: 'left'  },
+  { key: 'searches',         label: 'Searches',          align: 'right' },
+  { key: 'searchSharePct',   label: 'Search share %',    align: 'right' },
+  { key: 'avgResponseMs',    label: 'Avg response (ms)', align: 'right' },
+  { key: 'delta',            label: 'Delta',             align: 'right', noSort: true },
+  { key: 'avgResults',       label: 'Avg results',       align: 'right' },
+  { key: 'successRatePct',   label: 'Success %',         align: 'right' },
+  { key: 'downloads',        label: 'Downloads',         align: 'right' },
+  { key: 'downloadSharePct', label: 'Download share %',  align: 'right' },
+  { key: 'uniqueDownloads',  label: 'Unique downloads',  align: 'right' },
+  { key: 'uniquenessScore',  label: 'Uniqueness score',  align: 'right' },
+]
+
 const providerChartConfig = {
   data: {
     label: "Data share %",
@@ -128,15 +143,87 @@ const providerChartConfig = {
   },
 }
 
+const indexerDownloadChartConfig = {
+  value: {
+    label: "Download share %",
+    color: "hsl(var(--primary))",
+  },
+}
+
+const timeDistChartConfig = {
+  count: {
+    label: "Count",
+    color: "hsl(var(--primary))",
+  },
+}
+
+// Check whether all values in an array are zero.
+function allZero(arr) {
+  return arr.every((v) => v === 0)
+}
+
+// Build hour-of-day chart data (0..23).
+function buildHourChartData(arr) {
+  return Array.from({ length: 24 }, (_, h) => ({
+    label: String(h).padStart(2, '0'),
+    count: toNumber(arr[h]),
+  }))
+}
+
+// Build weekday chart data (0=Sun..6=Sat).
+const WEEKDAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+function buildWeekdayChartData(arr) {
+  return Array.from({ length: 7 }, (_, w) => ({
+    label: WEEKDAY_LABELS[w],
+    count: toNumber(arr[w]),
+  }))
+}
+
+function SortIcon({ direction }) {
+  if (!direction) return <span className="ml-1 opacity-30 text-xs">↕</span>
+  return <span className="ml-1 text-xs">{direction === 'asc' ? '↑' : '↓'}</span>
+}
+
+function TimeDistChart({ title, data }) {
+  const empty = data.every((d) => d.count === 0)
+  return (
+    <Card className="overflow-hidden">
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm font-medium">{title}</CardTitle>
+      </CardHeader>
+      <CardContent>
+        {empty ? (
+          <div className="flex items-center justify-center h-32 text-sm text-muted-foreground">
+            No data for this window.
+          </div>
+        ) : (
+          <ChartContainer config={timeDistChartConfig} className="w-full" style={{ height: '160px' }}>
+            <BarChart data={data} margin={{ top: 4, right: 4, left: -20, bottom: 4 }}>
+              <CartesianGrid vertical={false} />
+              <XAxis dataKey="label" tick={{ fontSize: 10 }} />
+              <YAxis tick={{ fontSize: 10 }} allowDecimals={false} />
+              <ChartTooltip content={<ChartTooltipContent />} />
+              <Bar dataKey="count" fill="var(--color-count)" radius={2} name="count" />
+            </BarChart>
+          </ChartContainer>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
 export function StatisticsPage() {
   const [indexerStats, setIndexerStats] = useState([])
   const [providerStats, setProviderStats] = useState([])
+  const [timeDist, setTimeDist] = useState(null)
   const [preset, setPreset] = useState('30d')
   const [customRange, setCustomRange] = useState(defaultDateRange())
   const [activeRange, setActiveRange] = useState(defaultDateRange())
-  const [indexerMetric, setIndexerMetric] = useState('uniqueness')
   const [loading, setLoading] = useState(false)
   const [loadError, setLoadError] = useState('')
+  // Indexer table sort: default searches desc
+  const [sortKey, setSortKey] = useState('searches')
+  const [sortDir, setSortDir] = useState('desc')
   const inFlightRef = useRef(false)
 
   const loadStats = useCallback(async (from, to, { background = false } = {}) => {
@@ -163,11 +250,13 @@ export function StatisticsPage() {
         .filter(Boolean)
       setIndexerStats(indexers)
       setProviderStats(providers)
+      setTimeDist(idxData?.time_distribution ?? null)
     } catch (error) {
       if (!background) {
         setLoadError(error?.message || 'Failed to load statistics.')
         setIndexerStats([])
         setProviderStats([])
+        setTimeDist(null)
       }
     } finally {
       if (!background) {
@@ -231,38 +320,64 @@ export function StatisticsPage() {
     return ''
   }, [customRange.from, customRange.to, preset])
 
-  const indexerMetricKey = indexerMetricOptions[indexerMetric]?.key || 'uniquenessScore'
+  // Weighted mean response time across the window.
+  const windowAvgResponseMs = useMemo(() => computeWindowAvgResponseMs(indexerStats), [indexerStats])
 
+  // Sorted indexer rows (column click toggles asc/desc; default searches desc).
   const indexerRows = useMemo(() => {
     const rows = [...indexerStats]
-    return rows.sort((a, b) => {
-      const aMetric = toNumber(a[indexerMetricKey])
-      const bMetric = toNumber(b[indexerMetricKey])
-      if (aMetric === bMetric) return a.name.localeCompare(b.name)
-      return bMetric - aMetric
+    rows.sort((a, b) => {
+      let aVal, bVal
+      if (sortKey === 'name') {
+        aVal = a.name
+        bVal = b.name
+        const cmp = aVal.localeCompare(bVal)
+        return sortDir === 'asc' ? cmp : -cmp
+      }
+      aVal = toNumber(a[sortKey])
+      bVal = toNumber(b[sortKey])
+      if (aVal === bVal) return a.name.localeCompare(b.name)
+      return sortDir === 'asc' ? aVal - bVal : bVal - aVal
     })
-  }, [indexerStats, indexerMetricKey])
+    return rows
+  }, [indexerStats, sortKey, sortDir])
+
+  // Summary totals row for indexer table.
+  const indexerTotals = useMemo(() => {
+    if (indexerStats.length === 0) return null
+    const totalSearches = indexerStats.reduce((s, r) => s + r.searches, 0)
+    const totalDownloads = indexerStats.reduce((s, r) => s + r.downloads, 0)
+    const totalUniqueDownloads = indexerStats.reduce((s, r) => s + r.uniqueDownloads, 0)
+    // Weighted avg response (only rows with data)
+    const avgResp = windowAvgResponseMs
+    // Weighted avg success rate
+    let totalSuccessWeight = 0
+    let totalSuccessSearches = 0
+    for (const r of indexerStats) {
+      if (r.searches > 0) {
+        totalSuccessWeight += r.successRatePct * r.searches
+        totalSuccessSearches += r.searches
+      }
+    }
+    const avgSuccess = totalSuccessSearches > 0 ? totalSuccessWeight / totalSuccessSearches : 0
+    return { totalSearches, totalDownloads, totalUniqueDownloads, avgResp, avgSuccess }
+  }, [indexerStats, windowAvgResponseMs])
+
+  // Download share chart (sorted by share desc).
+  const indexerDownloadChartData = useMemo(() => {
+    return [...indexerStats]
+      .sort((a, b) => b.downloadSharePct - a.downloadSharePct)
+      .map((row) => ({ name: row.name, value: row.downloadSharePct }))
+  }, [indexerStats])
 
   const providerRows = useMemo(() => {
     return [...providerStats].sort((a, b) => b.downloadedBytes - a.downloadedBytes)
   }, [providerStats])
 
-  const indexerChartData = useMemo(() => indexerRows.map((row) => ({
-    name: row.name,
-    value: toNumber(row[indexerMetricKey]),
-  })), [indexerMetricKey, indexerRows])
-
   const providerChartData = useMemo(() => providerRows.map((row) => ({
     name: row.name,
     data: row.dataSharePct,
   })), [providerRows])
-
-  const indexerChartConfig = useMemo(() => ({
-    value: {
-      label: indexerMetricOptions[indexerMetric]?.label || 'Metric',
-      color: "hsl(var(--primary))",
-    },
-  }), [indexerMetric])
 
   const rangeLabel = useMemo(() => {
     const from = activeRange?.from || 'Beginning'
@@ -270,11 +385,47 @@ export function StatisticsPage() {
     return `${from} - ${to}`
   }, [activeRange])
 
-  const indexerChartHeight = Math.max(220, indexerChartData.length * 42)
+  // Time distribution chart data
+  const searchesByHour = useMemo(() =>
+    buildHourChartData(timeDist?.searches_by_hour ?? new Array(24).fill(0)),
+    [timeDist])
+  const searchesByWeekday = useMemo(() =>
+    buildWeekdayChartData(timeDist?.searches_by_weekday ?? new Array(7).fill(0)),
+    [timeDist])
+  const downloadsByHour = useMemo(() =>
+    buildHourChartData(timeDist?.downloads_by_hour ?? new Array(24).fill(0)),
+    [timeDist])
+  const downloadsByWeekday = useMemo(() =>
+    buildWeekdayChartData(timeDist?.downloads_by_weekday ?? new Array(7).fill(0)),
+    [timeDist])
+
+  const indexerDownloadChartHeight = Math.max(220, indexerDownloadChartData.length * 42)
   const providerChartHeight = Math.max(220, providerChartData.length * 42)
+
+  function handleSortClick(key) {
+    setSortKey((prev) => {
+      if (prev === key) {
+        setSortDir((d) => d === 'asc' ? 'desc' : 'asc')
+        return key
+      }
+      setSortDir('desc')
+      return key
+    })
+  }
+
+  function formatDelta(row) {
+    if (row.avgResponseMs <= 0 || row.searches === 0 || windowAvgResponseMs === 0) return null
+    const delta = row.avgResponseMs - windowAvgResponseMs
+    const abs = Math.round(Math.abs(delta))
+    if (abs === 0) return { text: '0 ms', color: 'text-muted-foreground' }
+    const sign = delta > 0 ? '+' : '−'
+    const color = delta > 0 ? 'text-red-500' : 'text-green-500'
+    return { text: `${sign}${abs} ms`, color }
+  }
 
   return (
     <div className="flex flex-col gap-4 py-4 md:gap-6 md:py-6 px-4 lg:px-6">
+      {/* Date range picker */}
       <Card>
         <CardHeader>
           <CardTitle>Date Range</CardTitle>
@@ -349,66 +500,56 @@ export function StatisticsPage() {
         </Card>
       )}
 
-      <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
-        <Card className="overflow-hidden">
-          <CardHeader>
-            <div className="flex items-center gap-2">
-              <Gauge className="h-5 w-5 text-primary" />
-              <CardTitle>Indexer statistics</CardTitle>
-            </div>
-            <CardDescription>Searches, response times, success rate, downloads, and uniqueness score aggregated over the window.</CardDescription>
-            <div className="pt-2">
-              <ToggleGroup
-                type="single"
-                value={indexerMetric}
-                onValueChange={(value) => {
-                  if (!value) return
-                  setIndexerMetric(value)
-                }}
-                variant="outline"
-                size="sm"
-                className="flex-wrap justify-start"
-              >
-                {Object.entries(indexerMetricOptions).map(([key, opt]) => (
-                  <ToggleGroupItem key={key} value={key}>{opt.label}</ToggleGroupItem>
-                ))}
-              </ToggleGroup>
-            </div>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <ChartContainer config={indexerChartConfig} className="w-full" style={{ height: `${indexerChartHeight}px` }}>
-              <BarChart data={indexerChartData} layout="vertical" margin={{ top: 8, right: 12, left: 12, bottom: 8 }}>
-                <CartesianGrid horizontal={false} />
-                <XAxis type="number" tick={{ fontSize: 11 }} />
-                <YAxis type="category" dataKey="name" width={160} tick={{ fontSize: 11 }} />
-                <ChartTooltip content={<ChartTooltipContent />} />
-                <Bar dataKey="value" fill="var(--color-value)" radius={4} name="value" />
-              </BarChart>
-            </ChartContainer>
+      {/* Indexer section — full width */}
+      <Card className="overflow-hidden">
+        <CardHeader>
+          <div className="flex items-center gap-2">
+            <Gauge className="h-5 w-5 text-primary" />
+            <CardTitle>Indexer statistics</CardTitle>
+          </div>
+          <CardDescription>Searches, response times, success rate, downloads, and uniqueness score aggregated over the window.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {/* Download share bar chart — always visible, no chip selector */}
+          <ChartContainer config={indexerDownloadChartConfig} className="w-full" style={{ height: `${indexerDownloadChartHeight}px` }}>
+            <BarChart data={indexerDownloadChartData} layout="vertical" margin={{ top: 8, right: 12, left: 12, bottom: 8 }}>
+              <CartesianGrid horizontal={false} />
+              <XAxis type="number" tick={{ fontSize: 11 }} unit="%" />
+              <YAxis type="category" dataKey="name" width={160} tick={{ fontSize: 11 }} />
+              <ChartTooltip content={<ChartTooltipContent />} />
+              <Bar dataKey="value" fill="var(--color-value)" radius={4} name="value" />
+            </BarChart>
+          </ChartContainer>
 
-            <div className="overflow-x-auto rounded-md border border-border/60">
-              <table className="w-full text-sm">
-                <thead className="bg-muted/40 text-muted-foreground">
-                  <tr>
-                    <th className="px-3 py-2 text-left font-medium">Indexer</th>
-                    <th className="px-3 py-2 text-right font-medium">Searches</th>
-                    <th className="px-3 py-2 text-right font-medium">Search share</th>
-                    <th className="px-3 py-2 text-right font-medium">Avg response</th>
-                    <th className="px-3 py-2 text-right font-medium">Avg results</th>
-                    <th className="px-3 py-2 text-right font-medium">Success</th>
-                    <th className="px-3 py-2 text-right font-medium">Downloads</th>
-                    <th className="px-3 py-2 text-right font-medium">Download share</th>
-                    <th className="px-3 py-2 text-right font-medium">Unique downloads</th>
-                    <th className="px-3 py-2 text-right font-medium">Uniqueness score</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {indexerRows.map((row) => (
+          {/* Full-width sortable table */}
+          <div className="overflow-x-auto rounded-md border border-border/60">
+            <table className="w-full text-sm">
+              <thead className="bg-muted/40 text-muted-foreground">
+                <tr>
+                  {INDEXER_COLUMNS.map((col) => (
+                    <th
+                      key={col.key}
+                      className={`px-3 py-2 font-medium whitespace-nowrap ${col.align === 'right' ? 'text-right' : 'text-left'} ${col.noSort ? '' : 'cursor-pointer select-none hover:text-foreground'}`}
+                      onClick={col.noSort ? undefined : () => handleSortClick(col.key)}
+                    >
+                      {col.label}
+                      {!col.noSort && <SortIcon direction={sortKey === col.key ? sortDir : null} />}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {indexerRows.map((row) => {
+                  const delta = formatDelta(row)
+                  return (
                     <tr key={row.name} className="border-t border-border/50">
-                      <td className="px-3 py-2"><span className="truncate">{row.name}</span></td>
+                      <td className="px-3 py-2 whitespace-nowrap">{row.name}</td>
                       <td className="px-3 py-2 text-right tabular-nums">{row.searches}</td>
                       <td className="px-3 py-2 text-right tabular-nums">{formatPct(row.searchSharePct)}</td>
                       <td className="px-3 py-2 text-right tabular-nums">{row.avgResponseMs > 0 ? `${row.avgResponseMs.toFixed(0)} ms` : 'N/A'}</td>
+                      <td className={`px-3 py-2 text-right tabular-nums ${delta ? delta.color : 'text-muted-foreground'}`}>
+                        {delta ? delta.text : '—'}
+                      </td>
                       <td className="px-3 py-2 text-right tabular-nums">{row.avgResults.toFixed(1)}</td>
                       <td className="px-3 py-2 text-right tabular-nums">{formatPct(row.successRatePct)}</td>
                       <td className="px-3 py-2 text-right tabular-nums">{row.downloads}</td>
@@ -416,77 +557,103 @@ export function StatisticsPage() {
                       <td className="px-3 py-2 text-right tabular-nums">{row.uniqueDownloads}</td>
                       <td className="px-3 py-2 text-right tabular-nums">{row.uniquenessScore.toFixed(0)}</td>
                     </tr>
-                  ))}
-                  {indexerRows.length === 0 && (
-                    <tr>
-                      <td colSpan={10} className="px-3 py-6 text-center text-muted-foreground">No indexer statistics in this window.</td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card className="overflow-hidden">
-          <CardHeader>
-            <div className="flex items-center gap-2">
-              <Database className="h-5 w-5 text-primary" />
-              <CardTitle>Provider statistics</CardTitle>
-            </div>
-            <CardDescription>Article availability and downloaded volume aggregated per provider over the window.</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <ChartContainer config={providerChartConfig} className="w-full" style={{ height: `${providerChartHeight}px` }}>
-              <BarChart data={providerChartData} layout="vertical" margin={{ top: 8, right: 12, left: 12, bottom: 8 }}>
-                <CartesianGrid horizontal={false} />
-                <XAxis type="number" tick={{ fontSize: 11 }} />
-                <YAxis type="category" dataKey="name" width={160} tick={{ fontSize: 11 }} />
-                <ChartTooltip content={<ChartTooltipContent />} />
-                <Bar dataKey="data" fill="var(--color-data)" radius={4} name="data" />
-              </BarChart>
-            </ChartContainer>
-
-            <div className="overflow-x-auto rounded-md border border-border/60">
-              <table className="w-full text-sm">
-                <thead className="bg-muted/40 text-muted-foreground">
-                  <tr>
-                    <th className="px-3 py-2 text-left font-medium">Provider</th>
-                    <th className="px-3 py-2 text-right font-medium">Articles</th>
-                    <th className="px-3 py-2 text-right font-medium">Available</th>
-                    <th className="px-3 py-2 text-right font-medium">Missing</th>
-                    <th className="px-3 py-2 text-right font-medium">Success</th>
-                    <th className="px-3 py-2 text-right font-medium">Downloaded</th>
-                    <th className="px-3 py-2 text-right font-medium">Data share</th>
+                  )
+                })}
+                {/* Totals row */}
+                {indexerTotals && (
+                  <tr className="border-t-2 border-border bg-muted/30 font-medium">
+                    <td className="px-3 py-2">Total / Avg</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{indexerTotals.totalSearches}</td>
+                    <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">&mdash;</td>
+                    <td className="px-3 py-2 text-right tabular-nums">
+                      {indexerTotals.avgResp > 0 ? `${indexerTotals.avgResp.toFixed(0)} ms` : 'N/A'}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">&mdash;</td>
+                    <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">&mdash;</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{formatPct(indexerTotals.avgSuccess)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{indexerTotals.totalDownloads}</td>
+                    <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">&mdash;</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{indexerTotals.totalUniqueDownloads}</td>
+                    <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">&mdash;</td>
                   </tr>
-                </thead>
-                <tbody>
-                  {providerRows.map((row) => (
-                    <tr key={row.name} className="border-t border-border/50">
-                      <td className="px-3 py-2">
-                        <div className="flex items-center gap-2"><span className="truncate">{row.name}</span></div>
-                        {row.host && <div className="text-xs text-muted-foreground truncate">{row.host}</div>}
-                      </td>
-                      <td className="px-3 py-2 text-right tabular-nums">{row.articles}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">{row.available}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">{row.missing}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">{formatPct(row.successRatePct)}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">{formatDownloadedBytes(row.downloadedBytes)}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">{formatPct(row.dataSharePct)}</td>
-                    </tr>
-                  ))}
-                  {providerRows.length === 0 && (
-                    <tr>
-                      <td colSpan={7} className="px-3 py-6 text-center text-muted-foreground">No provider statistics in this window.</td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </CardContent>
-        </Card>
+                )}
+                {indexerRows.length === 0 && (
+                  <tr>
+                    <td colSpan={INDEXER_COLUMNS.length} className="px-3 py-6 text-center text-muted-foreground">No indexer statistics in this window.</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Time distribution charts — 2×2 grid */}
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <TimeDistChart title="Searches by hour of day" data={searchesByHour} />
+        <TimeDistChart title="Searches by day of week" data={searchesByWeekday} />
+        <TimeDistChart title="Downloads by hour of day" data={downloadsByHour} />
+        <TimeDistChart title="Downloads by day of week" data={downloadsByWeekday} />
       </div>
 
+      {/* Provider section — full width */}
+      <Card className="overflow-hidden">
+        <CardHeader>
+          <div className="flex items-center gap-2">
+            <Database className="h-5 w-5 text-primary" />
+            <CardTitle>Provider statistics</CardTitle>
+          </div>
+          <CardDescription>Article availability and downloaded volume aggregated per provider over the window.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <ChartContainer config={providerChartConfig} className="w-full" style={{ height: `${providerChartHeight}px` }}>
+            <BarChart data={providerChartData} layout="vertical" margin={{ top: 8, right: 12, left: 12, bottom: 8 }}>
+              <CartesianGrid horizontal={false} />
+              <XAxis type="number" tick={{ fontSize: 11 }} />
+              <YAxis type="category" dataKey="name" width={160} tick={{ fontSize: 11 }} />
+              <ChartTooltip content={<ChartTooltipContent />} />
+              <Bar dataKey="data" fill="var(--color-data)" radius={4} name="data" />
+            </BarChart>
+          </ChartContainer>
+
+          <div className="overflow-x-auto rounded-md border border-border/60">
+            <table className="w-full text-sm">
+              <thead className="bg-muted/40 text-muted-foreground">
+                <tr>
+                  <th className="px-3 py-2 text-left font-medium">Provider</th>
+                  <th className="px-3 py-2 text-right font-medium">Articles</th>
+                  <th className="px-3 py-2 text-right font-medium">Available</th>
+                  <th className="px-3 py-2 text-right font-medium">Missing</th>
+                  <th className="px-3 py-2 text-right font-medium">Success</th>
+                  <th className="px-3 py-2 text-right font-medium">Downloaded</th>
+                  <th className="px-3 py-2 text-right font-medium">Data share</th>
+                </tr>
+              </thead>
+              <tbody>
+                {providerRows.map((row) => (
+                  <tr key={row.name} className="border-t border-border/50">
+                    <td className="px-3 py-2">
+                      <div className="flex items-center gap-2"><span className="truncate">{row.name}</span></div>
+                      {row.host && <div className="text-xs text-muted-foreground truncate">{row.host}</div>}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums">{row.articles}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{row.available}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{row.missing}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{formatPct(row.successRatePct)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{formatDownloadedBytes(row.downloadedBytes)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{formatPct(row.dataSharePct)}</td>
+                  </tr>
+                ))}
+                {providerRows.length === 0 && (
+                  <tr>
+                    <td colSpan={7} className="px-3 py-6 text-center text-muted-foreground">No provider statistics in this window.</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </CardContent>
+      </Card>
     </div>
   )
 }
