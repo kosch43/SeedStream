@@ -83,6 +83,7 @@ function normalizeIndexerRow(item) {
     downloadSharePct: toNumber(pick(item, 'download_share_pct', 'DownloadSharePct')),
     uniqueDownloads:  toNumber(pick(item, 'unique_downloads', 'UniqueDownloads')),
     uniquenessScore:  toNumber(pick(item, 'avg_uniqueness_score', 'AvgUniquenessScore')),
+    protocol:         String(pick(item, 'protocol', 'Protocol', 'usenet') || 'usenet').toLowerCase() === 'torrent' ? 'torrent' : 'usenet',
   }
 }
 
@@ -343,6 +344,8 @@ export function StatisticsPage() {
   )
   // Which indexer score row is expanded (name string or null)
   const [expandedIndexer, setExpandedIndexer] = useState(null)
+  // 'usenet' (Newznab indexers) or 'torrent' (Torznab trackers)
+  const [statScope, setStatScope] = useState('usenet')
   const inFlightRef = useRef(false)
 
   function toggleSection(key) {
@@ -414,7 +417,15 @@ export function StatisticsPage() {
     return ''
   }, [customRange.from, customRange.to, preset])
 
-  const winAvgMs   = useMemo(() => calcWindowAvgMs(indexerStats), [indexerStats])
+  // Separate Torznab tracker stats from Usenet indexer stats. The scope toggle
+  // only appears once tracker stats exist, so usenet-only setups are unchanged.
+  const hasTrackerStats = useMemo(() => indexerStats.some((r) => r.protocol === 'torrent'), [indexerStats])
+  const effectiveScope = hasTrackerStats ? statScope : 'usenet'
+  const scopedRows = useMemo(
+    () => indexerStats.filter((r) => r.protocol === effectiveScope),
+    [indexerStats, effectiveScope])
+
+  const winAvgMs   = useMemo(() => calcWindowAvgMs(scopedRows), [scopedRows])
   const rangeLabel = useMemo(() => `${activeRange.from || 'Beginning'} – ${activeRange.to || 'Now'}`, [activeRange])
 
   const daysInWindow = useMemo(() => {
@@ -424,12 +435,12 @@ export function StatisticsPage() {
   }, [activeRange])
 
   // Derived per-section data
-  const scoreSorted = useMemo(() => [...indexerStats].sort((a, b) => b.uniquenessScore - a.uniquenessScore), [indexerStats])
-  const respSorted  = useMemo(() => [...indexerStats].filter(r => r.searches > 0).sort((a, b) => a.avgResponseMs - b.avgResponseMs), [indexerStats])
+  const scoreSorted = useMemo(() => [...scopedRows].sort((a, b) => b.uniquenessScore - a.uniquenessScore), [scopedRows])
+  const respSorted  = useMemo(() => [...scopedRows].filter(r => r.searches > 0).sort((a, b) => a.avgResponseMs - b.avgResponseMs), [scopedRows])
   const respChartData = useMemo(() => respSorted.filter(r => r.avgResponseMs > 0).map(r => ({ name: r.name, value: Math.round(r.avgResponseMs) })), [respSorted])
-  const apiSorted   = useMemo(() => [...indexerStats].sort((a, b) => b.searches - a.searches), [indexerStats])
+  const apiSorted   = useMemo(() => [...scopedRows].sort((a, b) => b.searches - a.searches), [scopedRows])
   const apiChartData = useMemo(() => apiSorted.map(r => ({ name: r.name, value: r.searches })), [apiSorted])
-  const dlSorted    = useMemo(() => [...indexerStats].sort((a, b) => b.downloads - a.downloads), [indexerStats])
+  const dlSorted    = useMemo(() => [...scopedRows].sort((a, b) => b.downloads - a.downloads), [scopedRows])
   const dlChartData = useMemo(() => dlSorted.map(r => ({ name: r.name, value: r.downloads })), [dlSorted])
 
   const searchesByHour     = useMemo(() => buildHourData(timeDist?.searches_by_hour ?? new Array(24).fill(0)), [timeDist])
@@ -481,6 +492,25 @@ export function StatisticsPage() {
       </Card>
 
       {loadError && <div className="text-sm text-destructive px-1">{loadError}</div>}
+
+      {/* Scope: Usenet indexers vs Torrent trackers (only once tracker stats exist) */}
+      {hasTrackerStats && (
+        <Card>
+          <CardContent className="pt-4 pb-4">
+            <div className="flex flex-wrap items-center gap-2">
+              <ToggleGroup type="single" value={effectiveScope}
+                onValueChange={(v) => { if (!v) return; setStatScope(v) }}
+                variant="outline" size="sm" className="justify-start">
+                <ToggleGroupItem value="usenet">Usenet indexers</ToggleGroupItem>
+                <ToggleGroupItem value="torrent">Torrent trackers</ToggleGroupItem>
+              </ToggleGroup>
+              <span className="text-xs text-muted-foreground">
+                {effectiveScope === 'torrent' ? 'Showing Torznab tracker stats' : 'Showing Usenet indexer stats'}
+              </span>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Section toggles */}
       <Card>
@@ -541,7 +571,7 @@ export function StatisticsPage() {
                         <IndexerDetailPanel
                           key={`${row.name}-detail`}
                           row={row}
-                          allRows={indexerStats}
+                          allRows={scopedRows}
                           winAvgMs={winAvgMs}
                         />
                       )}
@@ -653,21 +683,22 @@ export function StatisticsPage() {
         </StatsCard>
       )}
 
-      {/* ── Time distribution ── */}
-      {sections.searchesByHour && (
+      {/* ── Time distribution (global activity / Usenet downloads) ── */}
+      {effectiveScope === 'usenet' && sections.searchesByHour && (
         <StatsCard title="Searches per hour of day"><TimeBarChart data={searchesByHour} /></StatsCard>
       )}
-      {sections.searchesByWeekday && (
+      {effectiveScope === 'usenet' && sections.searchesByWeekday && (
         <StatsCard title="Searches per day of week"><TimeBarChart data={searchesByWeekday} /></StatsCard>
       )}
-      {sections.downloadsByHour && (
+      {effectiveScope === 'usenet' && sections.downloadsByHour && (
         <StatsCard title="NZB downloads per hour of day"><TimeBarChart data={downloadsByHour} /></StatsCard>
       )}
-      {sections.downloadsByWeekday && (
+      {effectiveScope === 'usenet' && sections.downloadsByWeekday && (
         <StatsCard title="NZB downloads per day of week"><TimeBarChart data={downloadsByWeekday} /></StatsCard>
       )}
 
-      {/* ── Provider statistics ── */}
+      {/* ── Provider statistics (Usenet NNTP only) ── */}
+      {effectiveScope === 'usenet' && (
       <StatsCard title="Provider statistics">
         {provChartData.length > 0 && (
           <div className="px-4 pt-2 pb-1">
@@ -717,6 +748,7 @@ export function StatisticsPage() {
           </tbody>
         </SimpleTable>
       </StatsCard>
+      )}
 
     </div>
   )
