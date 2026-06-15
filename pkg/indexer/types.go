@@ -126,6 +126,17 @@ func (i *Item) GetAttribute(name string) string {
 	return ""
 }
 
+// IsTorrent reports whether this item came from a Torznab tracker rather than
+// a Newznab/Usenet indexer. The check mirrors the protocol detection in ToRelease
+// so the two are always in sync.
+func (i *Item) IsTorrent() bool {
+	return i.GetAttribute("magneturl") != "" ||
+		i.GetAttribute("infohash") != "" ||
+		i.GetAttribute("seeders") != "" ||
+		strings.Contains(strings.ToLower(i.Enclosure.Type), "bittorrent") ||
+		strings.HasPrefix(strings.ToLower(i.Link), "magnet:")
+}
+
 func (i *Item) ToRelease() *release.Release {
 	if i == nil {
 		return nil

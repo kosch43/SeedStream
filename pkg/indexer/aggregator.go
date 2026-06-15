@@ -216,7 +216,13 @@ func (a *Aggregator) searchCombined(req SearchRequest) (*SearchResponse, error) 
 			continue
 		}
 
-		titleSizeKey := fmt.Sprintf("%s:%d", normalizedTitle, item.Size)
+		// Include protocol in the key so that a usenet NZB and a torrent release
+		// for the same title+size are never collapsed into one.
+		protocol := "usenet"
+		if item.IsTorrent() {
+			protocol = "torrent"
+		}
+		titleSizeKey := fmt.Sprintf("%s:%s:%d", normalizedTitle, protocol, item.Size)
 		if item.Size > 0 && seenTitleSize[titleSizeKey] {
 			continue
 		}
