@@ -21,6 +21,7 @@ import (
 	"seedstream/pkg/media/seek"
 	"seedstream/pkg/media/unpack"
 	"seedstream/pkg/release"
+	"seedstream/pkg/stats"
 	"seedstream/pkg/usenet/nntp"
 	"seedstream/pkg/usenet/pool"
 )
@@ -951,9 +952,17 @@ func (s *Session) GetOrDownloadNZBWithContext(ctx context.Context, manager *Mana
 		segmentFetcher := s.segmentFetcher
 		itemTitle := ""
 		indexerName := ""
+		indexersInSearch := 1
+		indexersWithResult := 1
 		if s.Release != nil {
 			itemTitle = s.Release.Title
 			indexerName = s.Release.Indexer
+			if s.Release.IndexersInSearch > 0 {
+				indexersInSearch = s.Release.IndexersInSearch
+			}
+			if s.Release.IndexersWithResult > 0 {
+				indexersWithResult = s.Release.IndexersWithResult
+			}
 		}
 		sessionFileCtx := sessionCtx
 		if sessionFileCtx == nil {
@@ -983,6 +992,10 @@ func (s *Session) GetOrDownloadNZBWithContext(ctx context.Context, manager *Mana
 		data, err := idx.DownloadNZB(downloadCtx, nzbURL)
 		cancel()
 		releaseEffectiveCtx()
+
+		// Record an event-based download statistic (NZBHydra2-style). Success
+		// requires a non-empty body; uniqueness fields come from the release.
+		stats.Default().RecordIndexerDownload(indexerName, err == nil && len(data) > 0, indexersInSearch, indexersWithResult)
 
 		var parsedNZB *nzb.NZB
 		var loaderFiles []*loader.File

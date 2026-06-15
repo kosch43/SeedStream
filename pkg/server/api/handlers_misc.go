@@ -300,3 +300,95 @@ func (s *Server) handleStatsHistory(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
 }
+
+// parseStatsRange parses from/to query params for the event-based stats
+// endpoints. Defaults to the last 30 days when omitted. 'to' is inclusive and
+// extended by 24h to an exclusive upper bound, matching handleStatsHistory.
+func parseStatsRange(r *http.Request) (*time.Time, *time.Time, error) {
+	from, err := parseDateParam(r.URL.Query().Get("from"))
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid from date (expected YYYY-MM-DD)")
+	}
+	to, err := parseDateParam(r.URL.Query().Get("to"))
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid to date (expected YYYY-MM-DD)")
+	}
+	if from == nil && to == nil {
+		end := time.Now()
+		start := end.AddDate(0, 0, -30)
+		return &start, &end, nil
+	}
+	if to != nil {
+		endExclusive := to.Add(24 * time.Hour)
+		to = &endExclusive
+	}
+	if from != nil && to != nil && !from.Before(*to) {
+		return nil, nil, fmt.Errorf("invalid date range")
+	}
+	return from, to, nil
+}
+
+// handleIndexerStats returns per-indexer event-based aggregation over the
+// selected [from,to) window (NZBHydra2-style).
+func (s *Server) handleIndexerStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.mu.RLock()
+	mgr := s.attemptLister
+	s.mu.RUnlock()
+
+	rows := []persistence.IndexerStatsRow{}
+	if mgr == nil {
+		writeJSON(w, map[string]any{"indexers": rows})
+		return
+	}
+	from, to, err := parseStatsRange(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	rows, err = mgr.GetIndexerStats(from, to)
+	if err != nil {
+		logger.Error("GetIndexerStats failed", "err", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"indexers": rows})
+}
+
+// handleProviderStats returns per-provider event-based aggregation over the
+// selected [from,to) window (provider analogue of indexer stats).
+func (s *Server) handleProviderStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.mu.RLock()
+	mgr := s.attemptLister
+	s.mu.RUnlock()
+
+	rows := []persistence.ProviderStatsRow{}
+	if mgr == nil {
+		writeJSON(w, map[string]any{"providers": rows})
+		return
+	}
+	from, to, err := parseStatsRange(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	rows, err = mgr.GetProviderStats(from, to)
+	if err != nil {
+		logger.Error("GetProviderStats failed", "err", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"providers": rows})
+}
+
+func writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(v)
+}
