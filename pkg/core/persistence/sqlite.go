@@ -84,6 +84,42 @@ const (
 	);`
 	indexerMetricsIndexTime = `CREATE INDEX IF NOT EXISTS idx_indexer_metrics_collected_at ON indexer_metrics(collected_at DESC);`
 	indexerMetricsIndexName = `CREATE INDEX IF NOT EXISTS idx_indexer_metrics_name_time ON indexer_metrics(indexer_name, collected_at DESC);`
+
+	// Event-based statistics tables (NZBHydra2-style). Each row is a single
+	// measured event; windowed aggregation happens at query time with SQL.
+	indexerSearchEventsSchema = `CREATE TABLE IF NOT EXISTS indexer_search_events (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		ts INTEGER NOT NULL,
+		indexer_name TEXT NOT NULL,
+		success INTEGER NOT NULL,
+		response_ms INTEGER NOT NULL,
+		result_count INTEGER NOT NULL
+	);`
+	indexerSearchEventsIndexTime = `CREATE INDEX IF NOT EXISTS idx_indexer_search_events_ts ON indexer_search_events(ts);`
+	indexerSearchEventsIndexName = `CREATE INDEX IF NOT EXISTS idx_indexer_search_events_name_ts ON indexer_search_events(indexer_name, ts);`
+
+	indexerDownloadEventsSchema = `CREATE TABLE IF NOT EXISTS indexer_download_events (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		ts INTEGER NOT NULL,
+		indexer_name TEXT NOT NULL,
+		success INTEGER NOT NULL,
+		indexers_in_search INTEGER NOT NULL,
+		indexers_with_result INTEGER NOT NULL
+	);`
+	indexerDownloadEventsIndexTime = `CREATE INDEX IF NOT EXISTS idx_indexer_download_events_ts ON indexer_download_events(ts);`
+	indexerDownloadEventsIndexName = `CREATE INDEX IF NOT EXISTS idx_indexer_download_events_name_ts ON indexer_download_events(indexer_name, ts);`
+
+	providerAccessDeltasSchema = `CREATE TABLE IF NOT EXISTS provider_access_deltas (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		ts INTEGER NOT NULL,
+		provider_name TEXT NOT NULL,
+		host TEXT,
+		available_delta INTEGER NOT NULL,
+		missing_delta INTEGER NOT NULL,
+		bytes_delta INTEGER NOT NULL
+	);`
+	providerAccessDeltasIndexTime = `CREATE INDEX IF NOT EXISTS idx_provider_access_deltas_ts ON provider_access_deltas(ts);`
+	providerAccessDeltasIndexName = `CREATE INDEX IF NOT EXISTS idx_provider_access_deltas_name_ts ON provider_access_deltas(provider_name, ts);`
 )
 
 func openDB(dataDir string) (*sql.DB, error) {
@@ -116,6 +152,15 @@ func initSchema(db *sql.DB) error {
 		indexerMetricsSchema,
 		indexerMetricsIndexTime,
 		indexerMetricsIndexName,
+		indexerSearchEventsSchema,
+		indexerSearchEventsIndexTime,
+		indexerSearchEventsIndexName,
+		indexerDownloadEventsSchema,
+		indexerDownloadEventsIndexTime,
+		indexerDownloadEventsIndexName,
+		providerAccessDeltasSchema,
+		providerAccessDeltasIndexTime,
+		providerAccessDeltasIndexName,
 	} {
 		if _, err := db.Exec(stmt); err != nil {
 			return fmt.Errorf("schema: %w", err)

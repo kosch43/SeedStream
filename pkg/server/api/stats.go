@@ -280,8 +280,68 @@ func (s *Server) maybePersistMetrics(stats SystemStats) {
 		logger.Warn("Failed to persist metrics snapshot", "err", err)
 		return
 	}
+
+	// Record event-based provider deltas (NZBHydra2-style analogue). The
+	// SystemStats carry monotonic cumulative counters; we keep the last-seen
+	// value per provider and record only the increment so SUM-over-window stays
+	// correct without per-article write storms. This is additive to the
+	// snapshot persistence above (the Dashboard still relies on snapshots).
+	s.recordProviderDeltas(mgr, now, stats.Providers)
+
 	s.metricsMu.Lock()
 	s.lastMetricsAt = now
 	s.metricsInFlight = false
 	s.metricsMu.Unlock()
+}
+
+// recordProviderDeltas computes per-provider increments since the last tick and
+// records one provider_access_deltas row per provider that changed.
+func (s *Server) recordProviderDeltas(mgr *persistence.StateManager, now time.Time, providers []ProviderStats) {
+	if mgr == nil {
+		return
+	}
+	s.metricsMu.Lock()
+	if s.providerDeltaState == nil {
+		s.providerDeltaState = make(map[string]providerCumulative)
+	}
+	type pending struct {
+		name                             string
+		host                             string
+		availDelta, missDelta, byteDelta int64
+	}
+	var toRecord []pending
+	for _, p := range providers {
+		available := p.ArticleAvailableCount
+		missing := p.ArticleMissingCount
+		bytes := int64(p.DownloadedMB * 1024 * 1024)
+
+		prev, seen := s.providerDeltaState[p.Name]
+		s.providerDeltaState[p.Name] = providerCumulative{available: available, missing: missing, bytes: bytes}
+		if !seen {
+			// First observation establishes a baseline; the cumulative counters
+			// predate this tick, so do not record a spurious large delta.
+			continue
+		}
+		availDelta := maxInt64(0, available-prev.available)
+		missDelta := maxInt64(0, missing-prev.missing)
+		byteDelta := maxInt64(0, bytes-prev.bytes)
+		if availDelta == 0 && missDelta == 0 && byteDelta == 0 {
+			continue
+		}
+		toRecord = append(toRecord, pending{p.Name, p.Host, availDelta, missDelta, byteDelta})
+	}
+	s.metricsMu.Unlock()
+
+	for _, r := range toRecord {
+		if err := mgr.RecordProviderAccessDelta(now, r.name, r.host, r.availDelta, r.missDelta, r.byteDelta); err != nil {
+			logger.Debug("Failed to record provider access delta", "provider", r.name, "err", err)
+		}
+	}
+}
+
+func maxInt64(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
 }

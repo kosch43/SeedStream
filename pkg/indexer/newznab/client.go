@@ -19,6 +19,7 @@ import (
 	"seedstream/pkg/core/logger"
 	"seedstream/pkg/indexer"
 	"seedstream/pkg/indexer/httpproxy"
+	"seedstream/pkg/stats"
 )
 
 type Client struct {
@@ -489,7 +490,22 @@ func selectTVIDSearchParam(caps *indexer.Caps, req indexer.SearchRequest) (strin
 	return "", ""
 }
 
+// Search performs a search and records a single event-based search statistic
+// (success, elapsed response time, result count) for query-time aggregation.
 func (c *Client) Search(req indexer.SearchRequest) (*indexer.SearchResponse, error) {
+	startedAt := time.Now()
+	resp, err := c.search(req)
+	elapsedMS := time.Since(startedAt).Milliseconds()
+	success := err == nil
+	resultCount := 0
+	if resp != nil {
+		resultCount = len(resp.Channel.Items)
+	}
+	stats.Default().RecordIndexerSearch(c.Name(), success, elapsedMS, resultCount)
+	return resp, err
+}
+
+func (c *Client) search(req indexer.SearchRequest) (*indexer.SearchResponse, error) {
 	if err := c.checkAPILimit(); err != nil {
 		return nil, err
 	}

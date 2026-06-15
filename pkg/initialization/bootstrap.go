@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"sort"
 	"seedstream/pkg/core/config"
 	"seedstream/pkg/core/logger"
 	"seedstream/pkg/core/paths"
@@ -12,8 +11,10 @@ import (
 	"seedstream/pkg/indexer"
 	"seedstream/pkg/indexer/easynews"
 	"seedstream/pkg/indexer/newznab"
+	"seedstream/pkg/stats"
 	"seedstream/pkg/usenet/nntp"
 	"seedstream/pkg/usenet/pool"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -67,6 +68,11 @@ func BuildComponents(cfg *config.Config) (*InitializedComponents, error) {
 	stateMgr, err := persistence.GetManager(dataDir)
 	if err != nil {
 		logger.Error("Failed to initialize state manager", "err", err)
+	}
+	if stateMgr != nil {
+		// Install the event-based statistics recorder so call sites can record
+		// search/download/provider events via stats.Default() without plumbing.
+		stats.SetDefault(stats.NewSQLiteRecorder(stateMgr))
 	}
 	if stateMgr != nil && cfg.ResetLegacyStreamState {
 		if err := stateMgr.Delete("devices"); err != nil {

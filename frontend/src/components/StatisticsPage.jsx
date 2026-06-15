@@ -12,17 +12,6 @@ import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts"
 import { Database, Gauge } from "lucide-react"
 import { apiFetch } from "@/api"
 
-const providerChartConfig = {
-  response: {
-    label: "Response (ms)",
-    color: "hsl(var(--primary))",
-  },
-  downloaded: {
-    label: "Downloaded (MB)",
-    color: "hsl(var(--primary))",
-  },
-}
-
 function toNumber(value, fallback = 0) {
   const n = Number(value)
   return Number.isFinite(n) ? n : fallback
@@ -35,35 +24,6 @@ function pick(obj, snakeKey, pascalKey, fallback = undefined) {
   return fallback
 }
 
-function normalizeHistoryStats(data) {
-  const providers = Array.isArray(data?.providers) ? [...data.providers] : []
-  const indexers = Array.isArray(data?.indexers) ? [...data.indexers] : []
-  providers.sort((a, b) => String(pick(a, 'provider_name', 'ProviderName', '')).localeCompare(String(pick(b, 'provider_name', 'ProviderName', ''))))
-  indexers.sort((a, b) => String(pick(a, 'indexer_name', 'IndexerName', '')).localeCompare(String(pick(b, 'indexer_name', 'IndexerName', ''))))
-  return { providers, indexers }
-}
-
-function summarizeEntries(entries, nameSnakeKey, namePascalKey) {
-  let stamp = 0
-  for (let i = 0; i < entries.length; i += 1) {
-    const item = entries[i] || {}
-    const name = String(pick(item, nameSnakeKey, namePascalKey, ''))
-    const collectedAt = String(pick(item, 'collected_at', 'CollectedAt', ''))
-    const keyCount = Object.keys(item).length
-    const base = `${name}|${collectedAt}|${keyCount}`
-    for (let j = 0; j < base.length; j += 1) {
-      stamp = ((stamp * 31) + base.charCodeAt(j)) | 0
-    }
-  }
-  return `${entries.length}:${stamp}`
-}
-
-function buildHistorySignature(normalized) {
-  const providers = Array.isArray(normalized?.providers) ? normalized.providers : []
-  const indexers = Array.isArray(normalized?.indexers) ? normalized.indexers : []
-  return `${summarizeEntries(providers, 'provider_name', 'ProviderName')}|${summarizeEntries(indexers, 'indexer_name', 'IndexerName')}`
-}
-
 function parseDateValue(raw) {
   if (!raw) return null
   const d = new Date(`${raw}T00:00:00`)
@@ -71,10 +31,15 @@ function parseDateValue(raw) {
   return d
 }
 
-function formatDownloadedMb(mb) {
-  const n = toNumber(mb)
-  if (n >= 1024) return `${(n / 1024).toFixed(2)} GB`
-  return `${n.toFixed(1)} MB`
+function formatDownloadedBytes(bytes) {
+  const n = toNumber(bytes)
+  const mb = n / (1024 * 1024)
+  if (mb >= 1024) return `${(mb / 1024).toFixed(2)} GB`
+  return `${mb.toFixed(1)} MB`
+}
+
+function formatPct(value) {
+  return `${toNumber(value).toFixed(1)}%`
 }
 
 function formatDateInput(date) {
@@ -110,26 +75,69 @@ function rangeFromPreset(preset) {
   }
 }
 
+// User-selectable bar-chart metric for the indexer section. No fabricated
+// metrics: every option maps to a measured/aggregated value from the backend.
 const indexerMetricOptions = {
-  response: { label: 'Response (ms)', key: 'avgResponseMs', suffix: ' ms' },
-  speed: { label: 'Speed (req/s)', key: 'speedRps', suffix: ' req/s' },
-  searches: { label: 'Searches', key: 'searchesCount', suffix: '' },
-  downloads: { label: 'Downloads', key: 'downloadsCount', suffix: '' },
-  uniqueHits: { label: 'Unique hits', key: 'uniqueHitsCount', suffix: '' },
-  availAvailable: { label: 'Available', key: 'availAvailableCount', suffix: '' },
-  availDiscarded: { label: 'Unavailable', key: 'availDiscardedCount', suffix: '' },
+  uniqueness: { label: 'Uniqueness score', key: 'uniquenessScore' },
+  searches: { label: 'Searches', key: 'searches' },
+  searchShare: { label: 'Search share %', key: 'searchSharePct' },
+  response: { label: 'Avg response (ms)', key: 'avgResponseMs' },
+  results: { label: 'Avg results', key: 'avgResults' },
+  success: { label: 'Success %', key: 'successRatePct' },
+  downloads: { label: 'Downloads', key: 'downloads' },
+  downloadShare: { label: 'Download share %', key: 'downloadSharePct' },
+  uniqueDownloads: { label: 'Unique downloads', key: 'uniqueDownloads' },
+}
+
+function normalizeIndexerRow(item) {
+  const name = String(pick(item, 'indexer_name', 'IndexerName', '') || '').trim()
+  if (!name) return null
+  return {
+    name,
+    searches: toNumber(pick(item, 'searches', 'Searches')),
+    searchSharePct: toNumber(pick(item, 'search_share_pct', 'SearchSharePct')),
+    avgResponseMs: toNumber(pick(item, 'avg_response_ms', 'AvgResponseMS')),
+    avgResults: toNumber(pick(item, 'avg_results', 'AvgResults')),
+    successRatePct: toNumber(pick(item, 'success_rate_pct', 'SuccessRatePct')),
+    downloads: toNumber(pick(item, 'downloads', 'Downloads')),
+    downloadSharePct: toNumber(pick(item, 'download_share_pct', 'DownloadSharePct')),
+    uniqueDownloads: toNumber(pick(item, 'unique_downloads', 'UniqueDownloads')),
+    uniquenessScore: toNumber(pick(item, 'avg_uniqueness_score', 'AvgUniquenessScore')),
+  }
+}
+
+function normalizeProviderRow(item) {
+  const name = String(pick(item, 'provider_name', 'ProviderName', '') || '').trim()
+  if (!name) return null
+  return {
+    name,
+    host: String(pick(item, 'host', 'Host', '')),
+    articles: toNumber(pick(item, 'articles', 'Articles')),
+    available: toNumber(pick(item, 'available', 'Available')),
+    missing: toNumber(pick(item, 'missing', 'Missing')),
+    successRatePct: toNumber(pick(item, 'success_rate_pct', 'SuccessRatePct')),
+    downloadedBytes: toNumber(pick(item, 'downloaded_bytes', 'DownloadedBytes')),
+    dataSharePct: toNumber(pick(item, 'data_share_pct', 'DataSharePct')),
+  }
+}
+
+const providerChartConfig = {
+  data: {
+    label: "Data share %",
+    color: "hsl(var(--primary))",
+  },
 }
 
 export function StatisticsPage() {
-  const [historyStats, setHistoryStats] = useState({ providers: [], indexers: [] })
+  const [indexerStats, setIndexerStats] = useState([])
+  const [providerStats, setProviderStats] = useState([])
   const [preset, setPreset] = useState('30d')
   const [customRange, setCustomRange] = useState(defaultDateRange())
   const [activeRange, setActiveRange] = useState(defaultDateRange())
-  const [indexerMetric, setIndexerMetric] = useState('response')
+  const [indexerMetric, setIndexerMetric] = useState('uniqueness')
   const [loading, setLoading] = useState(false)
   const [loadError, setLoadError] = useState('')
   const inFlightRef = useRef(false)
-  const lastSignatureRef = useRef(buildHistorySignature({ providers: [], indexers: [] }))
 
   const loadStats = useCallback(async (from, to, { background = false } = {}) => {
     if (inFlightRef.current) return
@@ -142,18 +150,24 @@ export function StatisticsPage() {
       const query = new URLSearchParams()
       if (from) query.set('from', from)
       if (to) query.set('to', to)
-      const data = await apiFetch(`/api/stats/history?${query.toString()}`)
-      const normalized = normalizeHistoryStats(data)
-      const signature = buildHistorySignature(normalized)
-      if (signature !== lastSignatureRef.current) {
-        lastSignatureRef.current = signature
-        setHistoryStats(normalized)
-      }
+      const qs = query.toString()
+      const [idxData, provData] = await Promise.all([
+        apiFetch(`/api/stats/indexers${qs ? `?${qs}` : ''}`),
+        apiFetch(`/api/stats/providers${qs ? `?${qs}` : ''}`),
+      ])
+      const indexers = (Array.isArray(idxData?.indexers) ? idxData.indexers : [])
+        .map(normalizeIndexerRow)
+        .filter(Boolean)
+      const providers = (Array.isArray(provData?.providers) ? provData.providers : [])
+        .map(normalizeProviderRow)
+        .filter(Boolean)
+      setIndexerStats(indexers)
+      setProviderStats(providers)
     } catch (error) {
       if (!background) {
         setLoadError(error?.message || 'Failed to load statistics.')
-        setHistoryStats({ providers: [], indexers: [] })
-        lastSignatureRef.current = buildHistorySignature({ providers: [], indexers: [] })
+        setIndexerStats([])
+        setProviderStats([])
       }
     } finally {
       if (!background) {
@@ -217,68 +231,30 @@ export function StatisticsPage() {
     return ''
   }, [customRange.from, customRange.to, preset])
 
+  const indexerMetricKey = indexerMetricOptions[indexerMetric]?.key || 'uniquenessScore'
+
   const indexerRows = useMemo(() => {
-    const metricKey = indexerMetricOptions[indexerMetric]?.key || 'avgResponseMs'
-    const isResponseMetric = metricKey === 'avgResponseMs'
-    const rows = (historyStats?.indexers || [])
-      .map((indexer) => {
-        const name = String(pick(indexer, 'indexer_name', 'IndexerName', '') || '').trim()
-        if (!name) return null
-        const avgResponseMs = toNumber(pick(indexer, 'avg_response_ms', 'AvgResponseMS'))
-        return {
-          name,
-          avgResponseMs,
-          speedRps: avgResponseMs > 0 ? 1000 / avgResponseMs : 0,
-          searchesCount: toNumber(pick(indexer, 'searches_count', 'SearchesCount')),
-          downloadsCount: toNumber(pick(indexer, 'downloads_used', 'DownloadsUsed')),
-          uniqueHitsCount: toNumber(pick(indexer, 'unique_hits_count', 'UniqueHitsCount')),
-          availAvailableCount: toNumber(pick(indexer, 'avail_available_count', 'AvailAvailableCount')),
-          availDiscardedCount: toNumber(pick(indexer, 'avail_discarded_count', 'AvailDiscardedCount')),
-        }
-      })
-      .filter(Boolean)
+    const rows = [...indexerStats]
     return rows.sort((a, b) => {
-      const aMetric = toNumber(a[metricKey])
-      const bMetric = toNumber(b[metricKey])
-      if (isResponseMetric) {
-        if (aMetric <= 0 && bMetric <= 0) return a.name.localeCompare(b.name)
-        if (aMetric <= 0) return 1
-        if (bMetric <= 0) return -1
-        return aMetric - bMetric
-      }
+      const aMetric = toNumber(a[indexerMetricKey])
+      const bMetric = toNumber(b[indexerMetricKey])
       if (aMetric === bMetric) return a.name.localeCompare(b.name)
       return bMetric - aMetric
     })
-  }, [historyStats, indexerMetric])
+  }, [indexerStats, indexerMetricKey])
 
   const providerRows = useMemo(() => {
-    return (historyStats?.providers || [])
-      .map((provider) => {
-        const name = String(pick(provider, 'provider_name', 'ProviderName', '') || '').trim()
-        if (!name) return null
-        return {
-          name,
-          host: String(pick(provider, 'host', 'Host', '')),
-          downloadedMb: toNumber(pick(provider, 'downloaded_mb', 'DownloadedMB')),
-          activeConns: toNumber(pick(provider, 'active_conns', 'ActiveConns')),
-          maxConns: toNumber(pick(provider, 'max_conns', 'MaxConns')),
-          usagePercent: toNumber(pick(provider, 'usage_percent', 'UsagePercent')),
-          articleAvailableCount: toNumber(pick(provider, 'article_available_count', 'ArticleAvailableCount')),
-          articleMissingCount: toNumber(pick(provider, 'article_missing_count', 'ArticleMissingCount')),
-        }
-      })
-      .filter(Boolean)
-      .sort((a, b) => b.downloadedMb - a.downloadedMb)
-  }, [historyStats])
+    return [...providerStats].sort((a, b) => b.downloadedBytes - a.downloadedBytes)
+  }, [providerStats])
 
   const indexerChartData = useMemo(() => indexerRows.map((row) => ({
     name: row.name,
-    value: toNumber(row[indexerMetricOptions[indexerMetric]?.key]),
-  })), [indexerMetric, indexerRows])
+    value: toNumber(row[indexerMetricKey]),
+  })), [indexerMetricKey, indexerRows])
 
   const providerChartData = useMemo(() => providerRows.map((row) => ({
     name: row.name,
-    downloaded: row.downloadedMb,
+    data: row.dataSharePct,
   })), [providerRows])
 
   const indexerChartConfig = useMemo(() => ({
@@ -302,7 +278,7 @@ export function StatisticsPage() {
       <Card>
         <CardHeader>
           <CardTitle>Date Range</CardTitle>
-          <CardDescription>Use quick presets or choose a custom range for persisted snapshots.</CardDescription>
+          <CardDescription>Use quick presets or choose a custom range. Statistics are aggregated from individual events over the selected window.</CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-3">
           <div className="flex flex-wrap items-center gap-2">
@@ -378,9 +354,9 @@ export function StatisticsPage() {
           <CardHeader>
             <div className="flex items-center gap-2">
               <Gauge className="h-5 w-5 text-primary" />
-              <CardTitle>Indexer Statistics</CardTitle>
+              <CardTitle>Indexer statistics</CardTitle>
             </div>
-            <CardDescription>Average response time, speed estimate, searches, and downloads by indexer.</CardDescription>
+            <CardDescription>Searches, response times, success rate, downloads, and uniqueness score aggregated over the window.</CardDescription>
             <div className="pt-2">
               <ToggleGroup
                 type="single"
@@ -391,15 +367,11 @@ export function StatisticsPage() {
                 }}
                 variant="outline"
                 size="sm"
-                className="justify-start"
+                className="flex-wrap justify-start"
               >
-                <ToggleGroupItem value="response">Response</ToggleGroupItem>
-                <ToggleGroupItem value="speed">Speed</ToggleGroupItem>
-                <ToggleGroupItem value="searches">Searches</ToggleGroupItem>
-                <ToggleGroupItem value="downloads">Downloads</ToggleGroupItem>
-                <ToggleGroupItem value="uniqueHits">Unique hits</ToggleGroupItem>
-                <ToggleGroupItem value="availAvailable">Available</ToggleGroupItem>
-                <ToggleGroupItem value="availDiscarded">Unavailable</ToggleGroupItem>
+                {Object.entries(indexerMetricOptions).map(([key, opt]) => (
+                  <ToggleGroupItem key={key} value={key}>{opt.label}</ToggleGroupItem>
+                ))}
               </ToggleGroup>
             </div>
           </CardHeader>
@@ -419,31 +391,35 @@ export function StatisticsPage() {
                 <thead className="bg-muted/40 text-muted-foreground">
                   <tr>
                     <th className="px-3 py-2 text-left font-medium">Indexer</th>
-                    <th className="px-3 py-2 text-right font-medium">Avg response</th>
-                    <th className="px-3 py-2 text-right font-medium">Speed</th>
                     <th className="px-3 py-2 text-right font-medium">Searches</th>
+                    <th className="px-3 py-2 text-right font-medium">Search share</th>
+                    <th className="px-3 py-2 text-right font-medium">Avg response</th>
+                    <th className="px-3 py-2 text-right font-medium">Avg results</th>
+                    <th className="px-3 py-2 text-right font-medium">Success</th>
                     <th className="px-3 py-2 text-right font-medium">Downloads</th>
-                    <th className="px-3 py-2 text-right font-medium">Unique hits</th>
-                    <th className="px-3 py-2 text-right font-medium">Available</th>
-                    <th className="px-3 py-2 text-right font-medium">Unavailable</th>
+                    <th className="px-3 py-2 text-right font-medium">Download share</th>
+                    <th className="px-3 py-2 text-right font-medium">Unique downloads</th>
+                    <th className="px-3 py-2 text-right font-medium">Uniqueness score</th>
                   </tr>
                 </thead>
                 <tbody>
                   {indexerRows.map((row) => (
                     <tr key={row.name} className="border-t border-border/50">
                       <td className="px-3 py-2"><span className="truncate">{row.name}</span></td>
+                      <td className="px-3 py-2 text-right tabular-nums">{row.searches}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{formatPct(row.searchSharePct)}</td>
                       <td className="px-3 py-2 text-right tabular-nums">{row.avgResponseMs > 0 ? `${row.avgResponseMs.toFixed(0)} ms` : 'N/A'}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">{row.speedRps > 0 ? `${row.speedRps.toFixed(2)} req/s` : 'N/A'}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">{row.searchesCount}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">{row.downloadsCount}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">{row.uniqueHitsCount}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">{row.availAvailableCount}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">{row.availDiscardedCount}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{row.avgResults.toFixed(1)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{formatPct(row.successRatePct)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{row.downloads}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{formatPct(row.downloadSharePct)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{row.uniqueDownloads}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{row.uniquenessScore.toFixed(0)}</td>
                     </tr>
                   ))}
                   {indexerRows.length === 0 && (
                     <tr>
-                      <td colSpan={8} className="px-3 py-6 text-center text-muted-foreground">No indexer statistics available.</td>
+                      <td colSpan={10} className="px-3 py-6 text-center text-muted-foreground">No indexer statistics in this window.</td>
                     </tr>
                   )}
                 </tbody>
@@ -456,9 +432,9 @@ export function StatisticsPage() {
           <CardHeader>
             <div className="flex items-center gap-2">
               <Database className="h-5 w-5 text-primary" />
-              <CardTitle>Provider Statistics</CardTitle>
+              <CardTitle>Provider statistics</CardTitle>
             </div>
-            <CardDescription>Downloaded volume and connection usage by provider.</CardDescription>
+            <CardDescription>Article availability and downloaded volume aggregated per provider over the window.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <ChartContainer config={providerChartConfig} className="w-full" style={{ height: `${providerChartHeight}px` }}>
@@ -467,7 +443,7 @@ export function StatisticsPage() {
                 <XAxis type="number" tick={{ fontSize: 11 }} />
                 <YAxis type="category" dataKey="name" width={160} tick={{ fontSize: 11 }} />
                 <ChartTooltip content={<ChartTooltipContent />} />
-                <Bar dataKey="downloaded" fill="var(--color-downloaded)" radius={4} name="downloaded" />
+                <Bar dataKey="data" fill="var(--color-data)" radius={4} name="data" />
               </BarChart>
             </ChartContainer>
 
@@ -476,11 +452,12 @@ export function StatisticsPage() {
                 <thead className="bg-muted/40 text-muted-foreground">
                   <tr>
                     <th className="px-3 py-2 text-left font-medium">Provider</th>
+                    <th className="px-3 py-2 text-right font-medium">Articles</th>
+                    <th className="px-3 py-2 text-right font-medium">Available</th>
+                    <th className="px-3 py-2 text-right font-medium">Missing</th>
+                    <th className="px-3 py-2 text-right font-medium">Success</th>
                     <th className="px-3 py-2 text-right font-medium">Downloaded</th>
-                    <th className="px-3 py-2 text-right font-medium">Connections</th>
-                    <th className="px-3 py-2 text-right font-medium">Usage</th>
-                    <th className="px-3 py-2 text-right font-medium">Article available</th>
-                    <th className="px-3 py-2 text-right font-medium">Article missing</th>
+                    <th className="px-3 py-2 text-right font-medium">Data share</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -490,16 +467,17 @@ export function StatisticsPage() {
                         <div className="flex items-center gap-2"><span className="truncate">{row.name}</span></div>
                         {row.host && <div className="text-xs text-muted-foreground truncate">{row.host}</div>}
                       </td>
-                      <td className="px-3 py-2 text-right tabular-nums">{formatDownloadedMb(row.downloadedMb)}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">{row.activeConns}/{row.maxConns || 0}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">{row.usagePercent.toFixed(1)}%</td>
-                      <td className="px-3 py-2 text-right tabular-nums">{row.articleAvailableCount}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">{row.articleMissingCount}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{row.articles}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{row.available}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{row.missing}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{formatPct(row.successRatePct)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{formatDownloadedBytes(row.downloadedBytes)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{formatPct(row.dataSharePct)}</td>
                     </tr>
                   ))}
                   {providerRows.length === 0 && (
                     <tr>
-                      <td colSpan={6} className="px-3 py-6 text-center text-muted-foreground">No provider statistics available.</td>
+                      <td colSpan={7} className="px-3 py-6 text-center text-muted-foreground">No provider statistics in this window.</td>
                     </tr>
                   )}
                 </tbody>
@@ -512,4 +490,3 @@ export function StatisticsPage() {
     </div>
   )
 }
-

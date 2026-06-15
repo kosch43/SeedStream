@@ -98,6 +98,12 @@ type Item struct {
 	QuerySource string `xml:"-"`
 
 	Duration float64 `xml:"-"`
+
+	// Uniqueness plumbing (NZBHydra2-style). Stamped by the aggregator after
+	// dedup: IndexersInSearch = indexers that participated in the search;
+	// IndexersWithResult = distinct indexers that returned this normalized title.
+	IndexersInSearch   int `xml:"-"`
+	IndexersWithResult int `xml:"-"`
 }
 
 type Attribute struct {
@@ -166,23 +172,25 @@ func (i *Item) ToRelease() *release.Release {
 	}
 
 	return &release.Release{
-		Title:         i.Title,
-		Link:          i.Link,
-		DetailsURL:    i.ReleaseDetailsURL(),
-		Size:          i.Size,
-		Indexer:       indexerName,
-		SourceIndexer: i.SourceIndexer,
-		PubDate:       i.PubDate,
-		GUID:          i.GUID,
-		QuerySource:   i.QuerySource,
-		Grabs:         grabs,
-		Languages:     languages,
-		Duration:      i.Duration,
-		Protocol:      protocol,
-		Magnet:        magnet,
-		InfoHash:      infoHash,
-		Seeders:       seeders,
-		Peers:         peers,
+		Title:              i.Title,
+		Link:               i.Link,
+		DetailsURL:         i.ReleaseDetailsURL(),
+		Size:               i.Size,
+		Indexer:            indexerName,
+		SourceIndexer:      i.SourceIndexer,
+		PubDate:            i.PubDate,
+		GUID:               i.GUID,
+		QuerySource:        i.QuerySource,
+		Grabs:              grabs,
+		Languages:          languages,
+		Duration:           i.Duration,
+		Protocol:           protocol,
+		Magnet:             magnet,
+		InfoHash:           infoHash,
+		Seeders:            seeders,
+		Peers:              peers,
+		IndexersInSearch:   i.IndexersInSearch,
+		IndexersWithResult: i.IndexersWithResult,
 	}
 }
 

@@ -53,6 +53,14 @@ type Release struct {
 	InfoHash string // BitTorrent v1 info hash (lowercased)
 	Seeders  int    // current seeders reported by the indexer
 	Peers    int    // current leechers/peers reported by the indexer
+
+	// Uniqueness plumbing for event-based statistics (NZBHydra2-style).
+	// IndexersInSearch is the number of indexers that participated in the
+	// originating search; IndexersWithResult is how many distinct indexers
+	// returned this same (normalized-title) result. Used to compute the
+	// download uniqueness score: 100 * IndexersInSearch / IndexersWithResult.
+	IndexersInSearch   int
+	IndexersWithResult int
 }
 
 // IsTorrent reports whether this release is a torrent rather than a Usenet NZB.

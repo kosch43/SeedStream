@@ -5,10 +5,10 @@ import (
 	"encoding/xml"
 	"fmt"
 	"net/url"
-	"sort"
 	"seedstream/pkg/core/config"
 	"seedstream/pkg/core/logger"
 	"seedstream/pkg/release"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -127,6 +127,27 @@ func (a *Aggregator) searchCombined(req SearchRequest) (*SearchResponse, error) 
 	resultsChan := make(chan []Item, len(a.Indexers))
 	var wg sync.WaitGroup
 
+	// Count indexers that actually participate in this search (i.e. are not
+	// skipped by their per-request DisableIdSearch/DisableStringSearch flags).
+	// This is the "indexers involved in the search" term of the NZBHydra2
+	// uniqueness score.
+	indexersInSearch := 0
+	for _, idx := range a.Indexers {
+		var overrides *config.IndexerSearchConfig
+		if req.EffectiveByIndexer != nil {
+			overrides = req.EffectiveByIndexer[idx.Name()]
+		}
+		probe := req
+		probe.EffectiveByIndexer = nil
+		probe.OptionalOverrides = overrides
+		if !shouldSkipIndexer(probe, overrides) {
+			indexersInSearch++
+		}
+	}
+	if indexersInSearch < 1 {
+		indexersInSearch = 1
+	}
+
 	for _, idx := range a.Indexers {
 		wg.Add(1)
 		go func(indexer Indexer, r SearchRequest) {
@@ -147,6 +168,23 @@ func (a *Aggregator) searchCombined(req SearchRequest) (*SearchResponse, error) 
 	var allItems []Item
 	for items := range resultsChan {
 		allItems = append(allItems, items...)
+	}
+
+	// For each normalized title, count the distinct indexers that returned it.
+	// This is the "indexers that returned this same result" term of the score.
+	distinctIndexersByTitle := make(map[string]map[string]struct{})
+	for i := range allItems {
+		title := release.NormalizeTitleForDedup(allItems[i].Title)
+		name := itemIndexerName(&allItems[i])
+		if name == "" {
+			continue
+		}
+		set := distinctIndexersByTitle[title]
+		if set == nil {
+			set = make(map[string]struct{})
+			distinctIndexersByTitle[title] = set
+		}
+		set[name] = struct{}{}
 	}
 
 	seenGUID := make(map[string]bool)
@@ -186,6 +224,17 @@ func (a *Aggregator) searchCombined(req SearchRequest) (*SearchResponse, error) 
 			seenTitleSize[titleSizeKey] = true
 		}
 		uniqueItems = append(uniqueItems, item)
+	}
+
+	// Stamp uniqueness fields onto each surviving unique item.
+	for i := range uniqueItems {
+		title := release.NormalizeTitleForDedup(uniqueItems[i].Title)
+		withResult := 1
+		if set := distinctIndexersByTitle[title]; len(set) > withResult {
+			withResult = len(set)
+		}
+		uniqueItems[i].IndexersInSearch = indexersInSearch
+		uniqueItems[i].IndexersWithResult = withResult
 	}
 
 	sort.Slice(uniqueItems, func(i, j int) bool {
@@ -294,6 +343,21 @@ func searchItemsForIndexer(idx Indexer, req SearchRequest) ([]Item, error) {
 		return []Item{}, nil
 	}
 	return resp.Channel.Items, nil
+}
+
+// itemIndexerName returns the source indexer name for an item, preferring an
+// explicit ActualIndexer and falling back to the SourceIndexer's Name().
+func itemIndexerName(i *Item) string {
+	if i == nil {
+		return ""
+	}
+	if name := strings.TrimSpace(i.ActualIndexer); name != "" {
+		return name
+	}
+	if i.SourceIndexer != nil {
+		return strings.TrimSpace(i.SourceIndexer.Name())
+	}
+	return ""
 }
 
 func normalizeURL(rawURL string) string {

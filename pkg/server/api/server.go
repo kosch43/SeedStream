@@ -53,6 +53,17 @@ type Server struct {
 	metricsMu       sync.Mutex
 	lastMetricsAt   time.Time
 	metricsInFlight bool
+	// providerDeltaState holds the last-seen cumulative per-provider counters
+	// so each 30s tick can record only the increment (delta) into the
+	// event-based provider_access_deltas table. Guarded by metricsMu.
+	providerDeltaState map[string]providerCumulative
+}
+
+// providerCumulative is the last-seen monotonic cumulative state for a provider.
+type providerCumulative struct {
+	available int64
+	missing   int64
+	bytes     int64
 }
 
 type Client struct {
@@ -370,6 +381,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/api/indexer/caps/refresh", authMiddleware(http.HandlerFunc(s.handleRefreshIndexerCaps)))
 	mux.Handle("/api/stats/persisted", authMiddleware(http.HandlerFunc(s.handlePersistedStats)))
 	mux.Handle("/api/stats/history", authMiddleware(http.HandlerFunc(s.handleStatsHistory)))
+	mux.Handle("/api/stats/indexers", authMiddleware(http.HandlerFunc(s.handleIndexerStats)))
+	mux.Handle("/api/stats/providers", authMiddleware(http.HandlerFunc(s.handleProviderStats)))
 	mux.Handle("/api/availnzb/status", authMiddleware(http.HandlerFunc(s.handleAvailNZBStatus)))
 	mux.Handle("/api/sessions/close", authMiddleware(http.HandlerFunc(s.handleCloseSession)))
 	mux.Handle("/api/restart", authMiddleware(http.HandlerFunc(s.handleRestart)))
