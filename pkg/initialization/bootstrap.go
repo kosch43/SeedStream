@@ -147,10 +147,14 @@ func BuildComponents(cfg *config.Config) (*InitializedComponents, error) {
 			effectiveCfg.ProxyURL = effectiveProxyURL
 			client := newznab.NewClient(effectiveCfg, usageMgr)
 			indexers = append(indexers, client)
-			logger.Info("Initialized Newznab indexer", "name", idxCfg.Name, "url", idxCfg.URL)
-			if h := hostFromIndexerURL(idxCfg.URL); h != "" {
-				if !isAggregator {
-					availNzbHosts[idxCfg.Name] = h
+			if config.IsTorrentIndexerType(indexerType) {
+				logger.Info("Initialized Torznab tracker", "name", idxCfg.Name, "url", idxCfg.URL)
+			} else {
+				logger.Info("Initialized Newznab indexer", "name", idxCfg.Name, "url", idxCfg.URL)
+				if h := hostFromIndexerURL(idxCfg.URL); h != "" {
+					if !isAggregator {
+						availNzbHosts[idxCfg.Name] = h
+					}
 				}
 			}
 		}
