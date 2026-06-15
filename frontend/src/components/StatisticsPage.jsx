@@ -3,6 +3,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
+import { Checkbox } from "@/components/ui/checkbox"
 import {
   ChartContainer,
   ChartTooltip,
@@ -61,18 +62,11 @@ function defaultDateRange() {
 
 function rangeFromPreset(preset) {
   if (preset === 'all') return { from: '', to: '' }
-  const days = {
-    '7d': 7,
-    '30d': 30,
-    '90d': 90,
-  }[preset] || 30
+  const days = { '7d': 7, '30d': 30, '90d': 90 }[preset] || 30
   const end = new Date()
   const start = new Date(end)
   start.setDate(end.getDate() - days)
-  return {
-    from: formatDateInput(start),
-    to: formatDateInput(end),
-  }
+  return { from: formatDateInput(start), to: formatDateInput(end) }
 }
 
 function normalizeIndexerRow(item) {
@@ -107,7 +101,6 @@ function normalizeProviderRow(item) {
   }
 }
 
-// Compute weighted average response time across all indexers that have data.
 function computeWindowAvgResponseMs(rows) {
   let totalWeightedMs = 0
   let totalSearches = 0
@@ -121,48 +114,16 @@ function computeWindowAvgResponseMs(rows) {
   return totalWeightedMs / totalSearches
 }
 
-// All indexer table columns (used for sorting and rendering).
-const INDEXER_COLUMNS = [
-  { key: 'name',             label: 'Indexer',           align: 'left'  },
-  { key: 'searches',         label: 'Searches',          align: 'right' },
-  { key: 'searchSharePct',   label: 'Search share %',    align: 'right' },
-  { key: 'avgResponseMs',    label: 'Avg response (ms)', align: 'right' },
-  { key: 'delta',            label: 'Delta',             align: 'right', noSort: true },
-  { key: 'avgResults',       label: 'Avg results',       align: 'right' },
-  { key: 'successRatePct',   label: 'Success %',         align: 'right' },
-  { key: 'downloads',        label: 'Downloads',         align: 'right' },
-  { key: 'downloadSharePct', label: 'Download share %',  align: 'right' },
-  { key: 'uniqueDownloads',  label: 'Unique downloads',  align: 'right' },
-  { key: 'uniquenessScore',  label: 'Uniqueness score',  align: 'right' },
-]
-
-const providerChartConfig = {
-  data: {
-    label: "Data share %",
-    color: "hsl(var(--primary))",
-  },
-}
-
-const indexerDownloadChartConfig = {
-  value: {
-    label: "Download share %",
-    color: "hsl(var(--primary))",
-  },
-}
-
 const timeDistChartConfig = {
-  count: {
-    label: "Count",
-    color: "hsl(var(--primary))",
-  },
+  count: { label: "Count", color: "hsl(var(--primary))" },
 }
 
-// Check whether all values in an array are zero.
-function allZero(arr) {
-  return arr.every((v) => v === 0)
+const hBarChartConfig = {
+  value: { label: "Value", color: "hsl(var(--primary))" },
 }
 
-// Build hour-of-day chart data (0..23).
+function allZero(arr) { return arr.every((v) => v === 0) }
+
 function buildHourChartData(arr) {
   return Array.from({ length: 24 }, (_, h) => ({
     label: String(h).padStart(2, '0'),
@@ -170,7 +131,6 @@ function buildHourChartData(arr) {
   }))
 }
 
-// Build weekday chart data (0=Sun..6=Sat).
 const WEEKDAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 function buildWeekdayChartData(arr) {
   return Array.from({ length: 7 }, (_, w) => ({
@@ -179,37 +139,107 @@ function buildWeekdayChartData(arr) {
   }))
 }
 
-function SortIcon({ direction }) {
-  if (!direction) return <span className="ml-1 opacity-30 text-xs">↕</span>
-  return <span className="ml-1 text-xs">{direction === 'asc' ? '↑' : '↓'}</span>
+function EmptyState({ message = 'No data for this window.' }) {
+  return (
+    <div className="flex items-center justify-center py-8 text-sm text-muted-foreground">
+      {message}
+    </div>
+  )
 }
 
-function TimeDistChart({ title, data }) {
-  const empty = data.every((d) => d.count === 0)
+function SectionHeader({ id, label, checked, onToggle }) {
   return (
-    <Card className="overflow-hidden">
-      <CardHeader className="pb-2">
-        <CardTitle className="text-sm font-medium">{title}</CardTitle>
-      </CardHeader>
-      <CardContent>
-        {empty ? (
-          <div className="flex items-center justify-center h-32 text-sm text-muted-foreground">
-            No data for this window.
-          </div>
-        ) : (
-          <ChartContainer config={timeDistChartConfig} className="w-full" style={{ height: '160px' }}>
-            <BarChart data={data} margin={{ top: 4, right: 4, left: -20, bottom: 4 }}>
-              <CartesianGrid vertical={false} />
-              <XAxis dataKey="label" tick={{ fontSize: 10 }} />
-              <YAxis tick={{ fontSize: 10 }} allowDecimals={false} />
-              <ChartTooltip content={<ChartTooltipContent />} />
-              <Bar dataKey="count" fill="var(--color-count)" radius={2} name="count" />
-            </BarChart>
-          </ChartContainer>
-        )}
-      </CardContent>
-    </Card>
+    <label
+      htmlFor={id}
+      className="flex items-center gap-2 cursor-pointer select-none"
+    >
+      <Checkbox
+        id={id}
+        checked={checked}
+        onCheckedChange={onToggle}
+      />
+      <span className="text-sm font-medium">{label}</span>
+    </label>
   )
+}
+
+function HorizontalBarSection({ data, dataKey = 'value', unit = '' }) {
+  if (data.length === 0) return null
+  const height = Math.max(160, data.length * 36)
+  return (
+    <ChartContainer config={hBarChartConfig} className="w-full" style={{ height: `${height}px` }}>
+      <BarChart data={data} layout="vertical" margin={{ top: 4, right: 16, left: 8, bottom: 4 }}>
+        <CartesianGrid horizontal={false} />
+        <XAxis type="number" tick={{ fontSize: 11 }} unit={unit} />
+        <YAxis type="category" dataKey="name" width={150} tick={{ fontSize: 11 }} />
+        <ChartTooltip content={<ChartTooltipContent />} />
+        <Bar dataKey={dataKey} fill="var(--color-value)" radius={3} name={dataKey} />
+      </BarChart>
+    </ChartContainer>
+  )
+}
+
+function TimeDistBarChart({ data }) {
+  const empty = data.every((d) => d.count === 0)
+  if (empty) return <EmptyState />
+  return (
+    <ChartContainer config={timeDistChartConfig} className="w-full" style={{ height: '160px' }}>
+      <BarChart data={data} margin={{ top: 4, right: 4, left: -20, bottom: 4 }}>
+        <CartesianGrid vertical={false} />
+        <XAxis dataKey="label" tick={{ fontSize: 10 }} />
+        <YAxis tick={{ fontSize: 10 }} allowDecimals={false} />
+        <ChartTooltip content={<ChartTooltipContent />} />
+        <Bar dataKey="count" fill="var(--color-count)" radius={2} name="count" />
+      </BarChart>
+    </ChartContainer>
+  )
+}
+
+function StatsTable({ headers, rows, emptyMessage = 'No data for this window.' }) {
+  if (rows.length === 0) return <EmptyState message={emptyMessage} />
+  return (
+    <div className="overflow-x-auto rounded-md border border-border/60">
+      <table className="w-full text-sm">
+        <thead className="bg-muted/40 text-muted-foreground">
+          <tr>
+            {headers.map((h) => (
+              <th
+                key={h.label}
+                className={`px-3 py-2 font-medium whitespace-nowrap ${h.right ? 'text-right' : 'text-left'}`}
+              >
+                {h.label}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, i) => (
+            <tr key={i} className="border-t border-border/50">
+              {row.cells.map((cell, j) => (
+                <td
+                  key={j}
+                  className={`px-3 py-2 ${headers[j]?.right ? 'text-right tabular-nums' : ''} ${cell.className || ''}`}
+                >
+                  {cell.value}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+const SECTION_LABELS = {
+  avgResponseTimes: 'Avg. response times',
+  apiAccesses: 'Indexer API accesses',
+  nzbDownloads: 'NZB downloads per indexer',
+  indexerScores: 'Indexer scores',
+  searchesByHour: 'Searches per hour of day',
+  searchesByWeekday: 'Searches per day of week',
+  downloadsByHour: 'NZB downloads per hour of day',
+  downloadsByWeekday: 'NZB downloads per day of week',
 }
 
 export function StatisticsPage() {
@@ -221,10 +251,14 @@ export function StatisticsPage() {
   const [activeRange, setActiveRange] = useState(defaultDateRange())
   const [loading, setLoading] = useState(false)
   const [loadError, setLoadError] = useState('')
-  // Indexer table sort: default searches desc
-  const [sortKey, setSortKey] = useState('searches')
-  const [sortDir, setSortDir] = useState('desc')
+  const [sections, setSections] = useState(
+    Object.fromEntries(Object.keys(SECTION_LABELS).map((k) => [k, true]))
+  )
   const inFlightRef = useRef(false)
+
+  function toggleSection(key) {
+    setSections((prev) => ({ ...prev, [key]: !prev[key] }))
+  }
 
   const loadStats = useCallback(async (from, to, { background = false } = {}) => {
     if (inFlightRef.current) return
@@ -259,9 +293,7 @@ export function StatisticsPage() {
         setTimeDist(null)
       }
     } finally {
-      if (!background) {
-        setLoading(false)
-      }
+      if (!background) setLoading(false)
       inFlightRef.current = false
     }
   }, [])
@@ -291,10 +323,7 @@ export function StatisticsPage() {
 
     const handleVisibilityChange = () => {
       if (document.hidden || cancelled) return
-      if (timeoutId != null) {
-        window.clearTimeout(timeoutId)
-        timeoutId = null
-      }
+      if (timeoutId != null) { window.clearTimeout(timeoutId); timeoutId = null }
       void poll()
     }
 
@@ -320,108 +349,133 @@ export function StatisticsPage() {
     return ''
   }, [customRange.from, customRange.to, preset])
 
-  // Weighted mean response time across the window.
   const windowAvgResponseMs = useMemo(() => computeWindowAvgResponseMs(indexerStats), [indexerStats])
 
-  // Sorted indexer rows (column click toggles asc/desc; default searches desc).
-  const indexerRows = useMemo(() => {
-    const rows = [...indexerStats]
-    rows.sort((a, b) => {
-      let aVal, bVal
-      if (sortKey === 'name') {
-        aVal = a.name
-        bVal = b.name
-        const cmp = aVal.localeCompare(bVal)
-        return sortDir === 'asc' ? cmp : -cmp
-      }
-      aVal = toNumber(a[sortKey])
-      bVal = toNumber(b[sortKey])
-      if (aVal === bVal) return a.name.localeCompare(b.name)
-      return sortDir === 'asc' ? aVal - bVal : bVal - aVal
-    })
-    return rows
-  }, [indexerStats, sortKey, sortDir])
-
-  // Summary totals row for indexer table.
-  const indexerTotals = useMemo(() => {
-    if (indexerStats.length === 0) return null
-    const totalSearches = indexerStats.reduce((s, r) => s + r.searches, 0)
-    const totalDownloads = indexerStats.reduce((s, r) => s + r.downloads, 0)
-    const totalUniqueDownloads = indexerStats.reduce((s, r) => s + r.uniqueDownloads, 0)
-    // Weighted avg response (only rows with data)
-    const avgResp = windowAvgResponseMs
-    // Weighted avg success rate
-    let totalSuccessWeight = 0
-    let totalSuccessSearches = 0
-    for (const r of indexerStats) {
-      if (r.searches > 0) {
-        totalSuccessWeight += r.successRatePct * r.searches
-        totalSuccessSearches += r.searches
-      }
-    }
-    const avgSuccess = totalSuccessSearches > 0 ? totalSuccessWeight / totalSuccessSearches : 0
-    return { totalSearches, totalDownloads, totalUniqueDownloads, avgResp, avgSuccess }
-  }, [indexerStats, windowAvgResponseMs])
-
-  // Download share chart (sorted by share desc).
-  const indexerDownloadChartData = useMemo(() => {
-    return [...indexerStats]
-      .sort((a, b) => b.downloadSharePct - a.downloadSharePct)
-      .map((row) => ({ name: row.name, value: row.downloadSharePct }))
-  }, [indexerStats])
-
-  const providerRows = useMemo(() => {
-    return [...providerStats].sort((a, b) => b.downloadedBytes - a.downloadedBytes)
-  }, [providerStats])
-
-  const providerChartData = useMemo(() => providerRows.map((row) => ({
-    name: row.name,
-    data: row.dataSharePct,
-  })), [providerRows])
+  const daysInWindow = useMemo(() => {
+    if (!activeRange.from || !activeRange.to) return null
+    const from = parseDateValue(activeRange.from)
+    const to = parseDateValue(activeRange.to)
+    if (!from || !to) return null
+    const diff = (to - from) / (1000 * 60 * 60 * 24)
+    return Math.max(1, Math.round(diff))
+  }, [activeRange])
 
   const rangeLabel = useMemo(() => {
     const from = activeRange?.from || 'Beginning'
     const to = activeRange?.to || 'Now'
-    return `${from} - ${to}`
+    return `${from} – ${to}`
   }, [activeRange])
 
-  // Time distribution chart data
+  // Section 1: Average Response Times — sorted by response time asc (fastest first)
+  const responseTimeData = useMemo(() => {
+    return [...indexerStats]
+      .filter((r) => r.avgResponseMs > 0)
+      .sort((a, b) => a.avgResponseMs - b.avgResponseMs)
+      .map((r) => ({ name: r.name, value: Math.round(r.avgResponseMs) }))
+  }, [indexerStats])
+
+  const responseTimeRows = useMemo(() => {
+    return [...indexerStats]
+      .filter((r) => r.searches > 0)
+      .sort((a, b) => a.avgResponseMs - b.avgResponseMs)
+      .map((row) => {
+        let deltaText = '—'
+        let deltaClass = 'text-muted-foreground'
+        if (row.avgResponseMs > 0 && windowAvgResponseMs > 0) {
+          const delta = row.avgResponseMs - windowAvgResponseMs
+          const abs = Math.round(Math.abs(delta))
+          if (abs > 0) {
+            deltaText = `${delta > 0 ? '+' : '−'}${abs} ms`
+            deltaClass = delta > 0 ? 'text-red-500' : 'text-green-500'
+          } else {
+            deltaText = '0 ms'
+          }
+        }
+        return {
+          cells: [
+            { value: row.name },
+            { value: row.avgResponseMs > 0 ? `${Math.round(row.avgResponseMs)} ms` : 'N/A' },
+            { value: deltaText, className: deltaClass },
+          ],
+        }
+      })
+  }, [indexerStats, windowAvgResponseMs])
+
+  // Section 2: Indexer API Accesses — sorted by searches desc
+  const apiAccessData = useMemo(() => {
+    return [...indexerStats]
+      .sort((a, b) => b.searches - a.searches)
+      .map((r) => ({ name: r.name, value: r.searches }))
+  }, [indexerStats])
+
+  const apiAccessRows = useMemo(() => {
+    return [...indexerStats]
+      .sort((a, b) => b.searches - a.searches)
+      .map((row) => {
+        const avgPerDay = daysInWindow && row.searches > 0
+          ? (row.searches / daysInWindow).toFixed(1)
+          : '—'
+        const failPct = row.successRatePct > 0
+          ? formatPct(100 - row.successRatePct)
+          : '0.0%'
+        return {
+          cells: [
+            { value: row.name },
+            { value: avgPerDay },
+            { value: formatPct(row.successRatePct) },
+            { value: failPct },
+          ],
+        }
+      })
+  }, [indexerStats, daysInWindow])
+
+  // Section 3: NZB Downloads per Indexer — sorted by downloads desc
+  const nzbDownloadData = useMemo(() => {
+    return [...indexerStats]
+      .sort((a, b) => b.downloads - a.downloads)
+      .map((r) => ({ name: r.name, value: r.downloads }))
+  }, [indexerStats])
+
+  const nzbDownloadRows = useMemo(() => {
+    return [...indexerStats]
+      .sort((a, b) => b.downloads - a.downloads)
+      .map((row) => ({
+        cells: [
+          { value: row.name },
+          { value: row.downloads },
+          { value: formatPct(row.downloadSharePct) },
+        ],
+      }))
+  }, [indexerStats])
+
+  // Section 4: Indexer Scores — sorted by score desc
+  const indexerScoreRows = useMemo(() => {
+    return [...indexerStats]
+      .sort((a, b) => b.uniquenessScore - a.uniquenessScore)
+      .map((row) => ({
+        cells: [
+          { value: row.name },
+          { value: row.uniquenessScore > 0 ? row.uniquenessScore.toFixed(0) : '—' },
+          { value: row.downloads },
+          { value: row.uniqueDownloads },
+        ],
+      }))
+  }, [indexerStats])
+
   const searchesByHour = useMemo(() =>
-    buildHourChartData(timeDist?.searches_by_hour ?? new Array(24).fill(0)),
-    [timeDist])
+    buildHourChartData(timeDist?.searches_by_hour ?? new Array(24).fill(0)), [timeDist])
   const searchesByWeekday = useMemo(() =>
-    buildWeekdayChartData(timeDist?.searches_by_weekday ?? new Array(7).fill(0)),
-    [timeDist])
+    buildWeekdayChartData(timeDist?.searches_by_weekday ?? new Array(7).fill(0)), [timeDist])
   const downloadsByHour = useMemo(() =>
-    buildHourChartData(timeDist?.downloads_by_hour ?? new Array(24).fill(0)),
-    [timeDist])
+    buildHourChartData(timeDist?.downloads_by_hour ?? new Array(24).fill(0)), [timeDist])
   const downloadsByWeekday = useMemo(() =>
-    buildWeekdayChartData(timeDist?.downloads_by_weekday ?? new Array(7).fill(0)),
-    [timeDist])
+    buildWeekdayChartData(timeDist?.downloads_by_weekday ?? new Array(7).fill(0)), [timeDist])
 
-  const indexerDownloadChartHeight = Math.max(220, indexerDownloadChartData.length * 42)
-  const providerChartHeight = Math.max(220, providerChartData.length * 42)
-
-  function handleSortClick(key) {
-    setSortKey((prev) => {
-      if (prev === key) {
-        setSortDir((d) => d === 'asc' ? 'desc' : 'asc')
-        return key
-      }
-      setSortDir('desc')
-      return key
-    })
-  }
-
-  function formatDelta(row) {
-    if (row.avgResponseMs <= 0 || row.searches === 0 || windowAvgResponseMs === 0) return null
-    const delta = row.avgResponseMs - windowAvgResponseMs
-    const abs = Math.round(Math.abs(delta))
-    if (abs === 0) return { text: '0 ms', color: 'text-muted-foreground' }
-    const sign = delta > 0 ? '+' : '−'
-    const color = delta > 0 ? 'text-red-500' : 'text-green-500'
-    return { text: `${sign}${abs} ms`, color }
-  }
+  const providerRows = useMemo(() =>
+    [...providerStats].sort((a, b) => b.downloadedBytes - a.downloadedBytes), [providerStats])
+  const providerChartData = useMemo(() =>
+    providerRows.map((row) => ({ name: row.name, value: row.dataSharePct })), [providerRows])
+  const providerChartHeight = Math.max(160, providerChartData.length * 36)
 
   return (
     <div className="flex flex-col gap-4 py-4 md:gap-6 md:py-6 px-4 lg:px-6">
@@ -429,17 +483,14 @@ export function StatisticsPage() {
       <Card>
         <CardHeader>
           <CardTitle>Date Range</CardTitle>
-          <CardDescription>Use quick presets or choose a custom range. Statistics are aggregated from individual events over the selected window.</CardDescription>
+          <CardDescription>Statistics are aggregated from individual events over the selected window.</CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-3">
           <div className="flex flex-wrap items-center gap-2">
             <ToggleGroup
               type="single"
               value={preset}
-              onValueChange={(value) => {
-                if (!value) return
-                setPreset(value)
-              }}
+              onValueChange={(value) => { if (!value) return; setPreset(value) }}
               variant="outline"
               size="sm"
               className="justify-start"
@@ -450,7 +501,9 @@ export function StatisticsPage() {
               <ToggleGroupItem value="all">All</ToggleGroupItem>
               <ToggleGroupItem value="custom">Custom</ToggleGroupItem>
             </ToggleGroup>
-            <div className="text-xs text-muted-foreground">{loading ? 'Loading...' : `Showing: ${rangeLabel}`}</div>
+            <div className="text-xs text-muted-foreground">
+              {loading ? 'Loading…' : `Showing: ${rangeLabel}`}
+            </div>
           </div>
 
           {preset === 'custom' && (
@@ -460,7 +513,7 @@ export function StatisticsPage() {
                 <Input
                   type="date"
                   value={customRange.from}
-                  onChange={(event) => setCustomRange((prev) => ({ ...prev, from: event.target.value }))}
+                  onChange={(e) => setCustomRange((prev) => ({ ...prev, from: e.target.value }))}
                   className="h-9 sm:w-44"
                 />
               </div>
@@ -469,7 +522,7 @@ export function StatisticsPage() {
                 <Input
                   type="date"
                   value={customRange.to}
-                  onChange={(event) => setCustomRange((prev) => ({ ...prev, to: event.target.value }))}
+                  onChange={(e) => setCustomRange((prev) => ({ ...prev, to: e.target.value }))}
                   className="h-9 sm:w-44"
                 />
               </div>
@@ -484,7 +537,7 @@ export function StatisticsPage() {
                   void loadStats(customRange.from, customRange.to)
                 }}
               >
-                Apply Custom
+                Apply
               </Button>
             </div>
           )}
@@ -500,103 +553,153 @@ export function StatisticsPage() {
         </Card>
       )}
 
-      {/* Indexer section — full width */}
-      <Card className="overflow-hidden">
-        <CardHeader>
-          <div className="flex items-center gap-2">
-            <Gauge className="h-5 w-5 text-primary" />
-            <CardTitle>Indexer statistics</CardTitle>
-          </div>
-          <CardDescription>Searches, response times, success rate, downloads, and uniqueness score aggregated over the window.</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          {/* Download share bar chart — always visible, no chip selector */}
-          <ChartContainer config={indexerDownloadChartConfig} className="w-full" style={{ height: `${indexerDownloadChartHeight}px` }}>
-            <BarChart data={indexerDownloadChartData} layout="vertical" margin={{ top: 8, right: 12, left: 12, bottom: 8 }}>
-              <CartesianGrid horizontal={false} />
-              <XAxis type="number" tick={{ fontSize: 11 }} unit="%" />
-              <YAxis type="category" dataKey="name" width={160} tick={{ fontSize: 11 }} />
-              <ChartTooltip content={<ChartTooltipContent />} />
-              <Bar dataKey="value" fill="var(--color-value)" radius={4} name="value" />
-            </BarChart>
-          </ChartContainer>
-
-          {/* Full-width sortable table */}
-          <div className="overflow-x-auto rounded-md border border-border/60">
-            <table className="w-full text-sm">
-              <thead className="bg-muted/40 text-muted-foreground">
-                <tr>
-                  {INDEXER_COLUMNS.map((col) => (
-                    <th
-                      key={col.key}
-                      className={`px-3 py-2 font-medium whitespace-nowrap ${col.align === 'right' ? 'text-right' : 'text-left'} ${col.noSort ? '' : 'cursor-pointer select-none hover:text-foreground'}`}
-                      onClick={col.noSort ? undefined : () => handleSortClick(col.key)}
-                    >
-                      {col.label}
-                      {!col.noSort && <SortIcon direction={sortKey === col.key ? sortDir : null} />}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {indexerRows.map((row) => {
-                  const delta = formatDelta(row)
-                  return (
-                    <tr key={row.name} className="border-t border-border/50">
-                      <td className="px-3 py-2 whitespace-nowrap">{row.name}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">{row.searches}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">{formatPct(row.searchSharePct)}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">{row.avgResponseMs > 0 ? `${row.avgResponseMs.toFixed(0)} ms` : 'N/A'}</td>
-                      <td className={`px-3 py-2 text-right tabular-nums ${delta ? delta.color : 'text-muted-foreground'}`}>
-                        {delta ? delta.text : '—'}
-                      </td>
-                      <td className="px-3 py-2 text-right tabular-nums">{row.avgResults.toFixed(1)}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">{formatPct(row.successRatePct)}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">{row.downloads}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">{formatPct(row.downloadSharePct)}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">{row.uniqueDownloads}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">{row.uniquenessScore.toFixed(0)}</td>
-                    </tr>
-                  )
-                })}
-                {/* Totals row */}
-                {indexerTotals && (
-                  <tr className="border-t-2 border-border bg-muted/30 font-medium">
-                    <td className="px-3 py-2">Total / Avg</td>
-                    <td className="px-3 py-2 text-right tabular-nums">{indexerTotals.totalSearches}</td>
-                    <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">&mdash;</td>
-                    <td className="px-3 py-2 text-right tabular-nums">
-                      {indexerTotals.avgResp > 0 ? `${indexerTotals.avgResp.toFixed(0)} ms` : 'N/A'}
-                    </td>
-                    <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">&mdash;</td>
-                    <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">&mdash;</td>
-                    <td className="px-3 py-2 text-right tabular-nums">{formatPct(indexerTotals.avgSuccess)}</td>
-                    <td className="px-3 py-2 text-right tabular-nums">{indexerTotals.totalDownloads}</td>
-                    <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">&mdash;</td>
-                    <td className="px-3 py-2 text-right tabular-nums">{indexerTotals.totalUniqueDownloads}</td>
-                    <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">&mdash;</td>
-                  </tr>
-                )}
-                {indexerRows.length === 0 && (
-                  <tr>
-                    <td colSpan={INDEXER_COLUMNS.length} className="px-3 py-6 text-center text-muted-foreground">No indexer statistics in this window.</td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
+      {/* Section toggles — NZBHydra2 style checkbox list */}
+      <Card>
+        <CardContent className="pt-4">
+          <div className="flex flex-wrap gap-x-6 gap-y-3">
+            {Object.entries(SECTION_LABELS).map(([key, label]) => (
+              <SectionHeader
+                key={key}
+                id={`section-toggle-${key}`}
+                label={label}
+                checked={sections[key]}
+                onToggle={() => toggleSection(key)}
+              />
+            ))}
           </div>
         </CardContent>
       </Card>
 
-      {/* Time distribution charts — 2×2 grid */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <TimeDistChart title="Searches by hour of day" data={searchesByHour} />
-        <TimeDistChart title="Searches by day of week" data={searchesByWeekday} />
-        <TimeDistChart title="Downloads by hour of day" data={downloadsByHour} />
-        <TimeDistChart title="Downloads by day of week" data={downloadsByWeekday} />
-      </div>
+      {/* ── Section 1: Average Response Times ── */}
+      {sections.avgResponseTimes && (
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-base">Avg. response times (in ms)</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <HorizontalBarSection data={responseTimeData} unit=" ms" />
+            <StatsTable
+              headers={[
+                { label: 'Indexer' },
+                { label: 'Avg. response time (ms)', right: true },
+                { label: 'Delta', right: true },
+              ]}
+              rows={responseTimeRows}
+            />
+          </CardContent>
+        </Card>
+      )}
 
-      {/* Provider section — full width */}
+      {/* ── Section 2: Indexer API Accesses ── */}
+      {sections.apiAccesses && (
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-base">Indexer API accesses</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <HorizontalBarSection data={apiAccessData} />
+            <StatsTable
+              headers={[
+                { label: 'Indexer' },
+                { label: 'Avg. per day', right: true },
+                { label: '% successful', right: true },
+                { label: '% failed', right: true },
+              ]}
+              rows={apiAccessRows}
+            />
+          </CardContent>
+        </Card>
+      )}
+
+      {/* ── Section 3: NZB Downloads per Indexer ── */}
+      {sections.nzbDownloads && (
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-base">NZB downloads per indexer</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <HorizontalBarSection data={nzbDownloadData} />
+            <StatsTable
+              headers={[
+                { label: 'Indexer' },
+                { label: 'Total', right: true },
+                { label: '% of all enabled', right: true },
+              ]}
+              rows={nzbDownloadRows}
+            />
+          </CardContent>
+        </Card>
+      )}
+
+      {/* ── Section 4: Indexer Scores ── */}
+      {sections.indexerScores && (
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-base">Indexer scores</CardTitle>
+            <CardDescription className="text-xs">
+              Don&apos;t read too much into these stats. The score is based on how often an indexer uniquely provides a result that was downloaded: 100 × indexers searched / indexers with this result.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <StatsTable
+              headers={[
+                { label: 'Indexer' },
+                { label: 'Avg. score', right: true },
+                { label: '# of dl searches', right: true },
+                { label: 'Unique downloads', right: true },
+              ]}
+              rows={indexerScoreRows}
+            />
+          </CardContent>
+        </Card>
+      )}
+
+      {/* ── Time distribution sections ── */}
+      {sections.searchesByHour && (
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-base">Searches per hour of day</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <TimeDistBarChart data={searchesByHour} />
+          </CardContent>
+        </Card>
+      )}
+
+      {sections.searchesByWeekday && (
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-base">Searches per day of week</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <TimeDistBarChart data={searchesByWeekday} />
+          </CardContent>
+        </Card>
+      )}
+
+      {sections.downloadsByHour && (
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-base">NZB downloads per hour of day</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <TimeDistBarChart data={downloadsByHour} />
+          </CardContent>
+        </Card>
+      )}
+
+      {sections.downloadsByWeekday && (
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-base">NZB downloads per day of week</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <TimeDistBarChart data={downloadsByWeekday} />
+          </CardContent>
+        </Card>
+      )}
+
+      {/* ── Provider statistics ── */}
       <Card className="overflow-hidden">
         <CardHeader>
           <div className="flex items-center gap-2">
@@ -606,13 +709,13 @@ export function StatisticsPage() {
           <CardDescription>Article availability and downloaded volume aggregated per provider over the window.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          <ChartContainer config={providerChartConfig} className="w-full" style={{ height: `${providerChartHeight}px` }}>
-            <BarChart data={providerChartData} layout="vertical" margin={{ top: 8, right: 12, left: 12, bottom: 8 }}>
+          <ChartContainer config={hBarChartConfig} className="w-full" style={{ height: `${providerChartHeight}px` }}>
+            <BarChart data={providerChartData} layout="vertical" margin={{ top: 4, right: 16, left: 8, bottom: 4 }}>
               <CartesianGrid horizontal={false} />
-              <XAxis type="number" tick={{ fontSize: 11 }} />
-              <YAxis type="category" dataKey="name" width={160} tick={{ fontSize: 11 }} />
+              <XAxis type="number" tick={{ fontSize: 11 }} unit="%" />
+              <YAxis type="category" dataKey="name" width={150} tick={{ fontSize: 11 }} />
               <ChartTooltip content={<ChartTooltipContent />} />
-              <Bar dataKey="data" fill="var(--color-data)" radius={4} name="data" />
+              <Bar dataKey="value" fill="var(--color-value)" radius={3} name="value" />
             </BarChart>
           </ChartContainer>
 
@@ -633,7 +736,7 @@ export function StatisticsPage() {
                 {providerRows.map((row) => (
                   <tr key={row.name} className="border-t border-border/50">
                     <td className="px-3 py-2">
-                      <div className="flex items-center gap-2"><span className="truncate">{row.name}</span></div>
+                      <div className="truncate">{row.name}</div>
                       {row.host && <div className="text-xs text-muted-foreground truncate">{row.host}</div>}
                     </td>
                     <td className="px-3 py-2 text-right tabular-nums">{row.articles}</td>
@@ -646,7 +749,9 @@ export function StatisticsPage() {
                 ))}
                 {providerRows.length === 0 && (
                   <tr>
-                    <td colSpan={7} className="px-3 py-6 text-center text-muted-foreground">No provider statistics in this window.</td>
+                    <td colSpan={7} className="px-3 py-6 text-center text-muted-foreground">
+                      No provider statistics in this window.
+                    </td>
                   </tr>
                 )}
               </tbody>
