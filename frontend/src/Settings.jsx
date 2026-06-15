@@ -1,9 +1,10 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react'
 import { useForm, useFieldArray } from 'react-hook-form'
-import { AlertTriangle, Network, SlidersHorizontal, Server, Globe, Search, Loader2, Save, HardDrive } from "lucide-react"
+import { AlertTriangle, Network, SlidersHorizontal, Server, Globe, Search, Loader2, Save, HardDrive, Magnet } from "lucide-react"
 import { IndexerSettings } from "@/components/IndexerSettings"
 import { ProviderSettings } from "@/components/ProviderSettings"
 import { TorrentClientSettings } from "@/components/TorrentClientSettings"
+import { TorrentTrackerSettings } from "@/components/TorrentTrackerSettings"
 import { SearchQuerySettings } from "@/components/SearchQuerySettings"
 import { NetworkSettingsSection } from "@/components/NetworkSettingsSection"
 import { AdvancedSettingsSection } from "@/components/AdvancedSettingsSection"
@@ -19,11 +20,17 @@ import { normalizeAvailNZBMode } from './lib/availnzb'
 const TABS = [
   { id: 'network', label: 'Network', icon: Network },
   { id: 'indexers', label: 'Indexers', icon: Server },
+  { id: 'torrent_trackers', label: 'Torrent Trackers', icon: Magnet },
   { id: 'providers', label: 'Providers', icon: Globe },
   { id: 'torrent_clients', label: 'Torrent Clients', icon: HardDrive },
   { id: 'search_query', label: 'Search', icon: Search },
   { id: 'advanced', label: 'Advanced', icon: SlidersHorizontal },
 ]
+
+function isTorrentIndexerType(type) {
+  const t = (type || '').trim().toLowerCase()
+  return t === 'torznab' || t === 'torrent'
+}
 
 const ACTIVE_TAB_STORAGE_KEY = 'seedstream.settings.activeTab'
 
@@ -98,6 +105,7 @@ function Settings({
     defaultValues: {
       providers: [],
       indexers: [],
+      torznab_trackers: [],
       torrent_clients: [],
       movie_search_queries: [],
       series_search_queries: []
@@ -114,6 +122,11 @@ function Settings({
   const { fields: indexerFields, append: appendIndexer, remove: removeIndexer, update: updateIndexer, replace: replaceIndexers } = useFieldArray({
     control,
     name: 'indexers'
+  })
+
+  const { fields: torznabTrackerFields, append: appendTorznabTracker, remove: removeTorznabTracker, update: updateTorznabTracker, replace: replaceTorznabTrackers } = useFieldArray({
+    control,
+    name: 'torznab_trackers'
   })
 
   const { fields: torrentClientFields, append: appendTorrentClient, remove: removeTorrentClient, update: updateTorrentClient, replace: replaceTorrentClients } = useFieldArray({
@@ -162,18 +175,28 @@ function Settings({
           port: Number(p.port),
           connections: Number(p.connections)
         })) || [],
-        indexers: initialConfig.indexers?.map(idx => ({
+        indexers: initialConfig.indexers?.filter(idx => !isTorrentIndexerType(idx.type))?.map(idx => ({
           ...idx,
           enabled: idx.enabled != null ? idx.enabled : true,
           api_path: idx.api_path || '/api',
           api_hits_day: Number(idx.api_hits_day || 0),
-	          downloads_day: Number(idx.downloads_day || 0),
-	          rate_limit_rps: Number(idx.rate_limit_rps || 0),
-	          timeout_seconds: Number(idx.timeout_seconds || 0),
+          downloads_day: Number(idx.downloads_day || 0),
+          rate_limit_rps: Number(idx.rate_limit_rps || 0),
+          timeout_seconds: Number(idx.timeout_seconds || 0),
           username: idx.username || '',
           password: idx.password || '',
           disable_id_search: idx.disable_id_search === true,
           disable_string_search: idx.disable_string_search === true
+        })) || [],
+        torznab_trackers: initialConfig.indexers?.filter(idx => isTorrentIndexerType(idx.type))?.map(idx => ({
+          ...idx,
+          type: 'torznab',
+          enabled: idx.enabled != null ? idx.enabled : true,
+          api_path: idx.api_path || '/api',
+          api_hits_day: Number(idx.api_hits_day || 0),
+          rate_limit_rps: Number(idx.rate_limit_rps || 0),
+          timeout_seconds: Number(idx.timeout_seconds || 0),
+          proxy_url: idx.proxy_url || '',
         })) || [],
         torrent_clients: initialConfig.torrent_clients?.map((tc) => ({
           name: tc.name || '',
@@ -210,6 +233,7 @@ function Settings({
       reset({
         providers: formattedData.providers,
         indexers: formattedData.indexers,
+        torznab_trackers: formattedData.torznab_trackers,
         torrent_clients: formattedData.torrent_clients,
         movie_search_queries: formattedData.movie_search_queries,
         series_search_queries: formattedData.series_search_queries,
@@ -431,7 +455,22 @@ function Settings({
               remove={removeIndexer}
               replace={replaceIndexers}
               onClearStatus={clearTransientStatus}
-              onPersist={(nextIndexers) => submitSettings({ indexers: nextIndexers }, 'indexers')}
+              onPersist={(nextNzbIndexers) => submitSettings({ indexers: [...nextNzbIndexers, ...getValues('torznab_trackers')] }, 'indexers')}
+              onStatus={(status) => showFooterStatus(status)}
+            />
+          </div>
+        )}
+
+        {activeTab === 'torrent_trackers' && (
+          <div className="space-y-4">
+            <TorrentTrackerSettings
+              fields={torznabTrackerFields}
+              append={appendTorznabTracker}
+              update={updateTorznabTracker}
+              remove={removeTorznabTracker}
+              replace={replaceTorznabTrackers}
+              onClearStatus={clearTransientStatus}
+              onPersist={(nextTorznabTrackers) => submitSettings({ indexers: [...getValues('indexers'), ...nextTorznabTrackers] }, 'indexers')}
               onStatus={(status) => showFooterStatus(status)}
             />
           </div>
