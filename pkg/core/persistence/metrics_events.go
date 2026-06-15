@@ -176,7 +176,7 @@ func (m *StateManager) GetIndexerStats(from, to *time.Time) ([]IndexerStatsRow, 
 		SELECT
 			indexer_name,
 			SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) AS downloads,
-			SUM(CASE WHEN indexers_with_result = 1 THEN 1 ELSE 0 END) AS unique_downloads,
+			SUM(CASE WHEN success = 1 AND indexers_with_result = 1 THEN 1 ELSE 0 END) AS unique_downloads,
 			COALESCE(AVG(100.0 * indexers_in_search / indexers_with_result), 0) AS avg_uniqueness
 		FROM indexer_download_events
 		WHERE ts >= ? AND ts < ?
