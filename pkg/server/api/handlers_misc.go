@@ -329,7 +329,7 @@ func parseStatsRange(r *http.Request) (*time.Time, *time.Time, error) {
 }
 
 // handleIndexerStats returns per-indexer event-based aggregation over the
-// selected [from,to) window (NZBHydra2-style).
+// selected [from,to) window (NZBHydra2-style), plus time-distribution charts.
 func (s *Server) handleIndexerStats(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -340,22 +340,24 @@ func (s *Server) handleIndexerStats(w http.ResponseWriter, r *http.Request) {
 	s.mu.RUnlock()
 
 	rows := []persistence.IndexerStatsRow{}
-	if mgr == nil {
-		writeJSON(w, map[string]any{"indexers": rows})
-		return
+	var timeDist *persistence.TimeDistributionStats
+
+	if mgr != nil {
+		from, to, err := parseStatsRange(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		rows, err = mgr.GetIndexerStats(from, to)
+		if err != nil {
+			logger.Error("GetIndexerStats failed", "err", err)
+		}
+		timeDist, err = mgr.GetTimeDistribution(from, to)
+		if err != nil {
+			logger.Error("GetTimeDistribution failed", "err", err)
+		}
 	}
-	from, to, err := parseStatsRange(r)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	rows, err = mgr.GetIndexerStats(from, to)
-	if err != nil {
-		logger.Error("GetIndexerStats failed", "err", err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, map[string]any{"indexers": rows})
+	writeJSON(w, map[string]any{"indexers": rows, "time_distribution": timeDist})
 }
 
 // handleProviderStats returns per-provider event-based aggregation over the
