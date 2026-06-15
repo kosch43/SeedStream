@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"seedstream/pkg/auth"
+	"seedstream/pkg/core/config"
 	"seedstream/pkg/core/logger"
 	"seedstream/pkg/core/persistence"
 	"seedstream/pkg/indexer"
@@ -357,6 +358,27 @@ func (s *Server) handleIndexerStats(w http.ResponseWriter, r *http.Request) {
 			logger.Error("GetTimeDistribution failed", "err", err)
 		}
 	}
+
+	// Stamp each row's protocol (usenet vs torrent) from config so the UI can
+	// separate Torznab tracker stats from Usenet indexer stats. Names not found
+	// in config default to "usenet" (matches legacy Newznab-only behaviour).
+	s.mu.RLock()
+	cfg := s.config
+	s.mu.RUnlock()
+	torrentByName := make(map[string]bool)
+	if cfg != nil {
+		for _, idx := range cfg.Indexers {
+			torrentByName[strings.ToLower(strings.TrimSpace(idx.Name))] = config.IsTorrentIndexerType(idx.Type)
+		}
+	}
+	for i := range rows {
+		if torrentByName[strings.ToLower(strings.TrimSpace(rows[i].IndexerName))] {
+			rows[i].Protocol = "torrent"
+		} else {
+			rows[i].Protocol = "usenet"
+		}
+	}
+
 	writeJSON(w, map[string]any{"indexers": rows, "time_distribution": timeDist})
 }
 

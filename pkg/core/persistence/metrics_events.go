@@ -18,6 +18,9 @@ type IndexerStatsRow struct {
 	DownloadSharePct   float64 `json:"download_share_pct"`
 	UniqueDownloads    int64   `json:"unique_downloads"`
 	AvgUniquenessScore float64 `json:"avg_uniqueness_score"`
+	// Protocol is "usenet" (Newznab indexer) or "torrent" (Torznab tracker).
+	// Stamped by the API handler from config, not stored in the event tables.
+	Protocol string `json:"protocol,omitempty"`
 }
 
 // ProviderStatsRow is the per-provider aggregation over a [from,to) window,
