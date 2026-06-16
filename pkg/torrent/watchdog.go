@@ -2,6 +2,8 @@ package torrent
 
 import (
 	"context"
+	"encoding/base32"
+	"encoding/hex"
 	"net/url"
 	"sort"
 	"strconv"
@@ -185,7 +187,7 @@ func (w *Watchdog) handleStalled(ctx context.Context, stalled TorrentHealthEntry
 
 	// Register the replacement's hash so that if it also stalls the watchdog
 	// can identify its content and re-replace it.
-	if newHash := infoHashFromMagnet(newURL); newHash != "" {
+	if newHash := InfoHashFromMagnet(newURL); newHash != "" {
 		if err := w.cerberus.RegisterTorrent(newHash, ids, newURL, rec.ReleaseTitle); err != nil {
 			logger.Warn("Cerberus watchdog: failed to register replacement hash", "hash", newHash, "err", err)
 		}
@@ -246,9 +248,25 @@ func (w *Watchdog) findReplacement(rec *cerberus.TorrentRecord, blocked map[stri
 	return candidates[0].url
 }
 
-// infoHashFromMagnet extracts the BitTorrent info hash from a magnet URI.
-// Returns an empty string if the URI is not a magnet or contains no btih.
-func infoHashFromMagnet(magnet string) string {
+// normalizeInfoHash converts any BitTorrent info hash to lowercase hex (40 chars).
+// Magnet URIs may carry the hash as 32-char base32 instead of 40-char hex.
+func normalizeInfoHash(h string) string {
+	h = strings.ToLower(strings.TrimSpace(h))
+	if len(h) == 40 {
+		return h
+	}
+	if len(h) == 32 {
+		decoded, err := base32.StdEncoding.DecodeString(strings.ToUpper(h))
+		if err == nil && len(decoded) == 20 {
+			return hex.EncodeToString(decoded)
+		}
+	}
+	return h
+}
+
+// InfoHashFromMagnet extracts and normalizes the BitTorrent info hash from a
+// magnet URI. Returns an empty string if the URI is not a magnet or has no btih.
+func InfoHashFromMagnet(magnet string) string {
 	if !strings.HasPrefix(strings.ToLower(magnet), "magnet:") {
 		return ""
 	}
@@ -259,7 +277,8 @@ func infoHashFromMagnet(magnet string) string {
 	for _, xt := range u.Query()["xt"] {
 		lower := strings.ToLower(xt)
 		if strings.HasPrefix(lower, "urn:btih:") {
-			return strings.TrimPrefix(lower, "urn:btih:")
+			raw := strings.TrimPrefix(lower, "urn:btih:")
+			return normalizeInfoHash(raw)
 		}
 	}
 	return ""

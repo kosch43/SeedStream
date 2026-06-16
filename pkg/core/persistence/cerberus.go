@@ -2,9 +2,31 @@ package persistence
 
 import (
 	"database/sql"
+	"encoding/base32"
+	"encoding/hex"
 	"strings"
 	"time"
 )
+
+// normalizeInfoHash converts any BitTorrent info hash representation to
+// lowercase hex (40 chars). Magnet URIs may encode the hash as base32
+// (32 uppercase A-Z2-7 chars) instead of hex; both forms are accepted and
+// normalised to the 40-char hex format that qBittorrent uses internally.
+func normalizeInfoHash(h string) string {
+	h = strings.ToLower(strings.TrimSpace(h))
+	if len(h) == 40 {
+		return h // already hex
+	}
+	if len(h) == 32 {
+		// BitTorrent base32: 20 bytes encoded as 32 base32 chars (no padding).
+		// 32 chars × 5 bits = 160 bits = 20 bytes — exactly one SHA1.
+		decoded, err := base32.StdEncoding.DecodeString(strings.ToUpper(h))
+		if err == nil && len(decoded) == 20 {
+			return hex.EncodeToString(decoded)
+		}
+	}
+	return h
+}
 
 // TorrentEntry records the mapping from an info_hash to its content IDs.
 type TorrentEntry struct {
@@ -25,7 +47,7 @@ func (m *StateManager) RegisterTorrent(infoHash, imdbID, tmdbID, tvdbID string, 
 	if m == nil || m.db == nil {
 		return nil
 	}
-	hash := strings.ToLower(strings.TrimSpace(infoHash))
+	hash := normalizeInfoHash(infoHash)
 	if hash == "" {
 		return nil
 	}
@@ -45,7 +67,7 @@ func (m *StateManager) ReportTorrentFailure(infoHash, reason string) error {
 	if m == nil || m.db == nil {
 		return nil
 	}
-	hash := strings.ToLower(strings.TrimSpace(infoHash))
+	hash := normalizeInfoHash(infoHash)
 	if hash == "" {
 		return nil
 	}
@@ -76,7 +98,7 @@ func (m *StateManager) IsInfoHashBlocked(infoHash string) bool {
 	if m == nil || m.db == nil {
 		return false
 	}
-	hash := strings.ToLower(strings.TrimSpace(infoHash))
+	hash := normalizeInfoHash(infoHash)
 	if hash == "" {
 		return false
 	}
@@ -121,7 +143,7 @@ func (m *StateManager) GetTorrentByHash(infoHash string) *TorrentEntry {
 	if m == nil || m.db == nil {
 		return nil
 	}
-	hash := strings.ToLower(strings.TrimSpace(infoHash))
+	hash := normalizeInfoHash(infoHash)
 	if hash == "" {
 		return nil
 	}
