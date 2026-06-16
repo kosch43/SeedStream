@@ -8,6 +8,7 @@ import (
 	"seedstream/pkg/auth"
 	"seedstream/pkg/core/config"
 	"seedstream/pkg/core/logger"
+	"seedstream/pkg/services/cerberus"
 	"seedstream/pkg/session"
 )
 
@@ -43,6 +44,28 @@ func (s *Server) handleTorrentPlay(w http.ResponseWriter, r *http.Request, sess 
 		logger.Warn("Torrent prepare failed", "session", sess.ID, "title", sess.Release.Title, "err", err)
 		http.Error(w, "Torrent still preparing: "+err.Error(), http.StatusGatewayTimeout)
 		return
+	}
+
+	// Register the torrent with Cerberus so the watchdog can correlate
+	// stalled hashes back to their content IDs for re-search.
+	if s.cerberusClient != nil && sess.Release != nil && sess.ContentIDs != nil {
+		infoHash := strings.TrimSpace(sess.Release.InfoHash)
+		if infoHash != "" {
+			magnet := sess.Release.Magnet
+			if magnet == "" {
+				magnet = sess.Release.Link
+			}
+			ids := cerberus.ContentIDs{
+				ImdbID:  sess.ContentIDs.ImdbID,
+				TmdbID:  sess.ContentIDs.TmdbID,
+				TvdbID:  sess.ContentIDs.TvdbID,
+				Season:  sess.ContentIDs.Season,
+				Episode: sess.ContentIDs.Episode,
+			}
+			if err := s.cerberusClient.RegisterTorrent(infoHash, ids, magnet, sess.Release.Title); err != nil {
+				logger.Warn("Cerberus: failed to register torrent", "hash", infoHash, "err", err)
+			}
+		}
 	}
 
 	f, err := os.Open(res.AbsPath)

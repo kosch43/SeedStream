@@ -120,6 +120,33 @@ const (
 	);`
 	providerAccessDeltasIndexTime = `CREATE INDEX IF NOT EXISTS idx_provider_access_deltas_ts ON provider_access_deltas(ts);`
 	providerAccessDeltasIndexName = `CREATE INDEX IF NOT EXISTS idx_provider_access_deltas_name_ts ON provider_access_deltas(provider_name, ts);`
+
+	// Cerberus torrent health tables.
+	cerberusTorrentRegistrySchema = `CREATE TABLE IF NOT EXISTS cerberus_torrent_registry (
+		info_hash TEXT PRIMARY KEY,
+		imdb_id TEXT NOT NULL DEFAULT '',
+		tmdb_id TEXT NOT NULL DEFAULT '',
+		tvdb_id TEXT NOT NULL DEFAULT '',
+		season INTEGER NOT NULL DEFAULT 0,
+		episode INTEGER NOT NULL DEFAULT 0,
+		magnet TEXT NOT NULL DEFAULT '',
+		release_title TEXT NOT NULL DEFAULT '',
+		added_at INTEGER NOT NULL
+	);`
+	cerberusTorrentRegistryIndex = `CREATE INDEX IF NOT EXISTS idx_cerberus_registry_content ON cerberus_torrent_registry(imdb_id, tmdb_id, tvdb_id, season, episode);`
+
+	cerberusBlocklistSchema = `CREATE TABLE IF NOT EXISTS cerberus_blocklist (
+		info_hash TEXT PRIMARY KEY,
+		imdb_id TEXT NOT NULL DEFAULT '',
+		tmdb_id TEXT NOT NULL DEFAULT '',
+		tvdb_id TEXT NOT NULL DEFAULT '',
+		season INTEGER NOT NULL DEFAULT 0,
+		episode INTEGER NOT NULL DEFAULT 0,
+		failure_count INTEGER NOT NULL DEFAULT 0,
+		last_failure_at INTEGER NOT NULL,
+		reason TEXT NOT NULL DEFAULT ''
+	);`
+	cerberusBlocklistIndex = `CREATE INDEX IF NOT EXISTS idx_cerberus_blocklist_content ON cerberus_blocklist(imdb_id, tmdb_id, tvdb_id, season, episode);`
 )
 
 func openDB(dataDir string) (*sql.DB, error) {
@@ -161,6 +188,10 @@ func initSchema(db *sql.DB) error {
 		providerAccessDeltasSchema,
 		providerAccessDeltasIndexTime,
 		providerAccessDeltasIndexName,
+		cerberusTorrentRegistrySchema,
+		cerberusTorrentRegistryIndex,
+		cerberusBlocklistSchema,
+		cerberusBlocklistIndex,
 	} {
 		if _, err := db.Exec(stmt); err != nil {
 			return fmt.Errorf("schema: %w", err)

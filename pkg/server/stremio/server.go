@@ -14,6 +14,7 @@ import (
 	"seedstream/pkg/indexer"
 	"seedstream/pkg/search/triage"
 	"seedstream/pkg/services/availnzb"
+	"seedstream/pkg/services/cerberus"
 	"seedstream/pkg/services/metadata/tmdb"
 	"seedstream/pkg/services/metadata/tvdb"
 	"seedstream/pkg/session"
@@ -44,6 +45,7 @@ type Server struct {
 	tvdbClient                *tvdb.Client
 	streamManager             *auth.StreamManager
 	torrentManager            *torrent.Manager
+	cerberusClient            *cerberus.Client
 	playlistCache             sync.Map
 	rawSearchCache            sync.Map
 	recordedSuccessSessionIDs sync.Map // session ID -> struct{}; record actual playback success only once per stream
@@ -85,6 +87,7 @@ type ServerOptions struct {
 	StreamManager        *auth.StreamManager
 	Version              string
 	AttemptRecorder      *persistence.StateManager
+	CerberusClient       *cerberus.Client
 }
 
 func NewServer(opts *ServerOptions) (*Server, error) {
@@ -129,6 +132,7 @@ func NewServer(opts *ServerOptions) (*Server, error) {
 	if opts.Config != nil {
 		s.torrentManager = torrent.NewManager(opts.Config.TorrentClients)
 	}
+	s.cerberusClient = opts.CerberusClient
 
 	if err := s.CheckPort(opts.Port); err != nil {
 		return nil, err

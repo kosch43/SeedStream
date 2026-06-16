@@ -1,0 +1,138 @@
+package persistence
+
+import (
+	"database/sql"
+	"strings"
+	"time"
+)
+
+// TorrentEntry records the mapping from an info_hash to its content IDs.
+type TorrentEntry struct {
+	InfoHash     string
+	ImdbID       string
+	TmdbID       string
+	TvdbID       string
+	Season       int
+	Episode      int
+	Magnet       string
+	ReleaseTitle string
+	AddedAt      time.Time
+}
+
+// RegisterTorrent writes an info_hash → content ID mapping. Safe to call with
+// nil receiver (no-op).
+func (m *StateManager) RegisterTorrent(infoHash, imdbID, tmdbID, tvdbID string, season, episode int, magnet, releaseTitle string) error {
+	if m == nil || m.db == nil {
+		return nil
+	}
+	hash := strings.ToLower(strings.TrimSpace(infoHash))
+	if hash == "" {
+		return nil
+	}
+	now := time.Now().UnixMilli()
+	return m.withWriteLock(func(db *sql.DB) error {
+		_, err := db.Exec(`INSERT OR REPLACE INTO cerberus_torrent_registry
+			(info_hash, imdb_id, tmdb_id, tvdb_id, season, episode, magnet, release_title, added_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			hash, imdbID, tmdbID, tvdbID, season, episode, magnet, releaseTitle, now)
+		return err
+	})
+}
+
+// ReportTorrentFailure marks an info_hash as bad and increments its failure
+// count. Content IDs are copied from the registry if present.
+func (m *StateManager) ReportTorrentFailure(infoHash, reason string) error {
+	if m == nil || m.db == nil {
+		return nil
+	}
+	hash := strings.ToLower(strings.TrimSpace(infoHash))
+	if hash == "" {
+		return nil
+	}
+	now := time.Now().UnixMilli()
+	return m.withWriteLock(func(db *sql.DB) error {
+		var imdbID, tmdbID, tvdbID string
+		var season, episode int
+		_ = db.QueryRow(`SELECT imdb_id, tmdb_id, tvdb_id, season, episode
+			FROM cerberus_torrent_registry WHERE info_hash = ?`, hash).
+			Scan(&imdbID, &tmdbID, &tvdbID, &season, &episode)
+
+		_, err := db.Exec(`INSERT OR IGNORE INTO cerberus_blocklist
+			(info_hash, imdb_id, tmdb_id, tvdb_id, season, episode, failure_count, last_failure_at, reason)
+			VALUES (?, ?, ?, ?, ?, ?, 0, ?, '')`,
+			hash, imdbID, tmdbID, tvdbID, season, episode, now)
+		if err != nil {
+			return err
+		}
+		_, err = db.Exec(`UPDATE cerberus_blocklist
+			SET failure_count = failure_count + 1, last_failure_at = ?, reason = ?
+			WHERE info_hash = ?`, now, reason, hash)
+		return err
+	})
+}
+
+// IsInfoHashBlocked returns true if the hash appears in the blocklist.
+func (m *StateManager) IsInfoHashBlocked(infoHash string) bool {
+	if m == nil || m.db == nil {
+		return false
+	}
+	hash := strings.ToLower(strings.TrimSpace(infoHash))
+	if hash == "" {
+		return false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var count int
+	_ = m.db.QueryRow(`SELECT COUNT(*) FROM cerberus_blocklist WHERE info_hash = ?`, hash).Scan(&count)
+	return count > 0
+}
+
+// GetBlockedHashes returns all blocked info_hashes for a given content.
+func (m *StateManager) GetBlockedHashes(imdbID, tmdbID, tvdbID string, season, episode int) []string {
+	if m == nil || m.db == nil {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	rows, err := m.db.Query(`SELECT info_hash FROM cerberus_blocklist
+		WHERE imdb_id = ? AND tmdb_id = ? AND tvdb_id = ? AND season = ? AND episode = ?`,
+		imdbID, tmdbID, tvdbID, season, episode)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var hashes []string
+	for rows.Next() {
+		var h string
+		if err := rows.Scan(&h); err == nil {
+			hashes = append(hashes, h)
+		}
+	}
+	return hashes
+}
+
+// GetTorrentByHash looks up the registry entry for the given info_hash.
+// Returns nil if not found.
+func (m *StateManager) GetTorrentByHash(infoHash string) *TorrentEntry {
+	if m == nil || m.db == nil {
+		return nil
+	}
+	hash := strings.ToLower(strings.TrimSpace(infoHash))
+	if hash == "" {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var e TorrentEntry
+	var addedAtMs int64
+	err := m.db.QueryRow(`SELECT info_hash, imdb_id, tmdb_id, tvdb_id, season, episode,
+		magnet, release_title, added_at
+		FROM cerberus_torrent_registry WHERE info_hash = ?`, hash).
+		Scan(&e.InfoHash, &e.ImdbID, &e.TmdbID, &e.TvdbID, &e.Season, &e.Episode,
+			&e.Magnet, &e.ReleaseTitle, &addedAtMs)
+	if err != nil {
+		return nil
+	}
+	e.AddedAt = time.UnixMilli(addedAtMs)
+	return &e
+}
