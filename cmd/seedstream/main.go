@@ -148,9 +148,27 @@ func main() {
 						ov = make(map[string]config.IndexerSearchConfig)
 					}
 					cfg.Streams[k] = &config.StreamEntry{
-						Username:         stream.Username,
-						Token:            stream.Token,
-						IndexerOverrides: ov,
+						Username:            stream.Username,
+						Token:               stream.Token,
+						Order:               stream.Order,
+						FilterSortingMode:   stream.FilterSortingMode,
+						IndexerMode:         stream.IndexerMode,
+						UseAvailNZB:         stream.UseAvailNZB,
+						CombineResults:      stream.CombineResults,
+						EnableFailover:      stream.EnableFailover,
+						ResultsMode:         stream.ResultsMode,
+						AutoAddProviders:    stream.AutoAddProviders,
+						AutoAddIndexers:     stream.AutoAddIndexers,
+						IndexerOverrides:    ov,
+						ProviderSelections:  append([]string(nil), stream.ProviderSelections...),
+						IndexerSelections:   append([]string(nil), stream.IndexerSelections...),
+						MovieSearchQueries:  append([]string(nil), stream.MovieSearchQueries...),
+						SeriesSearchQueries: append([]string(nil), stream.SeriesSearchQueries...),
+						TorrentClient:       stream.TorrentClient,
+						ProwlarrURL:         stream.ProwlarrURL,
+						ProwlarrAPIKey:      stream.ProwlarrAPIKey,
+						PasswordHash:        stream.PasswordHash,
+						MustChangePassword:  stream.MustChangePassword,
 					}
 				}
 				if err := cfg.Save(); err != nil {
