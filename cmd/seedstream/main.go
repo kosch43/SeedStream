@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"context"
+
 	"seedstream/pkg/auth"
 	"seedstream/pkg/core/app"
 	"seedstream/pkg/core/config"
@@ -20,7 +22,9 @@ import (
 	"seedstream/pkg/server/stremio"
 	"seedstream/pkg/server/web"
 	"seedstream/pkg/services/availnzb"
+	"seedstream/pkg/services/cerberus"
 	"seedstream/pkg/session"
+	"seedstream/pkg/torrent"
 	"seedstream/pkg/usenet/nntp/proxy"
 
 	"github.com/joho/godotenv"
@@ -185,6 +189,8 @@ func main() {
 		initialization.WaitForInputAndExit(fmt.Errorf("failed to build components: %w", err))
 	}
 
+	cerberusClient := cerberus.New(stateMgr)
+
 	sessionTTL := time.Duration(cfg.EffectiveSessionTTLSeconds()) * time.Second
 	postPlaybackTTL := time.Duration(cfg.EffectiveSessionPostPlaybackTTLSeconds()) * time.Second
 	sessionManager := session.NewManager(comp.StreamingPools, comp.UsenetPool, sessionTTL)
@@ -211,9 +217,19 @@ func main() {
 		StreamManager:        streamManager,
 		Version:              Version,
 		AttemptRecorder:      stateMgr,
+		CerberusClient:       cerberusClient,
 	})
 	if err != nil {
 		initialization.WaitForInputAndExit(fmt.Errorf("failed to initialize Stremio server: %v", err))
+	}
+
+	torrentMgr := torrent.NewManager(comp.Config.TorrentClients)
+	watchdog := torrent.NewWatchdog(torrentMgr, cerberusClient, comp.Indexer)
+	if watchdog != nil {
+		go watchdog.Start(context.Background(), torrent.WatchdogConfig{})
+		logger.Info("Cerberus torrent watchdog enabled")
+	} else {
+		logger.Debug("Cerberus torrent watchdog disabled (no torrent clients or indexers configured)")
 	}
 
 	apiServer := api.NewServerWithApp(comp.Config, comp.ProviderPools, sessionManager, stremioServer, comp.Indexer, streamManager, application, availNZBUrl, availNZBAPIKey, effectiveTMDBKey, effectiveTVDBKey)

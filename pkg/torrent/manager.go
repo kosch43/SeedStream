@@ -75,6 +75,62 @@ func NewManager(clients []config.TorrentClientConfig) *Manager {
 // Enabled reports whether any torrent client is configured.
 func (m *Manager) Enabled() bool { return m != nil && len(m.clients) > 0 }
 
+// TorrentHealthEntry is a flattened view of one qBittorrent torrent used by
+// the Cerberus watchdog for stall detection.
+type TorrentHealthEntry struct {
+	ClientName   string
+	Hash         string
+	Name         string
+	State        string
+	Progress     float64
+	LastActivity time.Time
+	AddedAt      time.Time
+}
+
+// ListAll returns all SeedStream-category torrents across every configured
+// client. Errors from individual clients are logged and skipped.
+func (m *Manager) ListAll(ctx context.Context) ([]TorrentHealthEntry, error) {
+	var out []TorrentHealthEntry
+	for _, e := range m.clients {
+		list, err := e.client.ListCategory(ctx)
+		if err != nil {
+			logger.Warn("Cerberus ListAll: ListCategory failed", "client", e.cfg.Name, "err", err)
+			continue
+		}
+		for _, t := range list {
+			out = append(out, TorrentHealthEntry{
+				ClientName:   e.cfg.Name,
+				Hash:         t.Hash,
+				Name:         t.Name,
+				State:        t.State,
+				Progress:     t.Progress,
+				LastActivity: time.Unix(t.LastActivity, 0),
+				AddedAt:      time.Unix(t.AddedOn, 0),
+			})
+		}
+	}
+	return out, nil
+}
+
+// Replace removes a stalled torrent (without deleting files) and adds a
+// replacement magnet/URL to the same client.
+func (m *Manager) Replace(ctx context.Context, clientName, oldHash, newURL string) error {
+	var c *qbittorrent.Client
+	for _, e := range m.clients {
+		if e.cfg.Name == clientName {
+			c = e.client
+			break
+		}
+	}
+	if c == nil {
+		return fmt.Errorf("torrent client %q not found", clientName)
+	}
+	if err := c.Delete(ctx, []string{oldHash}, false); err != nil {
+		return fmt.Errorf("delete stalled torrent: %w", err)
+	}
+	return c.Add(ctx, qbittorrent.AddOptions{URL: newURL, Sequential: true})
+}
+
 // Ping checks each configured client; returns a map of name -> error (nil = ok).
 func (m *Manager) Ping(ctx context.Context) map[string]error {
 	out := make(map[string]error, len(m.clients))
