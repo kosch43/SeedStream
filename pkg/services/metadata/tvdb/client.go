@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"sync"
 	"seedstream/pkg/core/logger"
 	"seedstream/pkg/core/persistence"
 	"time"
@@ -25,6 +26,7 @@ type Client struct {
 	apiKey     string
 	dataDir    string
 	client     *http.Client
+	mu         sync.Mutex
 	tokenCache string
 }
 
@@ -69,6 +71,9 @@ func (c *Client) ensureToken() (string, error) {
 	if c.apiKey == "" {
 		return "", fmt.Errorf("TVDB API key not configured")
 	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	if c.tokenCache != "" {
 		return c.tokenCache, nil
@@ -139,7 +144,9 @@ func (c *Client) login() (string, error) {
 }
 
 func (c *Client) invalidateToken() {
+	c.mu.Lock()
 	c.tokenCache = ""
+	c.mu.Unlock()
 }
 
 func (c *Client) doRequest(method, path string, body []byte) (*http.Response, error) {

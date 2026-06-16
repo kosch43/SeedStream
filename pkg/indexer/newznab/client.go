@@ -332,11 +332,11 @@ func (c *Client) updateUsageFromHeaders(h http.Header) {
 	}
 }
 
-func (c *Client) requestContext() (context.Context, context.CancelFunc) {
+func (c *Client) requestContext(parent context.Context) (context.Context, context.CancelFunc) {
 	if timeout := c.client.Timeout; timeout > 0 {
-		return context.WithTimeout(context.Background(), timeout)
+		return context.WithTimeout(parent, timeout)
 	}
-	return context.Background(), func() {}
+	return parent, func() {}
 }
 
 func (c *Client) waitForRateLimit(ctx context.Context) error {
@@ -344,7 +344,7 @@ func (c *Client) waitForRateLimit(ctx context.Context) error {
 }
 
 func (c *Client) Ping() error {
-	ctx, cancel := c.requestContext()
+	ctx, cancel := c.requestContext(context.Background())
 	defer cancel()
 	if err := c.waitForRateLimit(ctx); err != nil {
 		return err
@@ -368,7 +368,7 @@ func (c *Client) Ping() error {
 }
 
 func (c *Client) GetCaps() (*indexer.Caps, error) {
-	ctx, cancel := c.requestContext()
+	ctx, cancel := c.requestContext(context.Background())
 	defer cancel()
 	if err := c.waitForRateLimit(ctx); err != nil {
 		return nil, err
@@ -509,7 +509,7 @@ func (c *Client) search(req indexer.SearchRequest) (*indexer.SearchResponse, err
 	if err := c.checkAPILimit(); err != nil {
 		return nil, err
 	}
-	ctx, cancel := c.requestContext()
+	ctx, cancel := c.requestContext(context.Background())
 	defer cancel()
 	if err := c.waitForRateLimit(ctx); err != nil {
 		return nil, err

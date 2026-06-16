@@ -359,7 +359,8 @@ func (dm *StreamManager) AuthenticateToken(token string, adminUsername, adminTok
 	defer dm.mu.RUnlock()
 	for _, stream := range dm.streams {
 		if stream.Token == token {
-			return stream, nil
+			cp := *stream
+			return &cp, nil
 		}
 	}
 
@@ -382,7 +383,8 @@ func (dm *StreamManager) GetStream(username string, adminUsername string) (*Stre
 		return nil, fmt.Errorf("stream not found")
 	}
 
-	return stream, nil
+	cp := *stream
+	return &cp, nil
 }
 
 func (dm *StreamManager) GetAllStreams() []Stream {
