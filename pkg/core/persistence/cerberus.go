@@ -88,8 +88,12 @@ func (m *StateManager) IsInfoHashBlocked(infoHash string) bool {
 }
 
 // GetBlockedHashes returns all blocked info_hashes for a given content.
+// Returns nil if all ID fields are empty to prevent matching unrelated content.
 func (m *StateManager) GetBlockedHashes(imdbID, tmdbID, tvdbID string, season, episode int) []string {
 	if m == nil || m.db == nil {
+		return nil
+	}
+	if imdbID == "" && tmdbID == "" && tvdbID == "" {
 		return nil
 	}
 	m.mu.RLock()

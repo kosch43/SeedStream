@@ -2,9 +2,11 @@ package torrent
 
 import (
 	"context"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"seedstream/pkg/core/logger"
@@ -33,11 +35,12 @@ type Watchdog struct {
 	manager  *Manager
 	cerberus *cerberus.Client
 	indexer  indexer.Indexer
+	checking atomic.Bool // guards against concurrent check runs
 }
 
 // NewWatchdog creates a Watchdog. Returns nil when the torrent manager has no
-// configured clients, or when cerberus/indexer are nil (watchdog would be
-// a no-op).
+// configured clients, or when cerberus/indexer are nil (watchdog would be a
+// no-op).
 func NewWatchdog(m *Manager, cer *cerberus.Client, idx indexer.Indexer) *Watchdog {
 	if m == nil || !m.Enabled() || cer == nil || idx == nil {
 		return nil
@@ -69,7 +72,17 @@ func (w *Watchdog) Start(ctx context.Context, cfg WatchdogConfig) {
 			logger.Info("Cerberus watchdog stopped")
 			return
 		case <-ticker.C:
-			w.check(ctx, threshold)
+			// Skip this tick if the previous check is still running (e.g.
+			// qBittorrent or Torznab search is slow). Prevents concurrent
+			// checks from double-replacing the same torrent.
+			if !w.checking.CompareAndSwap(false, true) {
+				logger.Debug("Cerberus watchdog: previous check still running, skipping tick")
+				continue
+			}
+			go func() {
+				defer w.checking.Store(false)
+				w.check(ctx, threshold)
+			}()
 		}
 	}
 }
@@ -91,11 +104,9 @@ func (w *Watchdog) check(ctx context.Context, stallThreshold time.Duration) {
 		}
 		logger.Info("Cerberus watchdog: stalled torrent detected",
 			"hash", e.Hash, "name", e.Name, "state", e.State,
+			"progress", e.Progress,
 			"imdb_id", rec.ImdbID, "tmdb_id", rec.TmdbID)
-		if err := w.cerberus.ReportFailure(e.Hash, "stalled: "+e.State); err != nil {
-			logger.Warn("Cerberus watchdog: failed to report failure", "hash", e.Hash, "err", err)
-		}
-		w.replaceStalled(ctx, e, rec)
+		w.handleStalled(ctx, e, rec)
 	}
 }
 
@@ -120,21 +131,27 @@ func isStalled(e TorrentHealthEntry, threshold time.Duration) bool {
 	return false
 }
 
-func (w *Watchdog) replaceStalled(ctx context.Context, stalled TorrentHealthEntry, rec *cerberus.TorrentRecord) {
+func (w *Watchdog) handleStalled(ctx context.Context, stalled TorrentHealthEntry, rec *cerberus.TorrentRecord) {
 	// If the torrent has downloaded any data, deleting it would leave the
 	// tracker with an unmet seeding obligation (H&R on private trackers).
-	// Re-announce instead to look for new peers; do NOT delete.
+	// Re-announce to find new peers without touching the downloaded data.
+	// Do NOT add to the blocklist — the torrent itself isn't bad, the swarm
+	// just temporarily ran out of seeds.
 	if stalled.Progress > 0 {
-		logger.Info("Cerberus watchdog: re-announcing partial torrent (preserving for seeding ratio)",
-			"hash", stalled.Hash, "name", stalled.Name,
-			"progress", stalled.Progress)
+		logger.Info("Cerberus watchdog: re-announcing partial torrent (preserving seeding ratio)",
+			"hash", stalled.Hash, "name", stalled.Name, "progress", stalled.Progress)
 		if err := w.manager.Reannounce(ctx, stalled.ClientName, stalled.Hash); err != nil {
 			logger.Warn("Cerberus watchdog: reannounce failed", "hash", stalled.Hash, "err", err)
 		}
 		return
 	}
 
-	// Progress == 0: nothing was downloaded, safe to delete and replace.
+	// Progress == 0: nothing downloaded, no ratio obligation. Report the
+	// failure, then find and swap in a better torrent.
+	if err := w.cerberus.ReportFailure(stalled.Hash, "stalled: "+stalled.State); err != nil {
+		logger.Warn("Cerberus watchdog: failed to report failure", "hash", stalled.Hash, "err", err)
+	}
+
 	ids := cerberus.ContentIDs{
 		ImdbID:  rec.ImdbID,
 		TmdbID:  rec.TmdbID,
@@ -142,6 +159,7 @@ func (w *Watchdog) replaceStalled(ctx context.Context, stalled TorrentHealthEntr
 		Season:  rec.Season,
 		Episode: rec.Episode,
 	}
+
 	blocked := w.cerberus.GetBlockedHashes(ids)
 	blockedSet := make(map[string]bool, len(blocked)+1)
 	for _, h := range blocked {
@@ -157,13 +175,21 @@ func (w *Watchdog) replaceStalled(ctx context.Context, stalled TorrentHealthEntr
 	}
 
 	if err := w.manager.Replace(ctx, stalled.ClientName, stalled.Hash, newURL); err != nil {
-		logger.Warn("Cerberus watchdog: replace failed",
-			"hash", stalled.Hash, "err", err)
+		logger.Warn("Cerberus watchdog: replace failed", "hash", stalled.Hash, "err", err)
 		return
 	}
+
 	logger.Info("Cerberus watchdog: replaced zero-progress stalled torrent",
 		"old_hash", stalled.Hash, "name", stalled.Name,
 		"imdb_id", rec.ImdbID, "tmdb_id", rec.TmdbID)
+
+	// Register the replacement's hash so that if it also stalls the watchdog
+	// can identify its content and re-replace it.
+	if newHash := infoHashFromMagnet(newURL); newHash != "" {
+		if err := w.cerberus.RegisterTorrent(newHash, ids, newURL, rec.ReleaseTitle); err != nil {
+			logger.Warn("Cerberus watchdog: failed to register replacement hash", "hash", newHash, "err", err)
+		}
+	}
 }
 
 func (w *Watchdog) findReplacement(rec *cerberus.TorrentRecord, blocked map[string]bool) string {
@@ -206,7 +232,7 @@ func (w *Watchdog) findReplacement(rec *cerberus.TorrentRecord, blocked map[stri
 		if magnet == "" {
 			magnet = item.Link
 		}
-		if strings.HasPrefix(strings.ToLower(magnet), "magnet:") || magnet != "" {
+		if magnet != "" {
 			seeders, _ := strconv.Atoi(item.GetAttribute("seeders"))
 			candidates = append(candidates, candidate{url: magnet, seeders: seeders})
 		}
@@ -218,4 +244,23 @@ func (w *Watchdog) findReplacement(rec *cerberus.TorrentRecord, blocked map[stri
 		return candidates[i].seeders > candidates[j].seeders
 	})
 	return candidates[0].url
+}
+
+// infoHashFromMagnet extracts the BitTorrent info hash from a magnet URI.
+// Returns an empty string if the URI is not a magnet or contains no btih.
+func infoHashFromMagnet(magnet string) string {
+	if !strings.HasPrefix(strings.ToLower(magnet), "magnet:") {
+		return ""
+	}
+	u, err := url.Parse(magnet)
+	if err != nil {
+		return ""
+	}
+	for _, xt := range u.Query()["xt"] {
+		lower := strings.ToLower(xt)
+		if strings.HasPrefix(lower, "urn:btih:") {
+			return strings.TrimPrefix(lower, "urn:btih:")
+		}
+	}
+	return ""
 }
