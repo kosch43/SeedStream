@@ -75,6 +75,8 @@ func (m *UsageManager) load() error {
 }
 
 func (m *UsageManager) save() error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return m.state.Set("indexer_usage", m.data)
 }
 

@@ -95,9 +95,12 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		payload, _ := json.Marshal(stats)
 		trySendWS(client, WSMessage{Type: "stats", Payload: payload})
 		s.sendLogHistory(client)
+		s.mu.RLock()
+		cfg := s.config
+		s.mu.RUnlock()
 		var mustChangePassword bool
-		if client.stream != nil && client.stream.Username == s.config.GetAdminUsername() {
-			mustChangePassword = s.config.AdminMustChangePassword
+		if client.stream != nil && client.stream.Username == cfg.GetAdminUsername() {
+			mustChangePassword = cfg.AdminMustChangePassword
 		}
 		authInfo := map[string]interface{}{
 			"authenticated":        true,
@@ -112,22 +115,43 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	go func() {
-		defer func() {
-
-		}()
-
 		for {
 			var msg WSMessage
 			if err := conn.ReadJSON(&msg); err != nil {
 				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 					logger.Warn("WS read error", "err", err)
 				}
-
 				conn.Close()
 				return
 			}
-
-			_ = msg
+			switch msg.Type {
+			case "save_config":
+				s.handleSaveConfigWS(conn, client, msg.Payload)
+			case "save_stream_configs":
+				s.handleSaveStreamConfigsWS(conn, client, msg.Payload)
+			case "get_streams":
+				s.handleGetStreamsWS(client)
+			case "get_stream":
+				s.handleGetStreamWS(client, msg.Payload)
+			case "create_stream":
+				s.handleCreateStreamWS(client, msg.Payload)
+			case "delete_stream":
+				s.handleDeleteStreamWS(client, msg.Payload)
+			case "regenerate_token":
+				s.handleRegenerateTokenWS(client, msg.Payload)
+			case "update_password":
+				s.handleUpdatePasswordWS(client, msg.Payload)
+			case "fetch_caps":
+				s.handleFetchCapsWS(client)
+			case "stream_search":
+				s.handleStreamSearchWS(client, msg.Payload)
+			case "close_session":
+				s.handleCloseSessionWS(msg.Payload)
+			case "restart":
+				s.handleRestartWS(conn)
+			default:
+				logger.Debug("WS unknown message type", "type", msg.Type)
+			}
 		}
 	}()
 

@@ -125,6 +125,17 @@ func (m *Manager) Reannounce(ctx context.Context, clientName, hash string) error
 	return fmt.Errorf("torrent client %q not found", clientName)
 }
 
+// AddTorrent adds a magnet/URL to the named client. Used to restore a torrent
+// after a failed Replace so content is not silently lost from qBittorrent.
+func (m *Manager) AddTorrent(ctx context.Context, clientName, addURL string) error {
+	for _, e := range m.clients {
+		if e.cfg.Name == clientName {
+			return e.client.Add(ctx, qbittorrent.AddOptions{URL: addURL, Sequential: true})
+		}
+	}
+	return fmt.Errorf("torrent client %q not found", clientName)
+}
+
 // Replace removes a zero-progress stalled torrent (without deleting files)
 // and adds a replacement magnet/URL to the same client. Callers must verify
 // Progress == 0 before calling to avoid private-tracker H&R violations.

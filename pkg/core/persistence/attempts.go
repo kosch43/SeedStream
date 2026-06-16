@@ -239,6 +239,8 @@ func (m *StateManager) ListAttempts(opts ListAttemptsOptions) ([]NZBAttempt, err
 	query += ` ORDER BY tried_at DESC LIMIT ? OFFSET ?`
 	args = append(args, limit, offset)
 
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	rows, err := m.db.Query(query, args...)
 	if err != nil {
 		return nil, err

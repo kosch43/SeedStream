@@ -79,17 +79,26 @@ func (m *StateManager) ReportTorrentFailure(infoHash, reason string) error {
 			FROM cerberus_torrent_registry WHERE info_hash = ?`, hash).
 			Scan(&imdbID, &tmdbID, &tvdbID, &season, &episode)
 
-		_, err := db.Exec(`INSERT OR IGNORE INTO cerberus_blocklist
+		tx, err := db.Begin()
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(`INSERT OR IGNORE INTO cerberus_blocklist
 			(info_hash, imdb_id, tmdb_id, tvdb_id, season, episode, failure_count, last_failure_at, reason)
 			VALUES (?, ?, ?, ?, ?, ?, 0, ?, '')`,
 			hash, imdbID, tmdbID, tvdbID, season, episode, now)
 		if err != nil {
+			_ = tx.Rollback()
 			return err
 		}
-		_, err = db.Exec(`UPDATE cerberus_blocklist
+		_, err = tx.Exec(`UPDATE cerberus_blocklist
 			SET failure_count = failure_count + 1, last_failure_at = ?, reason = ?
 			WHERE info_hash = ?`, now, reason, hash)
-		return err
+		if err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		return tx.Commit()
 	})
 }
 

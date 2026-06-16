@@ -177,7 +177,18 @@ func (w *Watchdog) handleStalled(ctx context.Context, stalled TorrentHealthEntry
 	}
 
 	if err := w.manager.Replace(ctx, stalled.ClientName, stalled.Hash, newURL); err != nil {
-		logger.Warn("Cerberus watchdog: replace failed", "hash", stalled.Hash, "err", err)
+		logger.Error("Cerberus watchdog: replace failed, attempting to restore original torrent",
+			"hash", stalled.Hash, "name", stalled.Name, "err", err)
+		// Delete may have already succeeded before Add failed. Restore the original
+		// torrent so it isn't silently lost from qBittorrent (Progress==0 so no data risk).
+		if rec.Magnet != "" {
+			if rerr := w.manager.AddTorrent(ctx, stalled.ClientName, rec.Magnet); rerr != nil {
+				logger.Error("Cerberus watchdog: could not restore original torrent after failed replace",
+					"hash", stalled.Hash, "err", rerr)
+			} else {
+				logger.Info("Cerberus watchdog: restored original torrent after failed replace", "hash", stalled.Hash)
+			}
+		}
 		return
 	}
 
@@ -191,6 +202,11 @@ func (w *Watchdog) handleStalled(ctx context.Context, stalled TorrentHealthEntry
 		if err := w.cerberus.RegisterTorrent(newHash, ids, newURL, rec.ReleaseTitle); err != nil {
 			logger.Warn("Cerberus watchdog: failed to register replacement hash", "hash", newHash, "err", err)
 		}
+	} else {
+		// HTTP .torrent URLs have no extractable hash — the replacement won't be
+		// tracked by Cerberus and a future stall on it will be ignored.
+		logger.Warn("Cerberus watchdog: replacement URL is not a magnet, hash cannot be registered — future stalls on this torrent will not be auto-replaced",
+			"url", newURL, "name", stalled.Name)
 	}
 }
 
