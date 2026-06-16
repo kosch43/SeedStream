@@ -276,3 +276,15 @@ func (c *Client) Delete(ctx context.Context, hashes []string, deleteFiles bool) 
 	_, err := c.do(ctx, http.MethodPost, "/api/v2/torrents/delete", form)
 	return err
 }
+
+// Reannounce asks qBittorrent to re-contact all trackers for the given
+// torrent, which can revive a stalled download when new seeds join the swarm.
+func (c *Client) Reannounce(ctx context.Context, hash string) error {
+	if strings.TrimSpace(hash) == "" {
+		return nil
+	}
+	form := url.Values{}
+	form.Set("hashes", strings.ToLower(hash))
+	_, err := c.do(ctx, http.MethodPost, "/api/v2/torrents/reannounce", form)
+	return err
+}
