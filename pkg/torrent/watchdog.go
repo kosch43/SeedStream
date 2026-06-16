@@ -103,19 +103,38 @@ func isStalled(e TorrentHealthEntry, threshold time.Duration) bool {
 	if e.Progress >= 0.999 {
 		return false // complete, not stalled
 	}
+	// qBittorrent returns last_activity=0 for torrents that have never had
+	// peer contact (e.g. freshly added). Treat zero as "no data yet" and
+	// skip stall detection to avoid false positives on brand-new torrents.
+	hasActivityData := e.LastActivity.Unix() > 0
 	switch e.State {
 	case "missingFiles", "error":
-		return true
+		// Only act on these after the torrent has had a chance to start.
+		return hasActivityData && time.Since(e.AddedAt) > threshold
 	case "stalledDL":
-		return time.Since(e.LastActivity) > threshold
+		return hasActivityData && time.Since(e.LastActivity) > threshold
 	case "downloading":
 		// Allow double the threshold for active-but-slow downloads.
-		return time.Since(e.LastActivity) > threshold*2
+		return hasActivityData && time.Since(e.LastActivity) > threshold*2
 	}
 	return false
 }
 
 func (w *Watchdog) replaceStalled(ctx context.Context, stalled TorrentHealthEntry, rec *cerberus.TorrentRecord) {
+	// If the torrent has downloaded any data, deleting it would leave the
+	// tracker with an unmet seeding obligation (H&R on private trackers).
+	// Re-announce instead to look for new peers; do NOT delete.
+	if stalled.Progress > 0 {
+		logger.Info("Cerberus watchdog: re-announcing partial torrent (preserving for seeding ratio)",
+			"hash", stalled.Hash, "name", stalled.Name,
+			"progress", stalled.Progress)
+		if err := w.manager.Reannounce(ctx, stalled.ClientName, stalled.Hash); err != nil {
+			logger.Warn("Cerberus watchdog: reannounce failed", "hash", stalled.Hash, "err", err)
+		}
+		return
+	}
+
+	// Progress == 0: nothing was downloaded, safe to delete and replace.
 	ids := cerberus.ContentIDs{
 		ImdbID:  rec.ImdbID,
 		TmdbID:  rec.TmdbID,
@@ -142,7 +161,7 @@ func (w *Watchdog) replaceStalled(ctx context.Context, stalled TorrentHealthEntr
 			"hash", stalled.Hash, "err", err)
 		return
 	}
-	logger.Info("Cerberus watchdog: replaced stalled torrent",
+	logger.Info("Cerberus watchdog: replaced zero-progress stalled torrent",
 		"old_hash", stalled.Hash, "name", stalled.Name,
 		"imdb_id", rec.ImdbID, "tmdb_id", rec.TmdbID)
 }

@@ -112,8 +112,22 @@ func (m *Manager) ListAll(ctx context.Context) ([]TorrentHealthEntry, error) {
 	return out, nil
 }
 
-// Replace removes a stalled torrent (without deleting files) and adds a
-// replacement magnet/URL to the same client.
+// Reannounce asks qBittorrent to re-contact all trackers for a torrent,
+// which can revive a stalled download when new peers join the swarm.
+// Used instead of Replace when the torrent has partial progress to avoid
+// private-tracker H&R violations.
+func (m *Manager) Reannounce(ctx context.Context, clientName, hash string) error {
+	for _, e := range m.clients {
+		if e.cfg.Name == clientName {
+			return e.client.Reannounce(ctx, hash)
+		}
+	}
+	return fmt.Errorf("torrent client %q not found", clientName)
+}
+
+// Replace removes a zero-progress stalled torrent (without deleting files)
+// and adds a replacement magnet/URL to the same client. Callers must verify
+// Progress == 0 before calling to avoid private-tracker H&R violations.
 func (m *Manager) Replace(ctx context.Context, clientName, oldHash, newURL string) error {
 	var c *qbittorrent.Client
 	for _, e := range m.clients {
