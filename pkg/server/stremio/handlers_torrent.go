@@ -88,6 +88,11 @@ func (s *Server) handleTorrentPlay(w http.ResponseWriter, r *http.Request, sess 
 		return
 	}
 
+	// NOTE: seeking forward past the downloaded portion of an in-progress torrent
+	// will result in a 416 Range Not Satisfiable (file not that large yet) or serve
+	// zeros/sparse data if the filesystem pre-allocated the full file. Full fix
+	// requires a qBittorrent-aware ReadSeeker that waits for each requested range
+	// to be downloaded before reading — a future improvement.
 	sess.SetSelectedPlaybackFile(res.Name)
 	logger.Info("Serving torrent stream", "session", sess.ID, "file", res.Name, "size", stat.Size())
 	http.ServeContent(w, r, res.Name, stat.ModTime(), f)

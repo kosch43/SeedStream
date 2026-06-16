@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
+	"sync"
+
+	"golang.org/x/crypto/bcrypt"
 	"seedstream/pkg/core/config"
 	"seedstream/pkg/core/logger"
 	"seedstream/pkg/core/persistence"
-	"strings"
-	"sync"
 )
 
 func ptrBool(v bool) *bool { return &v }
@@ -285,9 +287,30 @@ func (dm *StreamManager) SetConfig(cfg *config.Config, saveFn func() error) {
 	}
 }
 
+// HashPassword returns a bcrypt hash of the password. bcrypt is used because
+// it is slow by design (resistant to brute-force) and embeds its own salt.
 func HashPassword(password string) string {
-	hash := sha256.Sum256([]byte(password))
-	return hex.EncodeToString(hash[:])
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		// Unreachable under normal conditions; fall back to SHA-256 if bcrypt
+		// somehow fails so the server doesn't break.
+		h := sha256.Sum256([]byte(password))
+		return hex.EncodeToString(h[:])
+	}
+	return string(hash)
+}
+
+// checkPassword verifies password against hash. Handles both the legacy
+// unsalted SHA-256 format (hex string) and the current bcrypt format ($2a$/…).
+// On a successful legacy-format match the caller should re-hash with HashPassword
+// and persist the new hash so the account is silently upgraded.
+func checkPassword(password, hash string) bool {
+	if strings.HasPrefix(hash, "$2") {
+		return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
+	}
+	// Legacy: unsalted SHA-256
+	h := sha256.Sum256([]byte(password))
+	return hex.EncodeToString(h[:]) == hash
 }
 
 func GenerateToken() (string, error) {
@@ -308,8 +331,7 @@ func (dm *StreamManager) Authenticate(loginUsername, password, adminUsername, ad
 		if adminPasswordHash == "" || adminToken == "" {
 			return nil, fmt.Errorf("invalid credentials")
 		}
-		passwordHash := HashPassword(password)
-		if passwordHash != adminPasswordHash {
+		if !checkPassword(password, adminPasswordHash) {
 			return nil, fmt.Errorf("invalid credentials")
 		}
 		return &Stream{
@@ -336,10 +358,11 @@ func (dm *StreamManager) Authenticate(loginUsername, password, adminUsername, ad
 	if !ok || stream.PasswordHash == "" {
 		return nil, fmt.Errorf("invalid credentials")
 	}
-	if HashPassword(password) != stream.PasswordHash {
+	if !checkPassword(password, stream.PasswordHash) {
 		return nil, fmt.Errorf("invalid credentials")
 	}
-	return stream, nil
+	cp := *stream
+	return &cp, nil
 }
 
 func (dm *StreamManager) AuthenticateToken(token string, adminUsername, adminToken string) (*Stream, error) {
@@ -459,8 +482,12 @@ func (dm *StreamManager) CreateStream(username, password string, adminUsername s
 	dm.mu.Lock()
 	defer dm.mu.Unlock()
 
+	username = strings.ToLower(strings.TrimSpace(username))
 	if adminUsername == "" {
 		adminUsername = "admin"
+	}
+	if username == "" {
+		return nil, fmt.Errorf("username cannot be empty")
 	}
 	if username == adminUsername {
 		return nil, fmt.Errorf("cannot create admin stream via this method")
