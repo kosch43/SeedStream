@@ -10,6 +10,7 @@ import (
 	"seedstream/pkg/core/logger"
 	"seedstream/pkg/services/cerberus"
 	"seedstream/pkg/session"
+	"seedstream/pkg/torrent"
 )
 
 // handleTorrentPlay serves a torrent release. The torrent is handed to a seedbox
@@ -50,6 +51,11 @@ func (s *Server) handleTorrentPlay(w http.ResponseWriter, r *http.Request, sess 
 	// stalled hashes back to their content IDs for re-search.
 	if s.cerberusClient != nil && sess.Release != nil && sess.ContentIDs != nil {
 		infoHash := strings.TrimSpace(sess.Release.InfoHash)
+		// Fall back to extracting the hash from the magnet URI when the release
+		// does not carry an explicit InfoHash field (common with Torznab results).
+		if infoHash == "" && sess.Release.Magnet != "" {
+			infoHash = torrent.InfoHashFromMagnet(sess.Release.Magnet)
+		}
 		if infoHash != "" {
 			magnet := sess.Release.Magnet
 			if magnet == "" {
