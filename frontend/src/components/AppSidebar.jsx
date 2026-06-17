@@ -31,7 +31,6 @@ const navMain = [
   { id: "direct-play", title: "Direct Play", icon: PlayCircle },
   { id: "logs", title: "Logs", icon: FileText },
   { id: "settings", title: "Settings", icon: Settings },
-  { id: "install", title: "Streams", icon: Zap },
 ]
 
 
