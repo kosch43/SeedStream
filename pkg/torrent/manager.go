@@ -240,7 +240,7 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 	// so each member can point to their own seedbox, fall back to the first
 	// globally configured client.
 	var c *qbittorrent.Client
-	var clientName string
+	var clientName, remotePath string
 	if clientOverride != nil && strings.TrimSpace(clientOverride.URL) != "" {
 		c = qbittorrent.New(qbittorrent.Options{
 			BaseURL:  clientOverride.URL,
@@ -250,12 +250,14 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 			SavePath: clientOverride.SavePath,
 		})
 		clientName = strings.TrimSpace(clientOverride.Name)
+		remotePath = strings.TrimSpace(clientOverride.RemotePath)
 	} else {
 		if !m.Enabled() {
 			return nil, fmt.Errorf("no torrent client configured")
 		}
 		c = m.clients[0].client
 		clientName = m.clients[0].cfg.Name
+		remotePath = m.clients[0].cfg.RemotePath
 	}
 
 	hash := strings.ToLower(strings.TrimSpace(rel.InfoHash))
@@ -290,7 +292,7 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 			if f != nil {
 				done := int64(f.Progress * float64(f.Size))
 				if f.Progress >= 0.999 || done >= bufferBytes {
-					abs := absFilePath(c.SavePath(), info, f.Name)
+					abs := absFilePath(remotePath, c.SavePath(), info, f.Name)
 					return &PrepareResult{
 						AbsPath:    abs,
 						Name:       filepath.Base(f.Name),
@@ -387,18 +389,47 @@ func atoi(s string) int {
 	return n
 }
 
-// absFilePath resolves the on-disk path of a torrent file. qBittorrent's file
-// Name is relative to the torrent's save path; content_path/save_path from the
-// client are preferred when present so SeedStream reads exactly where the
-// seedbox wrote the data.
-func absFilePath(configuredSavePath string, info *qbittorrent.TorrentInfo, fileName string) string {
-	base := strings.TrimSpace(info.SavePath)
-	if base == "" {
-		base = strings.TrimSpace(configuredSavePath)
+// absFilePath resolves the on-disk path of a torrent file.
+//
+// remotePath and localSavePath implement remote-seedbox support:
+//   - remotePath: qBittorrent's save path on its own machine (e.g. /downloads).
+//     Only needed when qBit and SeedStream are on different hosts.
+//   - localSavePath: the path SeedStream reads from (e.g. /mnt/seedbox on a
+//     remote setup, or the same as qBit's path on a single-machine setup).
+//
+// When remotePath is set, this function strips it from the full qBittorrent
+// path and replaces it with localSavePath, translating between the two
+// namespaces. When remotePath is empty, the qBittorrent-reported path is used
+// as-is (same-machine case), falling back to localSavePath if qBit didn't
+// return one.
+func absFilePath(remotePath, localSavePath string, info *qbittorrent.TorrentInfo, fileName string) string {
+	qbitBase := strings.TrimSpace(info.SavePath)
+	if qbitBase == "" {
+		// qBit didn't report its save path; use remotePath if set, else localSavePath.
+		if r := strings.TrimSpace(remotePath); r != "" {
+			qbitBase = r
+		} else {
+			qbitBase = strings.TrimSpace(localSavePath)
+		}
 	}
-	if base == "" {
+	if qbitBase == "" {
 		logger.Debug("torrent file path: no save path known, using relative name", "file", fileName)
 		return fileName
 	}
-	return filepath.Join(base, fileName)
+
+	full := filepath.Join(qbitBase, fileName)
+
+	// Path translation for remote seedbox: strip the remote prefix and replace
+	// with the local mount point so SeedStream can open the file.
+	remotePfx := filepath.Clean(strings.TrimSpace(remotePath))
+	localBase := strings.TrimSpace(localSavePath)
+	if remotePfx != "" && remotePfx != "." && localBase != "" {
+		sep := string(filepath.Separator)
+		if strings.HasPrefix(full, remotePfx+sep) || full == remotePfx {
+			rel := strings.TrimPrefix(full, remotePfx)
+			return filepath.Join(localBase, rel)
+		}
+	}
+
+	return full
 }

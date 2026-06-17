@@ -20,11 +20,19 @@ type TorrentClientConfig struct {
 	// Category applied to torrents SeedStream adds, so they are easy to identify
 	// and manage on the seedbox. Default "seedstream".
 	Category string `json:"category,omitempty"`
-	// SavePath is the ABSOLUTE path the client writes downloads to. SeedStream
-	// must be able to read this path (same path inside its container) to serve
-	// files with HTTP range support. Leave empty to use the client's default.
+	// SavePath is the local path SeedStream reads downloads from. On a
+	// same-machine setup this is identical to qBittorrent's own save path.
+	// When qBittorrent runs on a remote seedbox, set this to the local mount
+	// point (e.g. /mnt/seedbox) and set RemotePath to qBittorrent's path.
 	SavePath string `json:"save_path,omitempty"`
-	Enabled  *bool  `json:"enabled,omitempty"`
+	// RemotePath is qBittorrent's save path on its own machine (e.g.
+	// /downloads/seedstream). Only needed when qBittorrent is on a different
+	// host than SeedStream. SeedStream strips this prefix from paths reported
+	// by the qBittorrent API and replaces it with SavePath, so the file is
+	// read from the correct local mount point.
+	// Leave empty when both services share a filesystem.
+	RemotePath string `json:"remote_path,omitempty"`
+	Enabled    *bool  `json:"enabled,omitempty"`
 }
 
 // IsTorrentIndexerType reports whether an indexer type denotes a torrent (Torznab)
