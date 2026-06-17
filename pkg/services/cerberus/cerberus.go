@@ -223,6 +223,24 @@ func normalizeHashKey(h string) string {
 	return strings.ToLower(strings.TrimSpace(h))
 }
 
+// PruneOldEntries removes registry entries older than maxAgeDays days from the
+// local store to prevent unbounded database growth. Returns the count pruned.
+func (c *Client) PruneOldEntries(maxAgeDays int) int64 {
+	if c == nil || maxAgeDays <= 0 {
+		return 0
+	}
+	maxAgeMs := int64(maxAgeDays) * 24 * 60 * 60 * 1000
+	n, err := c.store.PruneOldRegistryEntries(maxAgeMs)
+	if err != nil {
+		logger.Warn("Cerberus: failed to prune old registry entries", "err", err)
+		return 0
+	}
+	if n > 0 {
+		logger.Info("Cerberus: pruned old registry entries", "count", n, "max_age_days", maxAgeDays)
+	}
+	return n
+}
+
 // GetContentByHash looks up what content an info_hash was registered for.
 // Returns nil if the hash has not been seen before.
 func (c *Client) GetContentByHash(infoHash string) *TorrentRecord {

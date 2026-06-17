@@ -147,6 +147,25 @@ func (m *StateManager) GetBlockedHashes(imdbID, tmdbID, tvdbID string, season, e
 	return hashes
 }
 
+// PruneOldRegistryEntries removes registry entries whose added_at is older than
+// maxAgeMs milliseconds ago. Returns the number of rows deleted.
+func (m *StateManager) PruneOldRegistryEntries(maxAgeMs int64) (int64, error) {
+	if m == nil || m.db == nil {
+		return 0, nil
+	}
+	cutoff := time.Now().UnixMilli() - maxAgeMs
+	var n int64
+	err := m.withWriteLock(func(db *sql.DB) error {
+		res, err := db.Exec(`DELETE FROM cerberus_torrent_registry WHERE added_at < ?`, cutoff)
+		if err != nil {
+			return err
+		}
+		n, _ = res.RowsAffected()
+		return nil
+	})
+	return n, err
+}
+
 // GetTorrentByHash looks up the registry entry for the given info_hash.
 // Returns nil if not found.
 func (m *StateManager) GetTorrentByHash(infoHash string) *TorrentEntry {
