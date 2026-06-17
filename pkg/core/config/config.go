@@ -478,6 +478,13 @@ type Config struct {
 	// by AvailNZB are filtered out of playlist candidates.
 	AvailNZBFilterReportedBad *bool `json:"availnzb_filter_reported_bad,omitempty"`
 
+	// CerberusBaseURL, when set, points the torrent-health watchdog at a central
+	// Cerberus server for community-wide failure reporting and blocklist data.
+	// Leave empty for local-only mode (the default).
+	CerberusBaseURL string `json:"cerberus_base_url,omitempty"`
+	// CerberusAPIKey is the optional bearer token for the central Cerberus server.
+	CerberusAPIKey string `json:"cerberus_api_key,omitempty"`
+
 	LoadedPath string `json:"-"`
 
 	ResetLegacyStreamState bool `json:"-"`
