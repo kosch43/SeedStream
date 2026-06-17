@@ -39,6 +39,7 @@ type TorrentRecord struct {
 	Episode      int
 	Magnet       string
 	ReleaseTitle string
+	IndexerName  string
 	AddedAt      time.Time
 }
 
@@ -52,11 +53,11 @@ func New(store *persistence.StateManager) *Client {
 
 // RegisterTorrent records a new info_hash → content mapping. Called when a
 // torrent is first handed to qBittorrent for playback.
-func (c *Client) RegisterTorrent(infoHash string, ids ContentIDs, magnet, title string) error {
+func (c *Client) RegisterTorrent(infoHash string, ids ContentIDs, magnet, title, indexerName string) error {
 	if c == nil {
 		return nil
 	}
-	return c.store.RegisterTorrent(infoHash, ids.ImdbID, ids.TmdbID, ids.TvdbID, ids.Season, ids.Episode, magnet, title)
+	return c.store.RegisterTorrent(infoHash, ids.ImdbID, ids.TmdbID, ids.TvdbID, ids.Season, ids.Episode, magnet, title, indexerName)
 }
 
 // ReportFailure marks an info_hash as bad (stalled, missing files, etc.).
@@ -102,6 +103,7 @@ func (c *Client) GetContentByHash(infoHash string) *TorrentRecord {
 		Episode:      e.Episode,
 		Magnet:       e.Magnet,
 		ReleaseTitle: e.ReleaseTitle,
+		IndexerName:  e.IndexerName,
 		AddedAt:      e.AddedAt,
 	}
 }

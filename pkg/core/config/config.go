@@ -139,6 +139,17 @@ type IndexerConfig struct {
 	// GrabHeader overrides the global indexer_grab_header for NZB download requests to this indexer.
 	// Some indexers (e.g. SceneNZBs) return different NZBs depending on the downloader UA; leave empty to use the global setting.
 	GrabHeader string `json:"grab_header,omitempty"`
+
+	// HnR (Hit-and-Run) rules — only relevant for Torznab (torrent) indexers.
+	// When set, SeedStream will not remove a torrent from qBittorrent until the
+	// obligations are satisfied, protecting your account on private trackers.
+	// HnRMinSeedHours: minimum time the torrent must be seeding (e.g. 72 for 3 days).
+	// HnRMinRatio: minimum upload/download ratio (e.g. 1.0).
+	// HnRMode: "any" means either condition clears the obligation (default);
+	//          "all" means both seed time AND ratio must be met.
+	HnRMinSeedHours float64 `json:"hnr_min_seed_hours,omitempty"`
+	HnRMinRatio     float64 `json:"hnr_min_ratio,omitempty"`
+	HnRMode         string  `json:"hnr_mode,omitempty"`
 }
 
 // ValidateIndexerProxyURL returns nil if raw is empty or a valid http(s) proxy URL.

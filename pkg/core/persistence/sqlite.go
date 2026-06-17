@@ -230,6 +230,9 @@ func initSchema(db *sql.DB) error {
 	if err := migrateNzbAttemptsAvailReason(db); err != nil {
 		return err
 	}
+	if err := migrateCerberusRegistryIndexerName(db); err != nil {
+		return err
+	}
 	for _, stmt := range []string{nzbAttemptsIndexStream, nzbAttemptsIndexProvider, nzbAttemptsIndexIndexer} {
 		if _, err := db.Exec(stmt); err != nil {
 			return fmt.Errorf("schema: %w", err)
@@ -299,6 +302,14 @@ func migrateNzbAttemptsAvailReason(db *sql.DB) error {
 	_, err := db.Exec(`ALTER TABLE nzb_attempts ADD COLUMN avail_reason TEXT`)
 	if err != nil && !strings.Contains(err.Error(), "duplicate column") {
 		return fmt.Errorf("migrate nzb_attempts.avail_reason: %w", err)
+	}
+	return nil
+}
+
+func migrateCerberusRegistryIndexerName(db *sql.DB) error {
+	_, err := db.Exec(`ALTER TABLE cerberus_torrent_registry ADD COLUMN indexer_name TEXT NOT NULL DEFAULT ''`)
+	if err != nil && !strings.Contains(err.Error(), "duplicate column") {
+		return fmt.Errorf("migrate cerberus_torrent_registry.indexer_name: %w", err)
 	}
 	return nil
 }

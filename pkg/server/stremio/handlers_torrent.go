@@ -51,7 +51,7 @@ func (s *Server) handleTorrentPlay(w http.ResponseWriter, r *http.Request, sess 
 				Season:  sess.ContentIDs.Season,
 				Episode: sess.ContentIDs.Episode,
 			}
-			if err := s.cerberusClient.RegisterTorrent(infoHash, ids, magnet, sess.Release.Title); err != nil {
+			if err := s.cerberusClient.RegisterTorrent(infoHash, ids, magnet, sess.Release.Title, sess.Release.Indexer); err != nil {
 				logger.Warn("Cerberus: failed to register torrent", "hash", infoHash, "err", err)
 			}
 		}
