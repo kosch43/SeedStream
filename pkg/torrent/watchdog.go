@@ -89,6 +89,12 @@ func (w *Watchdog) Start(ctx context.Context, cfg WatchdogConfig) {
 		threshold = time.Duration(defaultStallThresholdMinutes) * time.Minute
 	}
 
+	// Prune stale registry entries once at startup to keep the DB bounded.
+	// 90 days is conservative: private-tracker H&R windows rarely exceed 30 days.
+	if n := w.cerberus.PruneOldEntries(90); n > 0 {
+		logger.Info("Cerberus watchdog: pruned old registry entries at startup", "count", n)
+	}
+
 	logger.Info("Cerberus watchdog started", "check_interval", interval, "stall_threshold", threshold)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -120,6 +126,14 @@ func (w *Watchdog) check(ctx context.Context, stallThreshold time.Duration) {
 		return
 	}
 	for _, e := range entries {
+		if e.Progress >= 0.999 {
+			// Completed torrents normally need no action. But error/missingFiles
+			// states on a finished download warrant an H&R warning log.
+			if e.State == "missingFiles" || e.State == "error" {
+				w.checkCompletedError(ctx, e)
+			}
+			continue
+		}
 		if !isStalled(e, stallThreshold) {
 			continue
 		}
@@ -133,6 +147,42 @@ func (w *Watchdog) check(ctx context.Context, stallThreshold time.Duration) {
 			"progress", e.Progress,
 			"imdb_id", rec.ImdbID, "tmdb_id", rec.TmdbID)
 		w.handleStalled(ctx, e, rec)
+	}
+}
+
+// checkCompletedError logs H&R risk when a fully-downloaded torrent enters an
+// error or missingFiles state. It never deletes or replaces anything; it only
+// emits a warning so the operator knows to act.
+func (w *Watchdog) checkCompletedError(ctx context.Context, e TorrentHealthEntry) {
+	rec := w.cerberus.GetContentByHash(e.Hash)
+	if rec == nil {
+		return
+	}
+	rules := w.hnrRulesFor(rec.IndexerName)
+	if rules == nil {
+		logger.Warn("Cerberus watchdog: completed torrent entered error state",
+			"hash", e.Hash, "name", e.Name, "state", e.State, "indexer", rec.IndexerName)
+		return
+	}
+	status, err := w.manager.GetSeedingStatus(ctx, e.Hash, e.ClientName)
+	if err != nil {
+		logger.Warn("Cerberus watchdog: completed torrent entered error state (H&R status unknown)",
+			"hash", e.Hash, "name", e.Name, "state", e.State,
+			"indexer", rec.IndexerName, "err", err)
+		return
+	}
+	hnrSafe := rules.Satisfied(status.SeedingHours, status.Ratio)
+	if !hnrSafe {
+		logger.Warn("Cerberus watchdog: completed torrent in error state — H&R NOT satisfied, manual intervention required",
+			"hash", e.Hash, "name", e.Name, "state", e.State,
+			"indexer", rec.IndexerName,
+			"seeding_hours", status.SeedingHours, "min_seed_hours", rules.MinSeedHours,
+			"ratio", status.Ratio, "min_ratio", rules.MinRatio, "mode", rules.Mode)
+	} else {
+		logger.Info("Cerberus watchdog: completed torrent in error state (H&R satisfied)",
+			"hash", e.Hash, "name", e.Name, "state", e.State,
+			"indexer", rec.IndexerName,
+			"seeding_hours", status.SeedingHours, "ratio", status.Ratio)
 	}
 }
 
@@ -158,6 +208,22 @@ func isStalled(e TorrentHealthEntry, threshold time.Duration) bool {
 }
 
 func (w *Watchdog) handleStalled(ctx context.Context, stalled TorrentHealthEntry, rec *cerberus.TorrentRecord) {
+	// missingFiles means the torrent's data was deleted from disk externally.
+	// Re-announcing cannot recover lost files; the only safe action is to log
+	// an H&R warning for the operator to act on manually.
+	if stalled.State == "missingFiles" && stalled.Progress > 0 {
+		hnrSafe := true
+		if rules := w.hnrRulesFor(rec.IndexerName); rules != nil {
+			if status, err := w.manager.GetSeedingStatus(ctx, stalled.Hash, stalled.ClientName); err == nil {
+				hnrSafe = rules.Satisfied(status.SeedingHours, status.Ratio)
+			}
+		}
+		logger.Warn("Cerberus watchdog: torrent files missing from disk — cannot auto-recover",
+			"hash", stalled.Hash, "name", stalled.Name, "progress", stalled.Progress,
+			"indexer", rec.IndexerName, "hnr_safe", hnrSafe)
+		return
+	}
+
 	// If the torrent has downloaded any data, deleting it would leave the
 	// tracker with an unmet seeding obligation (H&R on private trackers).
 	// Re-announce to find new peers without touching the downloaded data.
