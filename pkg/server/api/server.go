@@ -373,10 +373,6 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/api/ws", authMiddleware(http.HandlerFunc(s.handleWebSocket)))
 	mux.Handle("/api/config", authMiddleware(http.HandlerFunc(s.handleConfig)))
 	mux.Handle("/api/cache/clear", authMiddleware(http.HandlerFunc(s.handleClearCache)))
-	mux.Handle("/api/devices", authMiddleware(http.HandlerFunc(s.handleManagedStreams)))
-	mux.Handle("/api/devices/", authMiddleware(http.HandlerFunc(s.handleManagedStreams)))
-	mux.Handle("/api/streams", authMiddleware(http.HandlerFunc(s.handleManagedStreams)))
-	mux.Handle("/api/streams/", authMiddleware(http.HandlerFunc(s.handleManagedStreams)))
 	mux.Handle("/api/indexer/caps", authMiddleware(http.HandlerFunc(s.handleGetIndexerCaps)))
 	mux.Handle("/api/indexer/caps/refresh", authMiddleware(http.HandlerFunc(s.handleRefreshIndexerCaps)))
 	mux.Handle("/api/stats/persisted", authMiddleware(http.HandlerFunc(s.handlePersistedStats)))
@@ -396,8 +392,6 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/api/logs/download", authMiddleware(http.HandlerFunc(s.handleDownloadLogs)))
 	mux.Handle("/api/nzb-attempts", authMiddleware(http.HandlerFunc(s.handleNZBAttempts)))
 
-	mux.Handle("/api/member/setup", authMiddleware(http.HandlerFunc(s.handleMemberSetup)))
-	mux.Handle("/api/member/change-password", authMiddleware(http.HandlerFunc(s.handleMemberChangePassword)))
 
 	return mux
 }

@@ -11,8 +11,6 @@ import { LogsPage } from "@/components/LogsPage"
 import { NZBHistoryPage } from "@/components/NZBHistoryPage"
 import { ProfilePage } from "@/components/ProfilePage"
 import { DirectPlayPage } from "@/components/DirectPlayPage"
-import StreamManagement from './components/StreamManagement'
-import MemberSetupPage from './components/MemberSetupPage'
 import { apiFetch, getApiUrl, UNAUTHORIZED_EVENT } from './api'
 import { AlertCircle, Loader2 } from "lucide-react"
 
@@ -229,16 +227,6 @@ function App() {
     return <Login onLogin={handleLogin} version={version} />
   }
 
-  if (authenticated && !isAdmin) {
-    return <MemberSetupPage
-      currentUser={currentUser}
-      authToken={authToken}
-      onLogout={handleLogout}
-      mustChangePassword={mustChangePassword}
-      onPasswordChanged={() => setMustChangePassword(false)}
-    />
-  }
-
   if (mustChangePassword && currentUser) {
     return <ChangePassword username={currentUser} onPasswordChanged={() => {
       setMustChangePassword(false)
@@ -300,16 +288,6 @@ function App() {
           {activePage === 'direct-play' && (
             <DirectPlayPage />
           )}
-          {activePage === 'install' && (
-            <div className="pt-4 md:pt-5 pb-3 px-4 lg:px-5">
-              <StreamManagement
-                globalConfig={config}
-                movieSearchQueries={config?.movie_search_queries || []}
-                seriesSearchQueries={config?.series_search_queries || []}
-                initialStreamsByName={config?.streams || {}}
-              />
-            </div>
-          )}
           {activePage === 'logs' && (
             <LogsPage logs={logs} />
           )}
@@ -321,6 +299,7 @@ function App() {
                 sendCommand={sendCommand}
                 ws={ws}
                 onUsernameChanged={setCurrentUser}
+                addonToken={authToken}
               />
             </div>
           )}
