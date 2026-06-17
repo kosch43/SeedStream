@@ -11,6 +11,8 @@ package torrent
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -165,13 +167,48 @@ func (m *Manager) Ping(ctx context.Context) map[string]error {
 	return out
 }
 
+// clientByName finds the managed qBittorrent client with the given name.
+func (m *Manager) clientByName(name string) *qbittorrent.Client {
+	for _, e := range m.clients {
+		if e.cfg.Name == name {
+			return e.client
+		}
+	}
+	return nil
+}
+
+// OpenForPlayback opens the torrent file described by res for HTTP range
+// serving. If the torrent is still downloading, it returns a
+// SeekableFileReader that waits for each requested byte range to be on disk
+// before reading, so that seeking forward into un-downloaded regions blocks
+// instead of returning zeros or a 416 error.
+func (m *Manager) OpenForPlayback(res *PrepareResult) (io.ReadSeekCloser, error) {
+	f, err := os.Open(res.AbsPath)
+	if err != nil {
+		return nil, err
+	}
+	if res.Progress >= 0.999 || res.Hash == "" {
+		return f, nil
+	}
+	c := m.clientByName(res.ClientName)
+	if c == nil {
+		// Client not found (override path) — fall back to plain file.
+		return f, nil
+	}
+	return newSeekableFileReader(f, c, res.Hash, res.FileIndex, res.Size), nil
+}
+
 // PrepareResult describes a torrent file ready (or buffering) for playback.
 type PrepareResult struct {
 	// AbsPath is the absolute path on the local filesystem (the seedbox save
 	// path, which SeedStream can read) of the chosen video file.
-	AbsPath string
-	Name    string
-	Size    int64
+	AbsPath    string
+	Name       string
+	Size       int64
+	Hash       string  // torrent infohash for progress polling
+	FileIndex  int     // file index within the torrent
+	ClientName string  // name of the qBittorrent client that holds this torrent
+	Progress   float64 // download progress at prepare time (0..1)
 }
 
 // PrepareForPlayback ensures the release's torrent is present in a seedbox
@@ -203,6 +240,7 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 	// so each member can point to their own seedbox, fall back to the first
 	// globally configured client.
 	var c *qbittorrent.Client
+	var clientName string
 	if clientOverride != nil && strings.TrimSpace(clientOverride.URL) != "" {
 		c = qbittorrent.New(qbittorrent.Options{
 			BaseURL:  clientOverride.URL,
@@ -211,11 +249,13 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 			Category: clientOverride.CategoryOrDefault(),
 			SavePath: clientOverride.SavePath,
 		})
+		clientName = strings.TrimSpace(clientOverride.Name)
 	} else {
 		if !m.Enabled() {
 			return nil, fmt.Errorf("no torrent client configured")
 		}
 		c = m.clients[0].client
+		clientName = m.clients[0].cfg.Name
 	}
 
 	hash := strings.ToLower(strings.TrimSpace(rel.InfoHash))
@@ -251,7 +291,15 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 				done := int64(f.Progress * float64(f.Size))
 				if f.Progress >= 0.999 || done >= bufferBytes {
 					abs := absFilePath(c.SavePath(), info, f.Name)
-					return &PrepareResult{AbsPath: abs, Name: filepath.Base(f.Name), Size: f.Size}, nil
+					return &PrepareResult{
+						AbsPath:    abs,
+						Name:       filepath.Base(f.Name),
+						Size:       f.Size,
+						Hash:       info.Hash,
+						FileIndex:  f.Index,
+						ClientName: clientName,
+						Progress:   f.Progress,
+					}, nil
 				}
 			}
 		}

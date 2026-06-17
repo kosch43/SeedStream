@@ -57,7 +57,7 @@ func (s *Server) handleTorrentPlay(w http.ResponseWriter, r *http.Request, sess 
 		}
 	}
 
-	f, err := os.Open(res.AbsPath)
+	f, err := s.torrentManager.OpenForPlayback(res)
 	if err != nil {
 		logger.Error("Torrent file not readable", "session", sess.ID, "path", res.AbsPath, "err", err)
 		http.Error(w, "Torrent file not readable by SeedStream. Check that the qBittorrent save path is mounted and readable.", http.StatusInternalServerError)
@@ -65,18 +65,13 @@ func (s *Server) handleTorrentPlay(w http.ResponseWriter, r *http.Request, sess 
 	}
 	defer f.Close()
 
-	stat, err := f.Stat()
+	stat, err := os.Stat(res.AbsPath)
 	if err != nil {
 		http.Error(w, "stat failed", http.StatusInternalServerError)
 		return
 	}
 
-	// NOTE: seeking forward past the downloaded portion of an in-progress torrent
-	// will result in a 416 Range Not Satisfiable (file not that large yet) or serve
-	// zeros/sparse data if the filesystem pre-allocated the full file. Full fix
-	// requires a qBittorrent-aware ReadSeeker that waits for each requested range
-	// to be downloaded before reading — a future improvement.
 	sess.SetSelectedPlaybackFile(res.Name)
-	logger.Info("Serving torrent stream", "session", sess.ID, "file", res.Name, "size", stat.Size())
+	logger.Info("Serving torrent stream", "session", sess.ID, "file", res.Name, "size", stat.Size(), "progress", res.Progress)
 	http.ServeContent(w, r, res.Name, stat.ModTime(), f)
 }
