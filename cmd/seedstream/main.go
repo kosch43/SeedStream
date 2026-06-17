@@ -207,7 +207,12 @@ func main() {
 		initialization.WaitForInputAndExit(fmt.Errorf("failed to build components: %w", err))
 	}
 
-	cerberusClient := cerberus.New(stateMgr)
+	var cerberusOpts []cerberus.Option
+	if backend := cerberus.NewHTTPBackend(cfg.CerberusBaseURL, cfg.CerberusAPIKey); backend != nil {
+		cerberusOpts = append(cerberusOpts, cerberus.WithBackend(backend))
+		logger.Info("Cerberus central backend configured", "base_url", cfg.CerberusBaseURL)
+	}
+	cerberusClient := cerberus.New(stateMgr, cerberusOpts...)
 
 	sessionTTL := time.Duration(cfg.EffectiveSessionTTLSeconds()) * time.Second
 	postPlaybackTTL := time.Duration(cfg.EffectiveSessionPostPlaybackTTLSeconds()) * time.Second

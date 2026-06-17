@@ -3,21 +3,61 @@
 // Each SeedStream instance tracks which info_hashes correspond to which
 // content (IMDB/TMDB IDs). When a torrent stalls the watchdog reports the
 // failure to the local blocklist and searches for a replacement. The
-// blocklist and registry are stored in the local SQLite database. A
-// BaseURL field will be added in a future release to report to and query
-// the central Cerberus server, enabling community-wide torrent health data.
+// blocklist and registry are stored in the local SQLite database.
+//
+// Cerberus operates fully locally by default. An optional Backend can be
+// attached (see WithBackend / NewHTTPBackend) to report failures to and pull
+// community blocklist data from a central Cerberus server. The local SQLite
+// store always remains the primary source of truth; a Backend only augments
+// it, and every Backend call is best-effort — a backend outage never blocks
+// playback or the watchdog.
 package cerberus
 
 import (
+	"context"
+	"strings"
 	"time"
 
+	"seedstream/pkg/core/logger"
 	"seedstream/pkg/core/persistence"
 )
 
-// Client is the local Cerberus client. Currently operates on local SQLite
-// only; central server support is planned.
+// backendCallTimeout bounds how long a synchronous backend query may take so a
+// slow or unreachable central server never stalls the watchdog.
+const backendCallTimeout = 4 * time.Second
+
+// Backend is an optional remote endpoint for community-wide torrent health.
+// Implementations must be safe for concurrent use and should return promptly;
+// the local SQLite store is always consulted regardless of backend outcome.
+type Backend interface {
+	// ReportFailure shares a failed info_hash with the central server.
+	ReportFailure(ctx context.Context, infoHash, reason string, ids ContentIDs) error
+	// ReportHealthy shares that an info_hash streamed successfully.
+	ReportHealthy(ctx context.Context, infoHash string, ids ContentIDs) error
+	// BlockedHashes returns community-reported bad hashes for the content.
+	BlockedHashes(ctx context.Context, ids ContentIDs) ([]string, error)
+	// Name identifies the backend for logging.
+	Name() string
+}
+
+// Client is the Cerberus client. It always uses the local SQLite store and,
+// when configured, augments it with a remote Backend.
 type Client struct {
-	store *persistence.StateManager
+	store   *persistence.StateManager
+	backend Backend
+}
+
+// Option configures a Client.
+type Option func(*Client)
+
+// WithBackend attaches a remote Backend for community torrent-health data.
+// Passing a nil backend is a no-op (local-only mode).
+func WithBackend(b Backend) Option {
+	return func(c *Client) {
+		if b != nil {
+			c.backend = b
+		}
+	}
 }
 
 // ContentIDs identifies a piece of content for torrent health tracking.
@@ -43,12 +83,25 @@ type TorrentRecord struct {
 	AddedAt      time.Time
 }
 
-// New returns a Cerberus Client backed by the given StateManager.
-func New(store *persistence.StateManager) *Client {
+// New returns a Cerberus Client backed by the given StateManager. Optional
+// Options (e.g. WithBackend) configure remote reporting.
+func New(store *persistence.StateManager, opts ...Option) *Client {
 	if store == nil {
 		return nil
 	}
-	return &Client{store: store}
+	c := &Client{store: store}
+	for _, opt := range opts {
+		opt(c)
+	}
+	if c.backend != nil {
+		logger.Info("Cerberus backend attached", "backend", c.backend.Name())
+	}
+	return c
+}
+
+// HasBackend reports whether a remote Backend is attached.
+func (c *Client) HasBackend() bool {
+	return c != nil && c.backend != nil
 }
 
 // RegisterTorrent records a new info_hash → content mapping. Called when a
@@ -60,12 +113,59 @@ func (c *Client) RegisterTorrent(infoHash string, ids ContentIDs, magnet, title,
 	return c.store.RegisterTorrent(infoHash, ids.ImdbID, ids.TmdbID, ids.TvdbID, ids.Season, ids.Episode, magnet, title, indexerName)
 }
 
-// ReportFailure marks an info_hash as bad (stalled, missing files, etc.).
+// ReportFailure marks an info_hash as bad (stalled, missing files, etc.) in the
+// local blocklist and, if a backend is attached, reports it upstream
+// (best-effort, asynchronous).
 func (c *Client) ReportFailure(infoHash, reason string) error {
 	if c == nil {
 		return nil
 	}
-	return c.store.ReportTorrentFailure(infoHash, reason)
+	err := c.store.ReportTorrentFailure(infoHash, reason)
+	if c.backend != nil {
+		ids := c.contentIDsForHash(infoHash)
+		go c.reportFailureToBackend(infoHash, reason, ids)
+	}
+	return err
+}
+
+// ReportHealthy records that an info_hash streamed successfully. Local state is
+// not modified (success is the default); when a backend is attached the signal
+// is forwarded upstream (best-effort, asynchronous). Safe no-op without backend.
+func (c *Client) ReportHealthy(infoHash string, ids ContentIDs) {
+	if c == nil || c.backend == nil {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), backendCallTimeout)
+		defer cancel()
+		if err := c.backend.ReportHealthy(ctx, infoHash, ids); err != nil {
+			logger.Debug("Cerberus backend ReportHealthy failed", "backend", c.backend.Name(), "hash", infoHash, "err", err)
+		}
+	}()
+}
+
+func (c *Client) reportFailureToBackend(infoHash, reason string, ids ContentIDs) {
+	ctx, cancel := context.WithTimeout(context.Background(), backendCallTimeout)
+	defer cancel()
+	if err := c.backend.ReportFailure(ctx, infoHash, reason, ids); err != nil {
+		logger.Debug("Cerberus backend ReportFailure failed", "backend", c.backend.Name(), "hash", infoHash, "err", err)
+	}
+}
+
+// contentIDsForHash looks up the content a hash was registered for, so backend
+// reports carry the content identifiers. Returns a zero value if unknown.
+func (c *Client) contentIDsForHash(infoHash string) ContentIDs {
+	rec := c.GetContentByHash(infoHash)
+	if rec == nil {
+		return ContentIDs{}
+	}
+	return ContentIDs{
+		ImdbID:  rec.ImdbID,
+		TmdbID:  rec.TmdbID,
+		TvdbID:  rec.TvdbID,
+		Season:  rec.Season,
+		Episode: rec.Episode,
+	}
 }
 
 // IsBlocked returns true if this info_hash is in the local blocklist.
@@ -76,12 +176,51 @@ func (c *Client) IsBlocked(infoHash string) bool {
 	return c.store.IsInfoHashBlocked(infoHash)
 }
 
-// GetBlockedHashes returns all blocked hashes for the given content.
+// GetBlockedHashes returns all blocked hashes for the given content. Local
+// blocklist entries are always included; when a backend is attached its
+// community-reported hashes are merged in (best-effort, short timeout).
 func (c *Client) GetBlockedHashes(ids ContentIDs) []string {
 	if c == nil {
 		return nil
 	}
-	return c.store.GetBlockedHashes(ids.ImdbID, ids.TmdbID, ids.TvdbID, ids.Season, ids.Episode)
+	local := c.store.GetBlockedHashes(ids.ImdbID, ids.TmdbID, ids.TvdbID, ids.Season, ids.Episode)
+	if c.backend == nil {
+		return local
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), backendCallTimeout)
+	defer cancel()
+	remote, err := c.backend.BlockedHashes(ctx, ids)
+	if err != nil {
+		logger.Debug("Cerberus backend BlockedHashes failed", "backend", c.backend.Name(), "err", err)
+		return local
+	}
+	return mergeHashes(local, remote)
+}
+
+// mergeHashes combines two hash lists, de-duplicating case-insensitively.
+func mergeHashes(a, b []string) []string {
+	seen := make(map[string]struct{}, len(a)+len(b))
+	out := make([]string, 0, len(a)+len(b))
+	for _, list := range [][]string{a, b} {
+		for _, h := range list {
+			key := normalizeHashKey(h)
+			if key == "" {
+				continue
+			}
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, h)
+		}
+	}
+	return out
+}
+
+// normalizeHashKey lowercases and trims a hash for use as a de-dupe map key.
+func normalizeHashKey(h string) string {
+	return strings.ToLower(strings.TrimSpace(h))
 }
 
 // GetContentByHash looks up what content an info_hash was registered for.

@@ -18,6 +18,7 @@ const CARD_FIELDS = {
   playback: ['playback_startup_timeout_seconds', 'failover_fast_mode', 'session_ttl_minutes', 'session_post_playback_ttl_minutes'],
   availnzb: ['availnzb_mode', 'availnzb_filter_reported_bad'],
   metadata: ['tmdb_api_key', 'tvdb_api_key'],
+  cerberus: ['cerberus_base_url', 'cerberus_api_key'],
 }
 
 function pickInitialValues(values = {}) {
@@ -47,6 +48,8 @@ function pickInitialValues(values = {}) {
     availnzb_filter_reported_bad: values.availnzb_filter_reported_bad === true,
     tmdb_api_key: values.tmdb_api_key ?? '',
     tvdb_api_key: values.tvdb_api_key ?? '',
+    cerberus_base_url: values.cerberus_base_url ?? '',
+    cerberus_api_key: values.cerberus_api_key ?? '',
   }
 }
 
@@ -509,6 +512,47 @@ export const AdvancedSettingsSection = forwardRef(function AdvancedSettingsSecti
                     <FormControl><div className="w-full xl:max-w-3xl"><PasswordInput className={fieldClassName('tvdb_api_key', 'h-9 w-full font-mono text-xs')} {...field} value={field.value || ''} /></div></FormControl>
                   </div>
                   <FormDescription className="mt-3">Used primarily for series metadata ID resolution. When available, SeedStream can resolve TVDB IDs directly before falling back to TMDB-based lookup.</FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )} />
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0 flex-1 max-w-[34rem] space-y-0.5">
+                <CardTitle>Cerberus (community torrent health)</CardTitle>
+                <CardDescription>
+                  The torrent watchdog always runs locally — tracking stalled torrents and avoiding known-bad ones.
+                  Optionally point it at a central Cerberus server to share failure reports and pull community blocklist
+                  data. Leave blank for local-only mode.
+                </CardDescription>
+              </div>
+              <div className="shrink-0">{renderSaveButton('cerberus')}</div>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="rounded-md border border-border/60">
+              <FormField control={control} name="cerberus_base_url" render={({ field }) => (
+                <FormItem className="rounded-none border-0 p-3">
+                  <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:gap-4">
+                    <FormLabel className="min-w-0 text-sm font-medium xl:flex-1 flex items-center gap-1.5">Central server URL <EnvOverrideIndicator show={envOverrides.includes('cerberus_base_url')} /></FormLabel>
+                    <FormControl><div className="w-full xl:max-w-3xl"><Input className={fieldClassName('cerberus_base_url', 'h-9 w-full font-mono text-xs')} {...field} value={field.value || ''} placeholder="https://cerberus.example.com" autoComplete="off" /></div></FormControl>
+                  </div>
+                  <FormDescription className="mt-3">Base URL of a central Cerberus server. When set, failures are reported upstream and its community blocklist is merged with your local one. Requires a restart to take effect.</FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )} />
+              <FormField control={control} name="cerberus_api_key" render={({ field }) => (
+                <FormItem className="relative rounded-none border-0 p-3">
+                  <div className="absolute left-3 right-3 top-0 border-t border-border/60" />
+                  <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:gap-4">
+                    <FormLabel className="min-w-0 text-sm font-medium xl:flex-1 flex items-center gap-1.5">API key <EnvOverrideIndicator show={envOverrides.includes('cerberus_api_key')} /></FormLabel>
+                    <FormControl><div className="w-full xl:max-w-3xl"><PasswordInput className={fieldClassName('cerberus_api_key', 'h-9 w-full font-mono text-xs')} {...field} value={field.value || ''} /></div></FormControl>
+                  </div>
+                  <FormDescription className="mt-3">Optional bearer token sent with every request to the central server.</FormDescription>
                   <FormMessage />
                 </FormItem>
               )} />

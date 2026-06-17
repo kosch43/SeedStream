@@ -14,8 +14,10 @@ import (
 	"seedstream/pkg/release"
 	"seedstream/pkg/search"
 	"seedstream/pkg/services/availnzb"
+	"seedstream/pkg/services/cerberus"
 	"seedstream/pkg/services/metadata/tmdb"
 	"seedstream/pkg/session"
+	"seedstream/pkg/torrent"
 )
 
 type SearchParams struct {
@@ -1043,6 +1045,66 @@ func (s *Server) streamIndexer(_ *auth.Stream, _ *indexer.SearchRequest) indexer
 	return s.indexer
 }
 
+// filterBlockedTorrents drops torrent releases whose info hash is on the
+// Cerberus blocklist for this content, so a known-bad torrent (one the
+// watchdog already gave up on) is not offered for playback again. Usenet
+// releases and releases without a resolvable info hash pass through untouched.
+func (s *Server) filterBlockedTorrents(streamLabel string, releases []*release.Release, contentIDs *session.AvailReportMeta) []*release.Release {
+	if s.cerberusClient == nil || contentIDs == nil || len(releases) == 0 {
+		return releases
+	}
+	blocked := s.cerberusClient.GetBlockedHashes(cerberus.ContentIDs{
+		ImdbID:  contentIDs.ImdbID,
+		TmdbID:  contentIDs.TmdbID,
+		TvdbID:  contentIDs.TvdbID,
+		Season:  contentIDs.Season,
+		Episode: contentIDs.Episode,
+	})
+	if len(blocked) == 0 {
+		return releases
+	}
+	blockedSet := make(map[string]struct{}, len(blocked))
+	for _, h := range blocked {
+		if h = strings.ToLower(strings.TrimSpace(h)); h != "" {
+			blockedSet[h] = struct{}{}
+		}
+	}
+
+	filtered := releases[:0]
+	removed := 0
+	for _, rel := range releases {
+		if rel != nil && rel.IsTorrent() {
+			if hash := releaseInfoHash(rel); hash != "" {
+				if _, bad := blockedSet[hash]; bad {
+					removed++
+					continue
+				}
+			}
+		}
+		filtered = append(filtered, rel)
+	}
+	if removed > 0 {
+		logger.Debug("Cerberus blocklist filter",
+			"stream", streamLabel,
+			"removed", removed,
+			"remaining", len(filtered),
+		)
+	}
+	return filtered
+}
+
+// releaseInfoHash returns a release's lowercased BitTorrent info hash, deriving
+// it from the magnet URI when the indexer didn't supply one directly.
+func releaseInfoHash(rel *release.Release) string {
+	if h := strings.ToLower(strings.TrimSpace(rel.InfoHash)); h != "" {
+		return h
+	}
+	if rel.Magnet != "" {
+		return torrent.InfoHashFromMagnet(rel.Magnet)
+	}
+	return ""
+}
+
 func singleIndexerFromReleases(releases []*release.Release) (string, bool) {
 	if len(releases) == 0 {
 		return "", false
@@ -1203,6 +1265,7 @@ func (s *Server) buildRawSearchResult(ctx context.Context, contentType, id strin
 		return nil, err
 	}
 	indexerReleases = dedupeCombinedSearchResults(streamLabel, stream, indexerReleases, executedRequests)
+	indexerReleases = s.filterBlockedTorrents(streamLabel, indexerReleases, params.ContentIDs)
 	availCtx = alignAvailContextWithSearch(availCtx, indexerReleases)
 	enrichSearchResultsWithAvail(streamLabel, indexerReleases, availCtx)
 	logger.Debug("Playback candidate build finished",
