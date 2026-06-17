@@ -38,6 +38,9 @@ function normalizeTrackerDraft(draft) {
     timeout_seconds: Number(v.timeout_seconds || 0),
     enabled: v.enabled !== false,
     proxy_url: (v.proxy_url || '').trim(),
+    hnr_min_seed_hours: Number(v.hnr_min_seed_hours || 0),
+    hnr_min_ratio: Number(v.hnr_min_ratio || 0),
+    hnr_mode: v.hnr_mode || 'any',
   }
 }
 
@@ -63,6 +66,18 @@ function summarizeTracker(tracker) {
   parts.push(`Hits/day: ${formatLimitValue(tracker.api_hits_day)}`)
   parts.push(`RPS: ${formatLimitValue(tracker.rate_limit_rps)}`)
   if (tracker.proxy_url) parts.push('Proxy: override')
+  // H&R summary
+  const seedH = Number(tracker.hnr_min_seed_hours || 0)
+  const ratio = Number(tracker.hnr_min_ratio || 0)
+  if (seedH > 0 || ratio > 0) {
+    const mode = tracker.hnr_mode === 'all' ? 'both' : 'either'
+    const parts2 = []
+    if (seedH > 0) parts2.push(`${seedH}h seed`)
+    if (ratio > 0) parts2.push(`${ratio} ratio`)
+    parts.push(`H&R: ${parts2.join(' + ')} (${mode})`)
+  } else {
+    parts.push('H&R: not configured')
+  }
   return parts
 }
 
@@ -311,6 +326,79 @@ function TrackerDialog({ open, onOpenChange, initialValue, onSave, onClearStatus
                   </div>
                   <div className={controlNarrowClass}>
                     <Input className={`h-9 ${fieldClass('api_hits_day')}`} type="number" min={0} value={draft.api_hits_day === 0 ? '' : draft.api_hits_day} onChange={(e) => update('api_hits_day', e.target.value === '' ? 0 : Number(e.target.value))} placeholder="∞" />
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* H&R rules */}
+            <div className="rounded-md border border-amber-500/40 bg-amber-50/40 dark:bg-amber-950/20">
+              <div className="flex items-center gap-2 border-b border-amber-500/30 px-3 py-2">
+                <span className="text-sm font-semibold text-amber-700 dark:text-amber-400">Hit &amp; Run Rules</span>
+                <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-900/50 dark:text-amber-400">Private tracker</span>
+              </div>
+              <p className="px-3 pt-2 text-xs text-muted-foreground">
+                Set your tracker's seeding obligations. SeedStream will enforce these before allowing any torrent removal, protecting your account from H&amp;R flags.
+                Check your tracker's rules page for the exact requirements.
+              </p>
+              <div className="p-3 pt-2">
+                <div className={rowClass}>
+                  <div className={labelClass}>
+                    <Label className="text-sm font-medium">Min. seed time (hours)</Label>
+                    <p className="mt-0.5 text-xs text-muted-foreground">e.g. 72 for 3 days, 168 for 1 week</p>
+                  </div>
+                  <div className={controlNarrowClass}>
+                    <Input
+                      className="h-9"
+                      type="number"
+                      min={0}
+                      step={1}
+                      value={draft.hnr_min_seed_hours === 0 ? '' : draft.hnr_min_seed_hours}
+                      onChange={(e) => update('hnr_min_seed_hours', e.target.value === '' ? 0 : Number(e.target.value))}
+                      placeholder="0 = none"
+                    />
+                  </div>
+                </div>
+              </div>
+              <div className="relative p-3 pt-0">
+                <div className="absolute left-3 right-3 top-0 border-t border-amber-500/20" />
+                <div className={rowClass}>
+                  <div className={labelClass}>
+                    <Label className="text-sm font-medium">Min. ratio</Label>
+                    <p className="mt-0.5 text-xs text-muted-foreground">e.g. 1.0 means upload = download</p>
+                  </div>
+                  <div className={controlNarrowClass}>
+                    <Input
+                      className="h-9"
+                      type="number"
+                      min={0}
+                      step={0.1}
+                      value={draft.hnr_min_ratio === 0 ? '' : draft.hnr_min_ratio}
+                      onChange={(e) => update('hnr_min_ratio', e.target.value === '' ? 0 : Number(e.target.value))}
+                      placeholder="0 = none"
+                    />
+                  </div>
+                </div>
+              </div>
+              <div className="relative p-3 pt-0">
+                <div className="absolute left-3 right-3 top-0 border-t border-amber-500/20" />
+                <div className={rowClass}>
+                  <div className={labelClass}>
+                    <Label className="text-sm font-medium">Satisfy mode</Label>
+                    <p className="mt-0.5 text-xs text-muted-foreground">
+                      <strong>Either</strong>: seed time <em>or</em> ratio clears the obligation<br />
+                      <strong>Both</strong>: seed time <em>and</em> ratio must both be met
+                    </p>
+                  </div>
+                  <div className={controlNarrowClass}>
+                    <select
+                      className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                      value={draft.hnr_mode || 'any'}
+                      onChange={(e) => update('hnr_mode', e.target.value)}
+                    >
+                      <option value="any">Either (OR)</option>
+                      <option value="all">Both (AND)</option>
+                    </select>
                   </div>
                 </div>
               </div>

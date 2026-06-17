@@ -167,6 +167,57 @@ func (m *Manager) Ping(ctx context.Context) map[string]error {
 	return out
 }
 
+// HnRRules describes a tracker's Hit-and-Run obligation.
+type HnRRules struct {
+	MinSeedHours float64
+	MinRatio     float64
+	// Mode is "any" (seed time OR ratio satisfies, default) or "all" (both required).
+	Mode string
+}
+
+// Satisfied returns true when the seeding obligation described by these rules
+// has been met. Always returns true when no thresholds are configured.
+func (r *HnRRules) Satisfied(seedingHours, ratio float64) bool {
+	if r == nil || (r.MinSeedHours <= 0 && r.MinRatio <= 0) {
+		return true
+	}
+	seedOK := r.MinSeedHours <= 0 || seedingHours >= r.MinSeedHours
+	ratioOK := r.MinRatio <= 0 || ratio >= r.MinRatio
+	if strings.EqualFold(strings.TrimSpace(r.Mode), "all") {
+		return seedOK && ratioOK
+	}
+	return seedOK || ratioOK
+}
+
+// SeedingStatus holds the current seeding metrics for a torrent.
+type SeedingStatus struct {
+	SeedingHours float64
+	Ratio        float64
+	Uploaded     int64
+}
+
+// GetSeedingStatus queries qBittorrent for the current seeding time and ratio
+// of a torrent. Returns an error if the client is not found or the torrent is
+// not present in qBittorrent.
+func (m *Manager) GetSeedingStatus(ctx context.Context, hash, clientName string) (*SeedingStatus, error) {
+	c := m.clientByName(clientName)
+	if c == nil {
+		return nil, fmt.Errorf("torrent client %q not found", clientName)
+	}
+	info, err := c.Get(ctx, hash)
+	if err != nil {
+		return nil, fmt.Errorf("qbittorrent get: %w", err)
+	}
+	if info == nil {
+		return nil, fmt.Errorf("torrent %s not found in qBittorrent", hash)
+	}
+	return &SeedingStatus{
+		SeedingHours: float64(info.SeedingTime) / 3600,
+		Ratio:        info.Ratio,
+		Uploaded:     info.Uploaded,
+	}, nil
+}
+
 // clientByName finds the managed qBittorrent client with the given name.
 func (m *Manager) clientByName(name string) *qbittorrent.Client {
 	for _, e := range m.clients {

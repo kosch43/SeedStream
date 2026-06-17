@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"seedstream/pkg/core/config"
 	"seedstream/pkg/core/logger"
 	"seedstream/pkg/indexer"
 	"seedstream/pkg/services/cerberus"
@@ -37,17 +38,40 @@ type Watchdog struct {
 	manager  *Manager
 	cerberus *cerberus.Client
 	indexer  indexer.Indexer
+	cfg      *config.Config
 	checking atomic.Bool // guards against concurrent check runs
 }
 
 // NewWatchdog creates a Watchdog. Returns nil when the torrent manager has no
 // configured clients, or when cerberus/indexer are nil (watchdog would be a
-// no-op).
-func NewWatchdog(m *Manager, cer *cerberus.Client, idx indexer.Indexer) *Watchdog {
+// no-op). cfg is used to look up per-tracker H&R rules at check time.
+func NewWatchdog(m *Manager, cer *cerberus.Client, idx indexer.Indexer, cfg *config.Config) *Watchdog {
 	if m == nil || !m.Enabled() || cer == nil || idx == nil {
 		return nil
 	}
-	return &Watchdog{manager: m, cerberus: cer, indexer: idx}
+	return &Watchdog{manager: m, cerberus: cer, indexer: idx, cfg: cfg}
+}
+
+// hnrRulesFor returns the H&R rules configured for the named indexer, or nil
+// if none are set.
+func (w *Watchdog) hnrRulesFor(indexerName string) *HnRRules {
+	if w.cfg == nil || indexerName == "" {
+		return nil
+	}
+	for _, idx := range w.cfg.Indexers {
+		if !strings.EqualFold(idx.Name, indexerName) {
+			continue
+		}
+		if idx.HnRMinSeedHours <= 0 && idx.HnRMinRatio <= 0 {
+			return nil
+		}
+		return &HnRRules{
+			MinSeedHours: idx.HnRMinSeedHours,
+			MinRatio:     idx.HnRMinRatio,
+			Mode:         idx.HnRMode,
+		}
+	}
+	return nil
 }
 
 // Start runs the watchdog loop until ctx is cancelled. Intended to be called
@@ -140,8 +164,26 @@ func (w *Watchdog) handleStalled(ctx context.Context, stalled TorrentHealthEntry
 	// Do NOT add to the blocklist — the torrent itself isn't bad, the swarm
 	// just temporarily ran out of seeds.
 	if stalled.Progress > 0 {
+		rules := w.hnrRulesFor(rec.IndexerName)
+		if rules != nil {
+			// Check current seeding status against the tracker's H&R rules.
+			if status, err := w.manager.GetSeedingStatus(ctx, stalled.Hash, stalled.ClientName); err == nil {
+				safe := rules.Satisfied(status.SeedingHours, status.Ratio)
+				logger.Info("Cerberus watchdog: partial torrent H&R status",
+					"hash", stalled.Hash, "name", stalled.Name,
+					"indexer", rec.IndexerName,
+					"seeding_hours", status.SeedingHours,
+					"ratio", status.Ratio,
+					"min_seed_hours", rules.MinSeedHours,
+					"min_ratio", rules.MinRatio,
+					"mode", rules.Mode,
+					"hnr_safe", safe,
+				)
+			}
+		}
 		logger.Info("Cerberus watchdog: re-announcing partial torrent (preserving seeding ratio)",
-			"hash", stalled.Hash, "name", stalled.Name, "progress", stalled.Progress)
+			"hash", stalled.Hash, "name", stalled.Name, "progress", stalled.Progress,
+			"indexer", rec.IndexerName)
 		if err := w.manager.Reannounce(ctx, stalled.ClientName, stalled.Hash); err != nil {
 			logger.Warn("Cerberus watchdog: reannounce failed", "hash", stalled.Hash, "err", err)
 		}
@@ -199,7 +241,7 @@ func (w *Watchdog) handleStalled(ctx context.Context, stalled TorrentHealthEntry
 	// Register the replacement's hash so that if it also stalls the watchdog
 	// can identify its content and re-replace it.
 	if newHash := InfoHashFromMagnet(newURL); newHash != "" {
-		if err := w.cerberus.RegisterTorrent(newHash, ids, newURL, rec.ReleaseTitle); err != nil {
+		if err := w.cerberus.RegisterTorrent(newHash, ids, newURL, rec.ReleaseTitle, rec.IndexerName); err != nil {
 			logger.Warn("Cerberus watchdog: failed to register replacement hash", "hash", newHash, "err", err)
 		}
 	} else {

@@ -242,7 +242,7 @@ func main() {
 	}
 
 	torrentMgr := torrent.NewManager(comp.Config.TorrentClients)
-	watchdog := torrent.NewWatchdog(torrentMgr, cerberusClient, comp.Indexer)
+	watchdog := torrent.NewWatchdog(torrentMgr, cerberusClient, comp.Indexer, comp.Config)
 	if watchdog != nil {
 		go watchdog.Start(context.Background(), torrent.WatchdogConfig{})
 		logger.Info("Cerberus torrent watchdog enabled")

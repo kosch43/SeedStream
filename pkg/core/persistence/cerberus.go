@@ -38,12 +38,13 @@ type TorrentEntry struct {
 	Episode      int
 	Magnet       string
 	ReleaseTitle string
+	IndexerName  string
 	AddedAt      time.Time
 }
 
 // RegisterTorrent writes an info_hash → content ID mapping. Safe to call with
 // nil receiver (no-op).
-func (m *StateManager) RegisterTorrent(infoHash, imdbID, tmdbID, tvdbID string, season, episode int, magnet, releaseTitle string) error {
+func (m *StateManager) RegisterTorrent(infoHash, imdbID, tmdbID, tvdbID string, season, episode int, magnet, releaseTitle, indexerName string) error {
 	if m == nil || m.db == nil {
 		return nil
 	}
@@ -54,9 +55,9 @@ func (m *StateManager) RegisterTorrent(infoHash, imdbID, tmdbID, tvdbID string, 
 	now := time.Now().UnixMilli()
 	return m.withWriteLock(func(db *sql.DB) error {
 		_, err := db.Exec(`INSERT OR REPLACE INTO cerberus_torrent_registry
-			(info_hash, imdb_id, tmdb_id, tvdb_id, season, episode, magnet, release_title, added_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			hash, imdbID, tmdbID, tvdbID, season, episode, magnet, releaseTitle, now)
+			(info_hash, imdb_id, tmdb_id, tvdb_id, season, episode, magnet, release_title, indexer_name, added_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			hash, imdbID, tmdbID, tvdbID, season, episode, magnet, releaseTitle, indexerName, now)
 		return err
 	})
 }
@@ -161,10 +162,10 @@ func (m *StateManager) GetTorrentByHash(infoHash string) *TorrentEntry {
 	var e TorrentEntry
 	var addedAtMs int64
 	err := m.db.QueryRow(`SELECT info_hash, imdb_id, tmdb_id, tvdb_id, season, episode,
-		magnet, release_title, added_at
+		magnet, release_title, indexer_name, added_at
 		FROM cerberus_torrent_registry WHERE info_hash = ?`, hash).
 		Scan(&e.InfoHash, &e.ImdbID, &e.TmdbID, &e.TvdbID, &e.Season, &e.Episode,
-			&e.Magnet, &e.ReleaseTitle, &addedAtMs)
+			&e.Magnet, &e.ReleaseTitle, &e.IndexerName, &addedAtMs)
 	if err != nil {
 		return nil
 	}
