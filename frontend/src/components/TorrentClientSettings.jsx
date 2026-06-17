@@ -20,6 +20,7 @@ function normalizeDraft(draft) {
     password: v.password || '',
     category: (v.category || '').trim(),
     save_path: (v.save_path || '').trim(),
+    remote_path: (v.remote_path || '').trim(),
     enabled: v.enabled !== false,
   }
 }
@@ -32,7 +33,11 @@ function summarize(client) {
   const parts = []
   if (client.url) parts.push(client.url)
   parts.push(`Category: ${client.category || 'seedstream'}`)
-  if (client.save_path) parts.push(`Path: ${client.save_path}`)
+  if (client.remote_path && client.save_path) {
+    parts.push(`${client.remote_path} → ${client.save_path}`)
+  } else if (client.save_path) {
+    parts.push(`Path: ${client.save_path}`)
+  }
   return parts
 }
 
@@ -98,12 +103,23 @@ function TorrentClientDialog({ open, onOpenChange, initialValue, onSave, title, 
               onChange={(e) => update({ category: e.target.value })} autoComplete="off" />
           </div>
           <div className="flex flex-col gap-2">
-            <Label htmlFor="tc-path">Save path (absolute, readable by SeedStream)</Label>
+            <Label htmlFor="tc-path">Save path (local path SeedStream reads from)</Label>
             <Input id="tc-path" value={draft.save_path} placeholder="/downloads/seedstream"
               onChange={(e) => update({ save_path: e.target.value })} autoComplete="off" />
             <p className="text-xs text-muted-foreground">
-              Where qBittorrent writes downloads. SeedStream reads files from here to stream them,
-              so this path must be mounted and readable by SeedStream. Leave blank to use the client's default.
+              The path SeedStream reads torrent files from. On a same-machine setup this is
+              qBittorrent's download directory. On a remote seedbox, set this to the local
+              mount point (e.g. <code className="font-mono">/mnt/seedbox</code>).
+            </p>
+          </div>
+          <div className="flex flex-col gap-2">
+            <Label htmlFor="tc-remote-path">Remote path (qBittorrent's path on the seedbox)</Label>
+            <Input id="tc-remote-path" value={draft.remote_path} placeholder="/downloads/seedstream"
+              onChange={(e) => update({ remote_path: e.target.value })} autoComplete="off" />
+            <p className="text-xs text-muted-foreground">
+              Only needed when qBittorrent runs on a different machine. Enter the path qBittorrent
+              writes to on <em>its</em> machine. SeedStream will replace this prefix with the Save
+              path above when reading files. Leave blank if both services share a filesystem.
             </p>
           </div>
           <div className="flex items-center justify-between">
