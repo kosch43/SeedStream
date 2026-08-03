@@ -388,6 +388,7 @@ type configValidationPlan struct {
 	validateKeepLogFiles           bool
 	validatePlaybackStartupTimeout bool
 	validateIndexerProxyURL        bool
+	validateTLS                    bool
 	validateMovieSearchQueries     bool
 	validateSeriesSearchQueries    bool
 	validateDeviceAssignments      bool
@@ -401,6 +402,7 @@ func fullConfigValidationPlan() configValidationPlan {
 		validateKeepLogFiles:           true,
 		validatePlaybackStartupTimeout: true,
 		validateIndexerProxyURL:        true,
+		validateTLS:                    true,
 		validateMovieSearchQueries:     true,
 		validateSeriesSearchQueries:    true,
 		validateDeviceAssignments:      true,
@@ -429,6 +431,12 @@ func validationPlanFromPatch(body []byte, currentCfg, nextCfg *config.Config) co
 	}
 	if _, ok := raw["indexer_proxy_url"]; ok {
 		plan.validateIndexerProxyURL = true
+	}
+	for _, key := range []string{"tls_enabled", "tls_cert_file", "tls_key_file", "tls_auto_domain", "tls_auto_email"} {
+		if _, ok := raw[key]; ok {
+			plan.validateTLS = true
+			break
+		}
 	}
 	if _, ok := raw["movie_search_queries"]; ok {
 		plan.validateMovieSearchQueries = true
@@ -548,6 +556,27 @@ func verifyGlobalIndexerProxy(cfg *config.Config) error {
 	return fmt.Errorf("global proxy could not reach any enabled indexer (%s)", strings.Join(samples, " | "))
 }
 
+// tlsErrorField picks which HTTPS field the UI should highlight for a TLS
+// validation failure, so the message lands on the input the operator must fix.
+func tlsErrorField(cfg *config.Config) string {
+	if cfg == nil {
+		return "tls_enabled"
+	}
+	if strings.TrimSpace(cfg.TLSAutoDomain) != "" {
+		return "tls_auto_domain"
+	}
+	if strings.TrimSpace(cfg.TLSCertFile) == "" && strings.TrimSpace(cfg.TLSKeyFile) == "" {
+		return "tls_enabled"
+	}
+	if strings.TrimSpace(cfg.TLSCertFile) == "" {
+		return "tls_cert_file"
+	}
+	if _, err := os.Stat(strings.TrimSpace(cfg.TLSCertFile)); err != nil {
+		return "tls_cert_file"
+	}
+	return "tls_key_file"
+}
+
 func (s *Server) validateConfigWithPlan(cfg *config.Config, plan configValidationPlan) map[string]string {
 	errors := make(map[string]string)
 	if plan.validateKeepLogFiles && (cfg.KeepLogFiles < 1 || cfg.KeepLogFiles > 50) {
@@ -561,6 +590,14 @@ func (s *Server) validateConfigWithPlan(cfg *config.Config, plan configValidatio
 			errors["indexer_proxy_url"] = err.Error()
 		} else if err := verifyGlobalIndexerProxy(cfg); err != nil {
 			errors["indexer_proxy_url"] = err.Error()
+		}
+	}
+	// TLS is validated on save because startup refuses to boot on a bad
+	// certificate. Without this, saving an unreadable path through the UI would
+	// leave the next restart crash-looping with no way in to fix it.
+	if plan.validateTLS {
+		if err := cfg.ValidateTLS(); err != nil {
+			errors[tlsErrorField(cfg)] = err.Error()
 		}
 	}
 	validateSearchQueries := func(prefix string, queries []config.SearchQueryConfig) {
