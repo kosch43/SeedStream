@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { apiFetch, getApiUrl, notifyUnauthorized } from '../api'
 
 const MAX_LOGS = 200
+const MAX_HISTORY = 60
 
 export function useAdminRuntime({
   authenticated,
@@ -26,6 +27,8 @@ export function useAdminRuntime({
   const activeSocketRef = useRef(null)
   const reconnectTimeoutRef = useRef(null)
   const [logs, setLogs] = useState([])
+  const [history, setHistory] = useState([])
+  const [torrentHistory, setTorrentHistory] = useState([])
   const [indexerCaps, setIndexerCaps] = useState({})
 
   const resetRuntime = useCallback(() => {
@@ -40,6 +43,8 @@ export function useAdminRuntime({
     setWs(null)
     window.ws = null
     setLogs([])
+    setHistory([])
+    setTorrentHistory([])
     setIndexerCaps({})
   }, [])
 
@@ -116,7 +121,11 @@ export function useAdminRuntime({
         }
         switch (msg.type) {
           case 'stats': {
-            setStats(msg.payload)
+            const data = msg.payload
+            setStats(data)
+            const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+            setHistory((prev) => [...prev, { time: timestamp, speed: data.download_speed_mbps ?? 0 }].slice(-MAX_HISTORY))
+            setTorrentHistory((prev) => [...prev, { time: timestamp, torrents: data.active_torrents ?? 0 }].slice(-MAX_HISTORY))
             break
           }
           case 'log_entry':
@@ -285,6 +294,8 @@ export function useAdminRuntime({
     ws,
     version,
     logs,
+    history,
+    torrentHistory,
     indexerCaps,
     sendCommand,
   }

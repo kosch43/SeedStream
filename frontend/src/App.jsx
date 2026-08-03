@@ -39,6 +39,8 @@ function App() {
     ws,
     version,
     logs,
+    history,
+    torrentHistory,
     indexerCaps,
     sendCommand,
   } = useAdminRuntime({
@@ -49,6 +51,12 @@ function App() {
     setCurrentUser,
     setMustChangePassword,
   })
+
+  const chartData = history.map((h, i) => ({
+    time: h.time,
+    speed: h.speed,
+    torrents: torrentHistory[i]?.torrents ?? 0,
+  }))
 
   useEffect(() => {
     const token = localStorage.getItem('auth_token')
@@ -219,6 +227,7 @@ function App() {
           {activePage === 'dashboard' && (
             <DashboardPage
               stats={stats}
+              chartData={chartData}
               sendCommand={sendCommand}
               config={config}
             />

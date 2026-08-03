@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"sort"
 	"time"
 
@@ -15,6 +16,16 @@ type SystemStats struct {
 	ActiveStreams  int                         `json:"active_streams"`
 	Indexers       []IndexerStats              `json:"indexers"`
 	ActiveSessions []session.ActiveSessionInfo `json:"active_sessions"`
+
+	// Live seedbox activity, aggregated across configured torrent clients.
+	DownloadSpeedMbps float64 `json:"download_speed_mbps"`
+	UploadSpeedMbps   float64 `json:"upload_speed_mbps"`
+	ActiveTorrents    int     `json:"active_torrents"`
+	TotalTorrents     int     `json:"total_torrents"`
+	DownloadedMB      float64 `json:"downloaded_mb"`
+	UploadedMB        float64 `json:"uploaded_mb"`
+	Seeds             int     `json:"seeds"`
+	Peers             int     `json:"peers"`
 }
 
 type IndexerStats struct {
@@ -79,6 +90,21 @@ func (s *Server) collectStats() SystemStats {
 
 	stats.ActiveSessions = s.sessionMgr.GetActiveSessions()
 	stats.ActiveStreams = len(stats.ActiveSessions)
+
+	if s.strmServer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		agg := s.strmServer.TorrentStats(ctx)
+		cancel()
+		const bitsPerByte = 8
+		stats.DownloadSpeedMbps = float64(agg.DownloadSpeedBps) * bitsPerByte / 1e6
+		stats.UploadSpeedMbps = float64(agg.UploadSpeedBps) * bitsPerByte / 1e6
+		stats.ActiveTorrents = agg.ActiveTorrents
+		stats.TotalTorrents = agg.TotalTorrents
+		stats.DownloadedMB = float64(agg.DownloadedBytes) / (1024 * 1024)
+		stats.UploadedMB = float64(agg.UploadedBytes) / (1024 * 1024)
+		stats.Seeds = agg.Seeds
+		stats.Peers = agg.Peers
+	}
 
 	s.maybePersistMetrics(stats)
 

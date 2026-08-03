@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"seedstream/pkg/core/config"
@@ -39,6 +40,10 @@ var videoExts = map[string]struct{}{
 // Manager owns the configured torrent clients.
 type Manager struct {
 	clients []*clientEntry
+
+	aggMu      sync.Mutex
+	aggCached  AggregateStats
+	aggExpires time.Time
 }
 
 type clientEntry struct {
@@ -483,4 +488,68 @@ func absFilePath(remotePath, localSavePath string, info *qbittorrent.TorrentInfo
 	}
 
 	return full
+}
+
+// AggregateStats summarises live activity across every configured torrent
+// client, for the dashboard. Speeds are bytes/second as reported by
+// qBittorrent; Downloaded/Uploaded are cumulative totals for the SeedStream
+// category.
+type AggregateStats struct {
+	DownloadSpeedBps int64
+	UploadSpeedBps   int64
+	ActiveTorrents   int // currently moving data (up or down)
+	TotalTorrents    int
+	DownloadedBytes  int64
+	UploadedBytes    int64
+	Seeds            int
+	Peers            int
+}
+
+// aggregateCacheTTL bounds how often the dashboard poll actually reaches
+// qBittorrent. The websocket pushes stats every second per connected client,
+// which would otherwise hammer the seedbox WebUI.
+const aggregateCacheTTL = 2 * time.Second
+
+// AggregateStats returns live totals across all clients, cached briefly.
+// Client errors are skipped so one unreachable seedbox does not blank the
+// dashboard for the others.
+func (m *Manager) AggregateStats(ctx context.Context) AggregateStats {
+	if m == nil || len(m.clients) == 0 {
+		return AggregateStats{}
+	}
+
+	m.aggMu.Lock()
+	if time.Now().Before(m.aggExpires) {
+		cached := m.aggCached
+		m.aggMu.Unlock()
+		return cached
+	}
+	m.aggMu.Unlock()
+
+	var out AggregateStats
+	for _, e := range m.clients {
+		list, err := e.client.ListCategory(ctx)
+		if err != nil {
+			logger.Debug("torrent aggregate stats: list failed", "client", e.cfg.Name, "err", err)
+			continue
+		}
+		for _, t := range list {
+			out.TotalTorrents++
+			out.DownloadSpeedBps += t.DlSpeed
+			out.UploadSpeedBps += t.UpSpeed
+			out.DownloadedBytes += t.Downloaded
+			out.UploadedBytes += t.Uploaded
+			out.Seeds += t.NumSeeds
+			out.Peers += t.NumLeechs
+			if t.DlSpeed > 0 || t.UpSpeed > 0 {
+				out.ActiveTorrents++
+			}
+		}
+	}
+
+	m.aggMu.Lock()
+	m.aggCached = out
+	m.aggExpires = time.Now().Add(aggregateCacheTTL)
+	m.aggMu.Unlock()
+	return out
 }
