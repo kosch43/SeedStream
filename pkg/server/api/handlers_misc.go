@@ -7,20 +7,17 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"seedstream/pkg/auth"
-	"seedstream/pkg/core/config"
 	"seedstream/pkg/core/logger"
 	"seedstream/pkg/core/persistence"
 	"seedstream/pkg/indexer"
 )
 
 type persistedStatsResponse struct {
-	Providers []persistence.ProviderMetric `json:"providers"`
 	Indexers  []persistence.IndexerMetric  `json:"indexers"`
 }
 
@@ -165,52 +162,6 @@ func (s *Server) handleDownloadLogs(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, logPath)
 }
 
-func (s *Server) handleNZBAttempts(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	s.mu.RLock()
-	lister := s.attemptLister
-	s.mu.RUnlock()
-	if lister == nil {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode([]persistence.NZBAttempt{})
-		return
-	}
-	q := r.URL.Query()
-	opts := persistence.ListAttemptsOptions{
-		ContentType: q.Get("content_type"),
-		ContentID:   q.Get("content_id"),
-	}
-	if v := q.Get("limit"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			opts.Limit = n
-		}
-	}
-	if v := q.Get("offset"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
-			opts.Offset = n
-		}
-	}
-	if v := q.Get("since"); v != "" {
-		if t, err := time.Parse(time.RFC3339, v); err == nil {
-			opts.Since = &t
-		}
-	}
-	list, err := lister.ListAttempts(opts)
-	if err != nil {
-		logger.Error("ListAttempts failed", "err", err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
-		return
-	}
-	if list == nil {
-		list = []persistence.NZBAttempt{}
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(list)
-}
-
 func (s *Server) handlePersistedStats(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -220,18 +171,11 @@ func (s *Server) handlePersistedStats(w http.ResponseWriter, r *http.Request) {
 	mgr := s.attemptLister
 	s.mu.RUnlock()
 	resp := persistedStatsResponse{
-		Providers: []persistence.ProviderMetric{},
 		Indexers:  []persistence.IndexerMetric{},
 	}
 	if mgr == nil {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
-		return
-	}
-	providers, err := mgr.GetLatestProviderMetrics()
-	if err != nil {
-		logger.Error("GetLatestProviderMetrics failed", "err", err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 	indexers, err := mgr.GetLatestIndexerMetrics()
@@ -240,7 +184,6 @@ func (s *Server) handlePersistedStats(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
-	resp.Providers = providers
 	resp.Indexers = indexers
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
@@ -255,7 +198,6 @@ func (s *Server) handleStatsHistory(w http.ResponseWriter, r *http.Request) {
 	mgr := s.attemptLister
 	s.mu.RUnlock()
 	resp := persistedStatsResponse{
-		Providers: []persistence.ProviderMetric{},
 		Indexers:  []persistence.IndexerMetric{},
 	}
 	if mgr == nil {
@@ -283,19 +225,12 @@ func (s *Server) handleStatsHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	providers, err := mgr.GetProviderMetricsSummary(from, to)
-	if err != nil {
-		logger.Error("GetProviderMetricsSummary failed", "err", err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
-		return
-	}
 	indexers, err := mgr.GetIndexerMetricsSummary(from, to)
 	if err != nil {
 		logger.Error("GetIndexerMetricsSummary failed", "err", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
-	resp.Providers = providers
 	resp.Indexers = indexers
 
 	w.Header().Set("Content-Type", "application/json")
@@ -329,8 +264,8 @@ func parseStatsRange(r *http.Request) (*time.Time, *time.Time, error) {
 	return from, to, nil
 }
 
-// handleIndexerStats returns per-indexer event-based aggregation over the
-// selected [from,to) window (NZBHydra2-style), plus time-distribution charts.
+// handleIndexerStats returns per-tracker event-based aggregation over the
+// selected [from,to) window, plus time-distribution charts.
 func (s *Server) handleIndexerStats(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -359,59 +294,11 @@ func (s *Server) handleIndexerStats(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Stamp each row's protocol (usenet vs torrent) from config so the UI can
-	// separate Torznab tracker stats from Usenet indexer stats. Names not found
-	// in config default to "usenet" (matches legacy Newznab-only behaviour).
-	s.mu.RLock()
-	cfg := s.config
-	s.mu.RUnlock()
-	torrentByName := make(map[string]bool)
-	if cfg != nil {
-		for _, idx := range cfg.Indexers {
-			torrentByName[strings.ToLower(strings.TrimSpace(idx.Name))] = config.IsTorrentIndexerType(idx.Type)
-		}
-	}
-	for i := range rows {
-		if torrentByName[strings.ToLower(strings.TrimSpace(rows[i].IndexerName))] {
-			rows[i].Protocol = "torrent"
-		} else {
-			rows[i].Protocol = "usenet"
-		}
-	}
-
 	writeJSON(w, map[string]any{"indexers": rows, "time_distribution": timeDist})
 }
 
 // handleProviderStats returns per-provider event-based aggregation over the
 // selected [from,to) window (provider analogue of indexer stats).
-func (s *Server) handleProviderStats(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	s.mu.RLock()
-	mgr := s.attemptLister
-	s.mu.RUnlock()
-
-	rows := []persistence.ProviderStatsRow{}
-	if mgr == nil {
-		writeJSON(w, map[string]any{"providers": rows})
-		return
-	}
-	from, to, err := parseStatsRange(r)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	rows, err = mgr.GetProviderStats(from, to)
-	if err != nil {
-		logger.Error("GetProviderStats failed", "err", err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, map[string]any{"providers": rows})
-}
-
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)

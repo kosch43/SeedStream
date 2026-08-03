@@ -8,14 +8,11 @@ import { SiteHeader } from "@/components/SiteHeader"
 import { DashboardPage } from "@/components/DashboardPage"
 import { StatisticsPage } from "@/components/StatisticsPage"
 import { LogsPage } from "@/components/LogsPage"
-import { NZBHistoryPage } from "@/components/NZBHistoryPage"
 import { ProfilePage } from "@/components/ProfilePage"
-import { DirectPlayPage } from "@/components/DirectPlayPage"
-import { apiFetch, getApiUrl, UNAUTHORIZED_EVENT } from './api'
+import { getApiUrl, UNAUTHORIZED_EVENT } from './api'
 import { AlertCircle, Loader2 } from "lucide-react"
 
 import { useAdminRuntime } from './hooks/useAdminRuntime'
-import { isAvailNZBEnabled } from './lib/availnzb'
 
 function App() {
   const [authChecked, setAuthChecked] = useState(false)
@@ -27,11 +24,6 @@ function App() {
   const [theme, setTheme] = useState(localStorage.getItem('theme') || 'system')
   const hasLoggedOutRef = useRef(false)
   const [activePage, setActivePage] = useState('dashboard')
-  const [availNZBStatus, setAvailNZBStatus] = useState(null)
-  const [availNZBStatusLoading, setAvailNZBStatusLoading] = useState(false)
-  const [availNZBStatusError, setAvailNZBStatusError] = useState('')
-  const availNZBStatusLoadedRef = useRef(false)
-  const availNZBStatusLoadingRef = useRef(false)
 
   const shouldRunAdminRuntime = authenticated && isAdmin
 
@@ -43,14 +35,11 @@ function App() {
     isSaving,
     isRestarting,
     error,
-    history,
-    connHistory,
     wsStatus,
     ws,
     version,
     logs,
     indexerCaps,
-    nzbAttemptsRefreshTrigger,
     sendCommand,
   } = useAdminRuntime({
     authenticated: shouldRunAdminRuntime,
@@ -60,12 +49,6 @@ function App() {
     setCurrentUser,
     setMustChangePassword,
   })
-
-  const chartData = history.map((h, i) => ({
-    time: h.time,
-    speed: h.speed,
-    conns: connHistory[i]?.conns ?? 0,
-  }))
 
   useEffect(() => {
     const token = localStorage.getItem('auth_token')
@@ -178,41 +161,6 @@ function App() {
   }, [theme]);
 
   const isSettingsPage = activePage === 'settings'
-  const availNZBEnabled = isAvailNZBEnabled(config?.availnzb_mode)
-
-  const fetchAvailNZBStatus = useCallback(async (force = false) => {
-    if (!authenticated || !config || !availNZBEnabled) return
-    if (availNZBStatusLoadingRef.current) return
-    if (!force && availNZBStatusLoadedRef.current) return
-
-    availNZBStatusLoadingRef.current = true
-    setAvailNZBStatusLoading(true)
-    setAvailNZBStatusError('')
-    try {
-      const data = await apiFetch('/api/availnzb/status')
-      setAvailNZBStatus(data || null)
-      availNZBStatusLoadedRef.current = true
-    } catch (error) {
-      setAvailNZBStatus(null)
-      setAvailNZBStatusError(error.message || 'Failed to load AvailNZB status.')
-      availNZBStatusLoadedRef.current = true
-    } finally {
-      availNZBStatusLoadingRef.current = false
-      setAvailNZBStatusLoading(false)
-    }
-  }, [authenticated, config, availNZBEnabled])
-
-  useEffect(() => {
-    if (!authenticated || !config || !availNZBEnabled) {
-      availNZBStatusLoadedRef.current = false
-      availNZBStatusLoadingRef.current = false
-      setAvailNZBStatus(null)
-      setAvailNZBStatusError('')
-      setAvailNZBStatusLoading(false)
-      return
-    }
-    void fetchAvailNZBStatus(false)
-  }, [authenticated, config, availNZBEnabled, fetchAvailNZBStatus])
 
   if (!authChecked) {
     return (
@@ -271,22 +219,12 @@ function App() {
           {activePage === 'dashboard' && (
             <DashboardPage
               stats={stats}
-              chartData={chartData}
               sendCommand={sendCommand}
               config={config}
-              availNZBStatus={availNZBStatus}
-              availNZBStatusLoading={availNZBStatusLoading}
-              availNZBStatusError={availNZBStatusError}
             />
           )}
           {activePage === 'statistics' && (
             <StatisticsPage />
-          )}
-          {activePage === 'nzb-history' && (
-            <NZBHistoryPage refreshTrigger={nzbAttemptsRefreshTrigger} />
-          )}
-          {activePage === 'direct-play' && (
-            <DirectPlayPage />
           )}
           {activePage === 'logs' && (
             <LogsPage logs={logs} />
@@ -311,7 +249,6 @@ function App() {
                 saveStatus={saveStatus}
                 clearSaveStatus={clearSaveStatus}
                 isSaving={isSaving}
-                onRefreshAvailNZBStatus={() => fetchAvailNZBStatus(true)}
                 adminToken={currentUser && currentUser !== 'legacy' ? authToken : null}
                 indexerCaps={indexerCaps}
                 stats={stats}

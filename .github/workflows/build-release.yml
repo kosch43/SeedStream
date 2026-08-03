@@ -93,11 +93,11 @@ jobs:
           mkdir -p dist/linux_amd64 dist/linux_arm64 dist/windows_amd64
           LDFLAGS="-s -w -X main.TMDBKey=${{ secrets.TMDB_API_KEY }} -X main.TVDBKey=${{ secrets.TVDB_API_KEY }} -X main.Version=${{ steps.version.outputs.VERSION }}"
           # Build for Linux AMD64 (for Docker and Release)
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="$LDFLAGS" -o dist/linux_amd64/streamnzb ./cmd/streamnzb
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="$LDFLAGS" -o dist/linux_amd64/seedstream ./cmd/seedstream
           # Build for Linux ARM64 (for Docker and Release)
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="$LDFLAGS" -o dist/linux_arm64/streamnzb ./cmd/streamnzb
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="$LDFLAGS" -o dist/linux_arm64/seedstream ./cmd/seedstream
           # Build for Windows AMD64 (Release only)
-          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="$LDFLAGS" -o dist/windows_amd64/streamnzb.exe ./cmd/streamnzb
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="$LDFLAGS" -o dist/windows_amd64/seedstream.exe ./cmd/seedstream
 
       - name: Extract metadata (tags, labels) for Docker
         id: meta
@@ -129,9 +129,9 @@ jobs:
         if: github.event_name == 'release'
         run: |
           mkdir -p release_assets
-          cp dist/linux_amd64/streamnzb release_assets/streamnzb-linux-amd64
-          cp dist/linux_arm64/streamnzb release_assets/streamnzb-linux-arm64
-          cp dist/windows_amd64/streamnzb.exe release_assets/streamnzb-windows-amd64.exe
+          cp dist/linux_amd64/seedstream release_assets/seedstream-linux-amd64
+          cp dist/linux_arm64/seedstream release_assets/seedstream-linux-arm64
+          cp dist/windows_amd64/seedstream.exe release_assets/seedstream-windows-amd64.exe
 
       - name: Upload Release Assets
         if: github.event_name == 'release'

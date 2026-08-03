@@ -13,17 +13,11 @@ import (
 	"seedstream/pkg/indexer"
 	"seedstream/pkg/initialization"
 	"seedstream/pkg/search/triage"
-	"seedstream/pkg/services/availnzb"
 	"seedstream/pkg/services/metadata/tmdb"
 	"seedstream/pkg/services/metadata/tvdb"
-	"seedstream/pkg/usenet/nntp"
-	"seedstream/pkg/usenet/pool"
-	"seedstream/pkg/usenet/validation"
 )
 
 type BuildOpts struct {
-	AvailNZBURL        string
-	AvailNZBAPIKey     string
 	TMDBAPIKey         string
 	TVDBAPIKey         string
 	FallbackTMDBAPIKey string
@@ -33,20 +27,12 @@ type BuildOpts struct {
 }
 
 type Components struct {
-	Config               *config.Config
-	Indexer              indexer.Indexer
-	ProviderPools        map[string]*nntp.ClientPool
-	ProviderOrder        []string
-	StreamingPools       []*nntp.ClientPool
-	UsenetPool           *pool.Pool
-	AvailNZBIndexerHosts map[string]string
-	IndexerCaps          map[string]*indexer.Caps
-	Validator            *validation.Checker
-	Triage               *triage.Service
-	AvailClient          *availnzb.Client
-	TMDBClient           *tmdb.Client
-	TVDBClient           *tvdb.Client
-	SegmentCacheBudget   *pool.SegmentCacheBudget
+	Config      *config.Config
+	Indexer     indexer.Indexer
+	IndexerCaps map[string]*indexer.Caps
+	Triage      *triage.Service
+	TMDBClient  *tmdb.Client
+	TVDBClient  *tvdb.Client
 }
 
 type App struct {
@@ -109,52 +95,25 @@ func (a *App) Build(cfg *config.Config, opts BuildOpts) (*Components, error) {
 	return comp, nil
 }
 
-func (a *App) SetAvailNZBAPIKey(apiKey string) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	apiKey = strings.TrimSpace(apiKey)
-	a.opts.AvailNZBAPIKey = apiKey
-	if a.components != nil && a.components.AvailClient != nil {
-		a.components.AvailClient.SetAPIKey(apiKey)
-	}
-}
-
 func (a *App) buildFull(cfg *config.Config, opts BuildOpts) (*Components, error) {
-	env.SetRuntimeHeaders(cfg.IndexerQueryHeader, cfg.IndexerGrabHeader, cfg.ProviderHeader)
+	env.SetRuntimeHeaders(cfg.IndexerQueryHeader, cfg.IndexerGrabHeader)
 	base, err := initialization.BuildComponents(cfg)
 	if err != nil {
 		return nil, err
 	}
 
-	const validationSampleSize = 5
-	validator := validation.NewChecker(base.UsenetPool, validationSampleSize, 6)
 	triageSvc := triage.NewService()
-	availClient := availnzb.NewClient(opts.AvailNZBURL, opts.AvailNZBAPIKey)
-	go func(client *availnzb.Client) {
-		if err := client.RefreshBackbones(); err != nil {
-			logger.Debug("AvailNZB backbones refresh", "source", "app_build", "err", err)
-		}
-	}(availClient)
 	dataDir := resolveDataDir(opts.DataDir, cfg.LoadedPath)
 	tmdbClient := tmdb.NewClient(a.effectiveTMDBKey())
 	tvdbClient := tvdb.NewClient(a.effectiveTVDBKey(), dataDir)
 
 	return &Components{
-		Config:               base.Config,
-		Indexer:              base.Indexer,
-		ProviderPools:        base.ProviderPools,
-		ProviderOrder:        base.ProviderOrder,
-		StreamingPools:       base.StreamingPools,
-		UsenetPool:           base.UsenetPool,
-		AvailNZBIndexerHosts: base.AvailNZBIndexerHosts,
-		IndexerCaps:          base.IndexerCaps,
-		Validator:            validator,
-		Triage:               triageSvc,
-		AvailClient:          availClient,
-		TMDBClient:           tmdbClient,
-		TVDBClient:           tvdbClient,
-		SegmentCacheBudget:   base.SegmentCacheBudget,
+		Config:      base.Config,
+		Indexer:     base.Indexer,
+		IndexerCaps: base.IndexerCaps,
+		Triage:      triageSvc,
+		TMDBClient:  tmdbClient,
+		TVDBClient:  tvdbClient,
 	}, nil
 }
 
@@ -163,8 +122,6 @@ type ReloadScope int
 const (
 	ReloadConfigOnly ReloadScope = iota
 	ReloadIndexers
-	ReloadProviders
-	ReloadProxy
 	ReloadFull
 )
 
@@ -173,18 +130,7 @@ func ConfigChanged(old, new_ *config.Config) ReloadScope {
 		return ReloadFull
 	}
 
-	indexersChanged := !reflect.DeepEqual(old.Indexers, new_.Indexers)
-	providersChanged := !reflect.DeepEqual(old.Providers, new_.Providers)
-	proxyChanged := old.ProxyHost != new_.ProxyHost ||
-		old.ProxyPort != new_.ProxyPort ||
-		old.ProxyEnabled != new_.ProxyEnabled ||
-		old.ProxyAuthUser != new_.ProxyAuthUser ||
-		old.ProxyAuthPass != new_.ProxyAuthPass
-
-	if providersChanged || indexersChanged {
-		return ReloadFull
-	}
-	if proxyChanged {
+	if !reflect.DeepEqual(old.Indexers, new_.Indexers) {
 		return ReloadFull
 	}
 	return ReloadConfigOnly
@@ -196,7 +142,7 @@ func (a *App) Reload(newCfg *config.Config) (*Components, bool, error) {
 
 	a.opts.TMDBAPIKey = strings.TrimSpace(newCfg.TMDBAPIKey)
 	a.opts.TVDBAPIKey = strings.TrimSpace(newCfg.TVDBAPIKey)
-	env.SetRuntimeHeaders(newCfg.IndexerQueryHeader, newCfg.IndexerGrabHeader, newCfg.ProviderHeader)
+	env.SetRuntimeHeaders(newCfg.IndexerQueryHeader, newCfg.IndexerGrabHeader)
 
 	old := a.components
 	scope := ConfigChanged(old.Config, newCfg)
@@ -204,7 +150,7 @@ func (a *App) Reload(newCfg *config.Config) (*Components, bool, error) {
 	switch scope {
 	case ReloadConfigOnly:
 
-		logger.Info("Reload: config-only - no NNTP/indexer restart")
+		logger.Info("Reload: config-only - no tracker restart")
 		triageSvc := triage.NewService()
 		comp := *old
 		comp.Config = newCfg
@@ -216,16 +162,7 @@ func (a *App) Reload(newCfg *config.Config) (*Components, bool, error) {
 		return &comp, false, nil
 
 	case ReloadFull:
-		logger.Info("Reload: full rebuild (indexers or providers changed)")
-		comp, err := a.buildFull(newCfg, a.opts)
-		if err != nil {
-			return nil, true, err
-		}
-		a.components = comp
-		return comp, true, nil
-
-	case ReloadProxy:
-		logger.Info("Reload: proxy config changed")
+		logger.Info("Reload: full rebuild (trackers changed)")
 		comp, err := a.buildFull(newCfg, a.opts)
 		if err != nil {
 			return nil, true, err
@@ -234,7 +171,7 @@ func (a *App) Reload(newCfg *config.Config) (*Components, bool, error) {
 		return comp, true, nil
 
 	default:
-		logger.Info("Reload: indexers changed - full rebuild")
+		logger.Info("Reload: trackers changed - full rebuild")
 		comp, err := a.buildFull(newCfg, a.opts)
 		if err != nil {
 			return nil, true, err

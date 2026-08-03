@@ -102,7 +102,6 @@ func (s *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 		s.writeSaveStatus(w, "error", "Invalid config data", nil)
 		return
 	}
-	newCfg.AvailNZBMode = config.NormalizeAvailNZBMode(newCfg.AvailNZBMode)
 
 	plan := validationPlanFromPatch(body, currentCfg, &newCfg)
 	fieldErrors := s.validateConfigWithPlan(&newCfg, plan)
@@ -116,7 +115,6 @@ func (s *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	newCfg.AdminToken = currentCfg.AdminToken
 	newCfg.AdminMustChangePassword = currentCfg.AdminMustChangePassword
 	newCfg.Streams = cloneStreamEntries(currentCfg.Streams)
-	newCfg.ApplyProviderDefaults()
 	applyStreamAutoSelections(&newCfg)
 	if newCfg.AdminUsername == "" {
 		newCfg.AdminUsername = currentCfg.GetAdminUsername()
@@ -170,16 +168,9 @@ func (s *Server) handleClearCache(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.strmServer.ClearSearchCaches()
-	blueprintsCleared := 0
-	if s.sessionMgr != nil {
-		blueprintsCleared = s.sessionMgr.ClearBlueprintCache()
-	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":  "success",
-		"message": "Search cache and blueprint cache cleared.",
-		"details": map[string]interface{}{
-			"blueprints_cleared": blueprintsCleared,
-		},
+		"message": "Search cache cleared.",
 	})
 }

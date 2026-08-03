@@ -38,8 +38,7 @@ func (s *Server) SetupRoutes(mux *http.ServeMux) {
 		if len(parts) == 2 && parts[0] != "" {
 			effectivePath = "/" + parts[1]
 		}
-		isDebugPlayRoute := strings.HasPrefix(path, "/debug/play") || strings.HasPrefix(effectivePath, "/debug/play")
-		isStremioRoute := effectivePath == "/manifest.json" || effectivePath == FailoverOrderPath || strings.HasPrefix(effectivePath, "/stream/") || strings.HasPrefix(effectivePath, "/play/") || strings.HasPrefix(effectivePath, "/next/") || strings.HasPrefix(effectivePath, "/debug/play")
+		isStremioRoute := effectivePath == "/manifest.json" || effectivePath == FailoverOrderPath || strings.HasPrefix(effectivePath, "/stream/") || strings.HasPrefix(effectivePath, "/play/") || strings.HasPrefix(effectivePath, "/next/")
 
 		if len(parts) >= 1 && parts[0] != "" {
 			token := parts[0]
@@ -58,20 +57,20 @@ func (s *Server) SetupRoutes(mux *http.ServeMux) {
 
 					r = r.WithContext(auth.ContextWithStream(r.Context(), stream))
 
-				} else if isStremioRoute && !isDebugPlayRoute {
+				} else if isStremioRoute {
 
 					logger.Warn("Unauthorized request - invalid stream token", "path", path, "remote", r.RemoteAddr)
 					http.Error(w, "Unauthorized", http.StatusUnauthorized)
 					return
 				}
 
-			} else if isStremioRoute && !isDebugPlayRoute {
+			} else if isStremioRoute {
 
 				logger.Warn("Unauthorized request - stream authentication unavailable", "path", path, "remote", r.RemoteAddr)
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
 				return
 			}
-		} else if isStremioRoute && !isDebugPlayRoute {
+		} else if isStremioRoute {
 
 			logger.Warn("Unauthorized request - Stremio route requires stream token", "path", path, "remote", r.RemoteAddr)
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
@@ -88,8 +87,6 @@ func (s *Server) SetupRoutes(mux *http.ServeMux) {
 			s.handleNextRelease(w, r, authenticatedStream)
 		} else if path == FailoverOrderPath {
 			s.handleFailoverOrder(w, r, authenticatedStream)
-		} else if strings.HasPrefix(path, "/debug/play") {
-			s.handleDebugPlay(w, r, authenticatedStream)
 		} else if path == "/health" {
 			s.handleHealth(w, r)
 		} else if strings.HasPrefix(path, "/api/") {
@@ -379,11 +376,6 @@ func buildStreamsFromPlaylist(list *playlistResult, key StreamSlotKey, streamNam
 			} else {
 				relTitle = fmt.Sprintf("Release %d", i+1)
 			}
-			isAvail := list.CachedAvailable != nil && cand.Release != nil && cand.Release.DetailsURL != "" && list.CachedAvailable[cand.Release.DetailsURL]
-			sName := nameLeft
-			if isAvail {
-				sName = "⚡ " + nameLeft
-			}
 			contentTitle := ""
 			if list.Params != nil {
 				contentTitle = list.Params.ContentTitle
@@ -399,10 +391,10 @@ func buildStreamsFromPlaylist(list *playlistResult, key StreamSlotKey, streamNam
 			if bingeLabel == "" {
 				bingeLabel = nameLeft
 			}
-			hints := streamBehaviorHints(nameLeft, key.StreamID, cand.Release, &isAvail, bingeLabel)
+			hints := streamBehaviorHints(nameLeft, key.StreamID, cand.Release, nil, bingeLabel)
 			streams = append(streams, Stream{
 				FailoverID:    failoverId,
-				Name:          sName,
+				Name:          nameLeft,
 				URL:           streamURL,
 				Description:   desc,
 				BehaviorHints: hints,
@@ -410,23 +402,14 @@ func buildStreamsFromPlaylist(list *playlistResult, key StreamSlotKey, streamNam
 		}
 	} else {
 		branding := "SeedStream"
-		if list.FirstIsAvailGood {
-			branding = "SeedStream [availNZB]"
-		}
 		var line2 string
 		var firstRel *release.Release
 		var firstMeta *parser.ParsedRelease
 		if len(list.Candidates) > 0 {
 			if list.Candidates[0].Release != nil {
 				firstRel = list.Candidates[0].Release
-				if list.FirstIsAvailGood && firstRel.Title != "" {
-					line2 = firstRel.Title
-				} else {
-					line2 = fmt.Sprintf("%d possible releases", len(list.Candidates))
-				}
-			} else {
-				line2 = fmt.Sprintf("%d possible releases", len(list.Candidates))
 			}
+			line2 = fmt.Sprintf("%d possible releases", len(list.Candidates))
 			firstMeta = list.Candidates[0].Metadata
 		}
 		description := branding
@@ -438,13 +421,12 @@ func buildStreamsFromPlaylist(list *playlistResult, key StreamSlotKey, streamNam
 			playPath = list.SlotPaths[0]
 		}
 		streamURL := baseURL + "/play/" + playPath
-		firstAvail := list.FirstIsAvailGood
 		failoverId := "seedstream-" + playPath
 		bingeLabel := bingeGroupLabelFromMeta(firstMeta)
 		if bingeLabel == "" {
 			bingeLabel = nameLeft
 		}
-		hints := streamBehaviorHints(nameLeft, key.StreamID, firstRel, &firstAvail, bingeLabel)
+		hints := streamBehaviorHints(nameLeft, key.StreamID, firstRel, nil, bingeLabel)
 		streams = append(streams, Stream{
 			FailoverID:    failoverId,
 			Name:          nameLeft,

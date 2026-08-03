@@ -16,7 +16,6 @@ func cloneStreamEntries(streams map[string]*config.StreamEntry) map[string]*conf
 			continue
 		}
 		copied := *stream
-		copied.ProviderSelections = append([]string(nil), stream.ProviderSelections...)
 		copied.IndexerSelections = append([]string(nil), stream.IndexerSelections...)
 		copied.MovieSearchQueries = append([]string(nil), stream.MovieSearchQueries...)
 		copied.SeriesSearchQueries = append([]string(nil), stream.SeriesSearchQueries...)
@@ -44,14 +43,10 @@ func applyStreamAutoSelections(nextCfg *config.Config) {
 	if nextCfg.Streams == nil {
 		return
 	}
-	enabledProviders := enabledProviderNames(nextCfg.Providers)
 	enabledIndexers := enabledIndexerNames(nextCfg.Indexers)
 	for _, stream := range nextCfg.Streams {
 		if stream == nil {
 			continue
-		}
-		if stream.AutoAddProviders != nil && *stream.AutoAddProviders {
-			stream.ProviderSelections = syncOrderedSelections(stream.ProviderSelections, enabledProviders)
 		}
 		if stream.AutoAddIndexers != nil && *stream.AutoAddIndexers {
 			stream.IndexerSelections = syncOrderedSelections(stream.IndexerSelections, enabledIndexers)
@@ -62,21 +57,16 @@ func applyStreamAutoSelections(nextCfg *config.Config) {
 	}
 }
 
-func applyStreamNameRenames(streams map[string]*config.StreamEntry, providerRenames, indexerRenames map[string]string) {
-	if len(providerRenames) == 0 && len(indexerRenames) == 0 {
+func applyStreamNameRenames(streams map[string]*config.StreamEntry, indexerRenames map[string]string) {
+	if len(indexerRenames) == 0 {
 		return
 	}
 	for _, stream := range streams {
 		if stream == nil {
 			continue
 		}
-		if len(providerRenames) > 0 {
-			stream.ProviderSelections = renameSelectionList(stream.ProviderSelections, providerRenames)
-		}
-		if len(indexerRenames) > 0 {
-			stream.IndexerSelections = renameSelectionList(stream.IndexerSelections, indexerRenames)
-			stream.IndexerOverrides = renameIndexerOverrides(stream.IndexerOverrides, indexerRenames)
-		}
+		stream.IndexerSelections = renameSelectionList(stream.IndexerSelections, indexerRenames)
+		stream.IndexerOverrides = renameIndexerOverrides(stream.IndexerOverrides, indexerRenames)
 	}
 }
 
@@ -204,21 +194,6 @@ func filterIndexerOverrides(
 		filtered[trimmed] = override
 	}
 	return filtered
-}
-
-func enabledProviderNames(providers []config.Provider) []string {
-	enabled := make([]string, 0, len(providers))
-	for _, provider := range providers {
-		if provider.Enabled != nil && !*provider.Enabled {
-			continue
-		}
-		name := strings.TrimSpace(provider.Name)
-		if name == "" {
-			continue
-		}
-		enabled = append(enabled, name)
-	}
-	return enabled
 }
 
 func enabledIndexerNames(indexers []config.IndexerConfig) []string {

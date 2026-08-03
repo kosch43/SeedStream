@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { apiFetch, getApiUrl, notifyUnauthorized } from '../api'
 
-const MAX_HISTORY = 60
 const MAX_LOGS = 200
 
 export function useAdminRuntime({
@@ -20,8 +19,6 @@ export function useAdminRuntime({
   const [isRestarting, setIsRestarting] = useState(false)
   const isRestartingRef = useRef(false)
   const [error, setError] = useState(null)
-  const [history, setHistory] = useState([])
-  const [connHistory, setConnHistory] = useState([])
   const [wsStatus, setWsStatus] = useState('connecting')
   const [ws, setWs] = useState(null)
   const [version, setVersion] = useState(null)
@@ -30,7 +27,6 @@ export function useAdminRuntime({
   const reconnectTimeoutRef = useRef(null)
   const [logs, setLogs] = useState([])
   const [indexerCaps, setIndexerCaps] = useState({})
-  const [nzbAttemptsRefreshTrigger, setNzbAttemptsRefreshTrigger] = useState(0)
 
   const resetRuntime = useCallback(() => {
     setStats(null)
@@ -40,14 +36,11 @@ export function useAdminRuntime({
     setIsRestarting(false)
     isRestartingRef.current = false
     setError(null)
-    setHistory([])
-    setConnHistory([])
     setWsStatus('connecting')
     setWs(null)
     window.ws = null
     setLogs([])
     setIndexerCaps({})
-    setNzbAttemptsRefreshTrigger(0)
   }, [])
 
   const clearSaveStatus = useCallback(() => {
@@ -123,11 +116,7 @@ export function useAdminRuntime({
         }
         switch (msg.type) {
           case 'stats': {
-            const data = msg.payload
-            setStats(data)
-            const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-            setHistory((prev) => [...prev, { time: timestamp, speed: data.total_speed_mbps }].slice(-MAX_HISTORY))
-            setConnHistory((prev) => [...prev, { time: timestamp, conns: data.active_connections }].slice(-MAX_HISTORY))
+            setStats(msg.payload)
             break
           }
           case 'log_entry':
@@ -135,9 +124,6 @@ export function useAdminRuntime({
             break
           case 'log_history':
             setLogs(msg.payload.slice(-MAX_LOGS))
-            break
-          case 'nzb_attempts_updated':
-            setNzbAttemptsRefreshTrigger((value) => value + 1)
             break
           case 'auth_info': {
             if (!isActiveSocket(socket)) return
@@ -295,14 +281,11 @@ export function useAdminRuntime({
     isSaving,
     isRestarting,
     error,
-    history,
-    connHistory,
     wsStatus,
     ws,
     version,
     logs,
     indexerCaps,
-    nzbAttemptsRefreshTrigger,
     sendCommand,
   }
 }

@@ -50,7 +50,7 @@ func NewManifest(version string) *Manifest {
 		ID:          "community.seedstream",
 		Version:     manifestVersion(version),
 		Name:        "SeedStream",
-		Description: "Stream content directly from Usenet",
+		Description: "Stream torrents through your own seedbox",
 		Resources:   []string{"stream"},
 		Types:       []string{"movie", "series"},
 		Catalogs:    []Catalog{},

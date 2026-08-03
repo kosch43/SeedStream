@@ -1,9 +1,13 @@
 package stremio
 
 import (
+	"context"
+	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 
 	"seedstream/pkg/auth"
 	"seedstream/pkg/core/logger"
@@ -12,23 +16,26 @@ import (
 	"seedstream/pkg/torrent"
 )
 
-func (s *Server) handleTorrentPlay(w http.ResponseWriter, r *http.Request, sess *session.Session, _ *auth.Stream) {
+// serveTorrent prepares the session's torrent release in qBittorrent and
+// serves the video file with HTTP range support. No response bytes are
+// written until preparation succeeds, so the caller can fail over to the
+// next slot when an error is returned.
+func (s *Server) serveTorrent(w http.ResponseWriter, r *http.Request, sess *session.Session, _ *auth.Stream) error {
 	if s.torrentManager == nil || !s.torrentManager.Enabled() {
 		logger.Warn("Torrent play requested but no torrent client configured", "session", sess.ID)
-		http.Error(w, "No torrent client configured. Add a qBittorrent client in Settings → Torrent Clients.", http.StatusServiceUnavailable)
-		return
+		return fmt.Errorf("no torrent client configured — add a qBittorrent client in Settings → Torrent Clients")
+	}
+	if sess.Release == nil || !sess.Release.IsTorrent() {
+		return fmt.Errorf("session %s has no torrent release", sess.ID)
 	}
 
 	// Derive info-hash and content IDs early so we can run the Cerberus
 	// block-check before the expensive PrepareForPlayback call.
-	var infoHash string
-	var cerberusIDs cerberus.ContentIDs
-	if sess.Release != nil {
-		infoHash = strings.TrimSpace(sess.Release.InfoHash)
-		if infoHash == "" && sess.Release.Magnet != "" {
-			infoHash = torrent.InfoHashFromMagnet(sess.Release.Magnet)
-		}
+	infoHash := strings.TrimSpace(sess.Release.InfoHash)
+	if infoHash == "" && sess.Release.Magnet != "" {
+		infoHash = torrent.InfoHashFromMagnet(sess.Release.Magnet)
 	}
+	var cerberusIDs cerberus.ContentIDs
 	if sess.ContentIDs != nil {
 		cerberusIDs = cerberus.ContentIDs{
 			ImdbID:  sess.ContentIDs.ImdbID,
@@ -40,11 +47,10 @@ func (s *Server) handleTorrentPlay(w http.ResponseWriter, r *http.Request, sess 
 	}
 
 	// Reject torrents already on the Cerberus blocklist before we spend time
-	// adding them to qBittorrent. Stremio will fall through to the next stream.
+	// adding them to qBittorrent; the caller falls over to the next slot.
 	if infoHash != "" && s.cerberusClient != nil && s.cerberusClient.IsBlocked(infoHash) {
 		logger.Info("Cerberus: blocked torrent rejected at playback", "hash", infoHash, "session", sess.ID)
-		http.Error(w, "Torrent is in the Cerberus health blocklist. Stremio will try the next result.", http.StatusServiceUnavailable)
-		return
+		return fmt.Errorf("torrent is in the Cerberus health blocklist")
 	}
 
 	season, episode := 0, 0
@@ -53,16 +59,20 @@ func (s *Server) handleTorrentPlay(w http.ResponseWriter, r *http.Request, sess 
 		episode = sess.ContentIDs.Episode
 	}
 
-	res, err := s.torrentManager.PrepareForPlayback(r.Context(), sess.Release, season, episode, 0, 0, nil)
+	// Cancel preparation when either the request ends or the session is
+	// closed (e.g. user closed it from the dashboard).
+	prepCtx, prepCancel := mergeSessionContext(r, sess)
+	defer prepCancel()
+
+	res, err := s.torrentManager.PrepareForPlayback(prepCtx, sess.Release, season, episode, 0, 0, nil)
 	if err != nil {
 		logger.Warn("Torrent prepare failed", "session", sess.ID, "title", sess.Release.Title, "err", err)
-		http.Error(w, "Torrent still preparing: "+err.Error(), http.StatusGatewayTimeout)
-		return
+		return fmt.Errorf("torrent still preparing: %w", err)
 	}
 
 	// Register the torrent with Cerberus so the watchdog can correlate
 	// stalled hashes back to their content IDs for re-search.
-	if s.cerberusClient != nil && infoHash != "" && sess.Release != nil && sess.ContentIDs != nil {
+	if s.cerberusClient != nil && infoHash != "" && sess.ContentIDs != nil {
 		magnet := sess.Release.Magnet
 		if magnet == "" {
 			magnet = sess.Release.Link
@@ -75,30 +85,60 @@ func (s *Server) handleTorrentPlay(w http.ResponseWriter, r *http.Request, sess 
 	f, err := s.torrentManager.OpenForPlayback(res)
 	if err != nil {
 		logger.Error("Torrent file not readable", "session", sess.ID, "path", res.AbsPath, "err", err)
-		http.Error(w, "Torrent file not readable by SeedStream. Check that the qBittorrent save path is mounted and readable.", http.StatusInternalServerError)
-		return
+		return fmt.Errorf("torrent file not readable by SeedStream (check that the qBittorrent save path is mounted and readable): %w", err)
 	}
 	defer f.Close()
 
 	stat, err := os.Stat(res.AbsPath)
 	if err != nil {
-		http.Error(w, "stat failed", http.StatusInternalServerError)
-		return
+		return fmt.Errorf("stat torrent file: %w", err)
 	}
 
+	// Preparation succeeded — from here on we serve and never return an error,
+	// since response bytes may already be on the wire.
 	sess.SetSelectedPlaybackFile(res.Name)
+	s.sessionManager.MarkPlaybackValidated(sess.ID)
+
+	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if clientIP == "" {
+		clientIP = r.RemoteAddr
+	}
+	s.sessionManager.StartPlayback(sess.ID, clientIP)
+	var endOnce sync.Once
+	defer endOnce.Do(func() { s.sessionManager.EndPlayback(sess.ID, clientIP) })
+
 	logger.Info("Serving torrent stream", "session", sess.ID, "file", res.Name, "size", stat.Size(), "progress", res.Progress)
 
-	// Wrap the ResponseWriter so we can count bytes actually transferred.
-	// A multi-megabyte successful read is strong evidence the torrent is healthy;
-	// report it to Cerberus so a backend can build positive reputation signals.
+	// Count bytes actually transferred. A multi-megabyte successful read is
+	// strong evidence the torrent is healthy: report it to Cerberus and mark
+	// the slot committed for the /next cursor.
 	crw := &countingResponseWriter{ResponseWriter: w}
 	http.ServeContent(crw, r, res.Name, stat.ModTime(), f)
 
+	sess.AddBytesRead(crw.written)
 	const minHealthyBytes = 512 * 1024
-	if s.cerberusClient != nil && infoHash != "" && crw.written >= minHealthyBytes {
-		s.cerberusClient.ReportHealthy(infoHash, cerberusIDs)
+	if crw.written >= minHealthyBytes {
+		s.markSessionServedSuccessfully(sess.ID, sess)
+		if s.cerberusClient != nil && infoHash != "" {
+			s.cerberusClient.ReportHealthy(infoHash, cerberusIDs)
+		}
 	}
+	return nil
+}
+
+// mergeSessionContext returns a context that is canceled when either the HTTP
+// request ends or the session is closed from the dashboard.
+func mergeSessionContext(r *http.Request, sess *session.Session) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(r.Context())
+	go func(done <-chan struct{}, sessDone <-chan struct{}) {
+		select {
+		case <-done:
+		case <-sessDone:
+			logger.Debug("playback aborted: session closed", "session", sess.ID)
+			cancel()
+		}
+	}(ctx.Done(), sess.Done())
+	return ctx, cancel
 }
 
 // countingResponseWriter wraps http.ResponseWriter to track bytes written.

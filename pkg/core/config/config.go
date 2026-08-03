@@ -10,7 +10,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -23,7 +22,6 @@ const (
 	defaultAdminPasswordHash               = "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918"
 	DefaultInternalIndexerTimeoutSeconds   = 5
 	DefaultAggregatorIndexerTimeoutSeconds = 10
-	DefaultEasynewsIndexerTimeoutSeconds   = 15
 	DefaultPlaybackStartupTimeoutSeconds   = 5
 	MaxPlaybackStartupTimeoutSeconds       = 60
 	DefaultSessionTTLMinutes               = 30
@@ -43,18 +41,6 @@ const (
 	legacySeriesSearchScopeSeasonParam     = "season_param"
 	legacySeriesSearchScopeSeasonQuery     = "season_query"
 )
-
-type Provider struct {
-	Name        string `json:"name"`
-	Host        string `json:"host"`
-	Port        int    `json:"port"`
-	Username    string `json:"username"`
-	Password    string `json:"password"`
-	Connections int    `json:"connections"`
-	UseSSL      bool   `json:"use_ssl"`
-	Priority    *int   `json:"priority,omitempty"`
-	Enabled     *bool  `json:"enabled,omitempty"`
-}
 
 func ptrBool(b bool) *bool { return &b }
 
@@ -223,9 +209,6 @@ func (ic IndexerConfig) EffectiveTimeoutSeconds() int {
 	if ic.TimeoutSeconds > 0 {
 		return ic.TimeoutSeconds
 	}
-	if strings.EqualFold(strings.TrimSpace(ic.Type), "easynews") {
-		return DefaultEasynewsIndexerTimeoutSeconds
-	}
 	if IsAggregatorIndexerType(ic.Type) {
 		return DefaultAggregatorIndexerTimeoutSeconds
 	}
@@ -287,27 +270,6 @@ func (c *Config) EffectiveSessionPostPlaybackTTLSeconds() int {
 		return normalizeSessionPostPlaybackTTLMinutes(c.SessionPostPlaybackTTLMinutes) * 60
 	}
 	return DefaultSessionPostPlaybackTTLMinutes * 60
-}
-
-func (c *Config) EffectiveAvailNZBFilterReportedBad() bool {
-	if c != nil && NormalizeAvailNZBMode(c.AvailNZBMode) == "off" {
-		return false
-	}
-	if c != nil && c.AvailNZBFilterReportedBad != nil {
-		return *c.AvailNZBFilterReportedBad
-	}
-	return false
-}
-
-func NormalizeAvailNZBMode(mode string) string {
-	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "", "full", "status_only", "on":
-		return "on"
-	case "disabled", "off":
-		return "off"
-	default:
-		return "on"
-	}
 }
 
 func NormalizeSearchTitleLanguage(language string) string {
@@ -410,35 +372,22 @@ type Config struct {
 
 	Indexers []IndexerConfig `json:"indexers"`
 
-	AddonPort          int    `json:"addon_port"`
-	AddonBaseURL       string `json:"addon_base_url"`
-	LogLevel           string `json:"log_level"`
-	VerboseNNTPLogging bool   `json:"verbose_nntp_logging,omitempty"`
+	AddonPort    int    `json:"addon_port"`
+	AddonBaseURL string `json:"addon_base_url"`
+	LogLevel     string `json:"log_level"`
 
 	AdminUsername           string `json:"admin_username"`
 	AdminPasswordHash       string `json:"admin_password_hash"`
 	AdminMustChangePassword bool   `json:"admin_must_change_password"`
 	AdminToken              string `json:"admin_token"`
 
-	Providers []Provider `json:"providers"`
-
 	// TorrentClients are download clients (qBittorrent) that receive torrent
 	// picks and keep them seeding on a seedbox. One entry per seedbox/member.
 	TorrentClients []TorrentClientConfig `json:"torrent_clients,omitempty"`
 
-	ProxyPort     int    `json:"proxy_port"`
-	ProxyHost     string `json:"proxy_host"`
-	ProxyEnabled  bool   `json:"proxy_enabled"`
-	ProxyAuthUser string `json:"proxy_auth_user"`
-	ProxyAuthPass string `json:"proxy_auth_pass"`
-
-	AvailNZBURL    string `json:"-"`
-	AvailNZBAPIKey string `json:"-"`
-
 	TMDBAPIKey         string `json:"tmdb_api_key,omitempty"`
 	IndexerQueryHeader string `json:"indexer_query_header,omitempty"`
 	IndexerGrabHeader  string `json:"indexer_grab_header,omitempty"`
-	ProviderHeader     string `json:"provider_header,omitempty"`
 	IndexerProxyURL    string `json:"indexer_proxy_url,omitempty"`
 
 	TVDBAPIKey string `json:"tvdb_api_key,omitempty"`
@@ -456,9 +405,6 @@ type Config struct {
 	// KeepLogFiles is how many log files to keep (current seedstream.log + rotated seedstream-*.log). Default 9.
 	KeepLogFiles int `json:"keep_log_files,omitempty"`
 
-	// NZBHistoryRetentionDays controls how many days NZB attempt history is kept. Default 90.
-	NZBHistoryRetentionDays int `json:"nzb_history_retention_days,omitempty"`
-
 	// PlaybackStartupTimeoutSeconds bounds probe/open work before the first playable response is ready. Default 5.
 	PlaybackStartupTimeoutSeconds int `json:"playback_startup_timeout_seconds,omitempty"`
 	// SessionTTLMinutes controls how long a deferred/inactive stream session is kept in memory. Default 30.
@@ -468,15 +414,6 @@ type Config struct {
 	// FailoverFastMode favors quick failover over exhaustive diagnosis. When enabled,
 	// playback skips expensive archive checks that can delay startup.
 	FailoverFastMode bool `json:"failover_fast_mode"`
-
-	// AvailNZBMode controls how the AvailNZB integration behaves.
-	// "on"  - fetch availability status and report playback results.
-	// "off" - disable AvailNZB entirely (no GET, no POST).
-	AvailNZBMode string `json:"availnzb_mode,omitempty"`
-
-	// AvailNZBFilterReportedBad controls whether releases reported as unavailable
-	// by AvailNZB are filtered out of playlist candidates.
-	AvailNZBFilterReportedBad *bool `json:"availnzb_filter_reported_bad,omitempty"`
 
 	// CerberusBaseURL, when set, points the torrent-health watchdog at a central
 	// Cerberus server for community-wide failure reporting and blocklist data.
@@ -496,13 +433,10 @@ type StreamEntry struct {
 	Order               int                            `json:"order,omitempty"`
 	FilterSortingMode   string                         `json:"filter_sorting_mode,omitempty"`
 	IndexerMode         string                         `json:"indexer_mode,omitempty"`
-	UseAvailNZB         *bool                          `json:"use_availnzb,omitempty"`
 	CombineResults      *bool                          `json:"combine_results,omitempty"`
 	EnableFailover      *bool                          `json:"enable_failover,omitempty"`
 	ResultsMode         string                         `json:"results_mode,omitempty"`
-	AutoAddProviders    *bool                          `json:"auto_add_providers,omitempty"`
 	AutoAddIndexers     *bool                          `json:"auto_add_indexers,omitempty"`
-	ProviderSelections  []string                       `json:"provider_selections,omitempty"`
 	IndexerSelections   []string                       `json:"indexer_selections,omitempty"`
 	IndexerOverrides    map[string]IndexerSearchConfig `json:"indexer_overrides,omitempty"`
 	MovieSearchQueries  []string                       `json:"movie_search_queries,omitempty"`
@@ -699,14 +633,9 @@ func Load() (*Config, error) {
 		AddonPort:                     7000,
 		AddonBaseURL:                  "http://localhost:7000",
 		LogLevel:                      "INFO",
-		VerboseNNTPLogging:            false,
 		AdminUsername:                 "admin",
-		ProxyPort:                     119,
-		ProxyHost:                     "0.0.0.0",
-		ProxyEnabled:                  true,
 		MemoryLimitMB:                 512,
 		KeepLogFiles:                  9,
-		NZBHistoryRetentionDays:       90,
 		PlaybackStartupTimeoutSeconds: DefaultPlaybackStartupTimeoutSeconds,
 		SessionTTLMinutes:             DefaultSessionTTLMinutes,
 		SessionPostPlaybackTTLMinutes: DefaultSessionPostPlaybackTTLMinutes,
@@ -742,10 +671,6 @@ func Load() (*Config, error) {
 	if cfg.KeepLogFiles < 1 {
 		cfg.KeepLogFiles = 9
 	}
-	if cfg.NZBHistoryRetentionDays < 1 {
-		cfg.NZBHistoryRetentionDays = 90
-		needSave = true
-	}
 	if normalized := normalizePlaybackStartupTimeoutSeconds(cfg.PlaybackStartupTimeoutSeconds); normalized != cfg.PlaybackStartupTimeoutSeconds {
 		cfg.PlaybackStartupTimeoutSeconds = normalized
 		needSave = true
@@ -758,14 +683,6 @@ func Load() (*Config, error) {
 		cfg.SessionPostPlaybackTTLMinutes = normalized
 		needSave = true
 	}
-	if normalizedMode := NormalizeAvailNZBMode(cfg.AvailNZBMode); normalizedMode != cfg.AvailNZBMode {
-		cfg.AvailNZBMode = normalizedMode
-		needSave = true
-	}
-	if cfg.AvailNZBFilterReportedBad == nil {
-		cfg.AvailNZBFilterReportedBad = ptrBool(false)
-		needSave = true
-	}
 
 	overrides, keys := env.ReadConfigOverrides()
 	ApplyEnvOverrides(cfg, overrides, keys)
@@ -774,9 +691,6 @@ func Load() (*Config, error) {
 		needSave = true
 	}
 
-	if cfg.ApplyProviderDefaults() {
-		needSave = true
-	}
 	if cfg.backfillLegacySearchQuerySettings() {
 		needSave = true
 	}
@@ -805,10 +719,6 @@ func Load() (*Config, error) {
 		logger.Warn("Failed to save config on startup", "err", err)
 	} else {
 		logger.Info("Saved merged configuration", "path", configPath)
-	}
-
-	if len(cfg.Providers) == 0 {
-		logger.Warn("No NNTP providers configured. Add some via the web UI")
 	}
 
 	return cfg, nil
@@ -980,14 +890,11 @@ func (c *Config) ensureDefaultMigratedStream() bool {
 		Order:               1,
 		FilterSortingMode:   "aiostreams",
 		IndexerMode:         "combine",
-		UseAvailNZB:         ptrBool(true),
 		CombineResults:      ptrBool(true),
 		EnableFailover:      ptrBool(true),
 		ResultsMode:         "display_all",
-		AutoAddProviders:    ptrBool(true),
 		AutoAddIndexers:     ptrBool(true),
 		IndexerOverrides:    make(map[string]IndexerSearchConfig),
-		ProviderSelections:  allProviderNames(c.Providers),
 		IndexerSelections:   allIndexerNames(c.Indexers),
 		MovieSearchQueries:  allSearchQueryNames(c.MovieSearchQueries),
 		SeriesSearchQueries: allSearchQueryNames(c.SeriesSearchQueries),
@@ -1002,17 +909,6 @@ func generateConfigToken() (string, error) {
 	}
 	hash := sha256.Sum256(bytes)
 	return hex.EncodeToString(hash[:]), nil
-}
-
-func allProviderNames(providers []Provider) []string {
-	names := make([]string, 0, len(providers))
-	for _, provider := range providers {
-		name := strings.TrimSpace(provider.Name)
-		if name != "" {
-			names = append(names, name)
-		}
-	}
-	return names
 }
 
 func allIndexerNames(indexers []IndexerConfig) []string {
@@ -1060,71 +956,6 @@ func (c *Config) LoadFile(path string) error {
 	return nil
 }
 
-func (c *Config) ApplyProviderDefaults() bool {
-	changed := false
-	usedNames := make(map[string]bool, len(c.Providers))
-	for i := range c.Providers {
-		name := strings.TrimSpace(c.Providers[i].Name)
-		if name == "" {
-			continue
-		}
-		usedNames[strings.ToLower(name)] = true
-	}
-	for i := range c.Providers {
-		p := &c.Providers[i]
-
-		if strings.TrimSpace(p.Name) == "" {
-			p.Name = uniqueProviderNameFromHost(p.Host, usedNames)
-			changed = true
-		}
-		if trimmedName := strings.TrimSpace(p.Name); trimmedName != "" {
-			usedNames[strings.ToLower(trimmedName)] = true
-		}
-
-		if p.Priority == nil {
-			priority := i + 1
-			p.Priority = &priority
-			enabled := true
-			p.Enabled = &enabled
-			changed = true
-		} else if p.Enabled == nil {
-
-			enabled := true
-			p.Enabled = &enabled
-			changed = true
-		}
-
-	}
-	return changed
-}
-
-func uniqueProviderNameFromHost(host string, usedNames map[string]bool) string {
-	base := providerNameFromHost(host)
-	name := base
-	for suffix := 2; usedNames[strings.ToLower(name)]; suffix++ {
-		name = base + "-" + strconv.Itoa(suffix)
-	}
-	return name
-}
-
-func providerNameFromHost(host string) string {
-	parts := strings.Split(strings.ToLower(strings.TrimSpace(host)), ".")
-	filtered := make([]string, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part != "" {
-			filtered = append(filtered, part)
-		}
-	}
-	if len(filtered) >= 2 {
-		return filtered[len(filtered)-2]
-	}
-	if len(filtered) == 1 {
-		return filtered[0]
-	}
-	return "provider"
-}
-
 func (c *Config) MigrateLegacyIndexers() bool {
 	changed := false
 	for i := range c.Indexers {
@@ -1132,12 +963,6 @@ func (c *Config) MigrateLegacyIndexers() bool {
 			enabled := true
 			c.Indexers[i].Enabled = &enabled
 			changed = true
-		}
-		if strings.EqualFold(strings.TrimSpace(c.Indexers[i].Type), "easynews") {
-			if c.Indexers[i].TimeoutSeconds <= 0 {
-				c.Indexers[i].TimeoutSeconds = DefaultEasynewsIndexerTimeoutSeconds
-				changed = true
-			}
 		}
 	}
 	return changed
@@ -1189,9 +1014,6 @@ func ApplyEnvOverrides(cfg *Config, o env.ConfigOverrides, keys []string) {
 	if keySet(keys, env.KeyKeepLogFiles) {
 		cfg.KeepLogFiles = o.KeepLogFiles
 	}
-	if keySet(keys, env.KeyAvailNZBAPIKey) {
-		cfg.AvailNZBAPIKey = o.AvailNZBAPIKey
-	}
 	if keySet(keys, env.KeyTMDBAPIKey) {
 		cfg.TMDBAPIKey = o.TMDBAPIKey
 	}
@@ -1201,56 +1023,14 @@ func ApplyEnvOverrides(cfg *Config, o env.ConfigOverrides, keys []string) {
 	if keySet(keys, env.KeyIndexerGrabHeader) {
 		cfg.IndexerGrabHeader = o.IndexerGrabHeader
 	}
-	if keySet(keys, env.KeyProviderHeader) {
-		cfg.ProviderHeader = o.ProviderHeader
-	}
 	if keySet(keys, env.KeyTVDBAPIKey) {
 		cfg.TVDBAPIKey = o.TVDBAPIKey
-	}
-	if keySet(keys, env.KeyProxyPort) {
-		cfg.ProxyPort = o.ProxyPort
-	}
-	if keySet(keys, env.KeyProxyHost) {
-		cfg.ProxyHost = o.ProxyHost
-	}
-	if keySet(keys, env.KeyProxyEnabled) {
-		cfg.ProxyEnabled = o.ProxyEnabled
-	}
-	if keySet(keys, env.KeyProxyAuthUser) {
-		cfg.ProxyAuthUser = o.ProxyAuthUser
-	}
-	if keySet(keys, env.KeyProxyAuthPass) {
-		cfg.ProxyAuthPass = o.ProxyAuthPass
 	}
 	if keySet(keys, env.KeyAdminUsername) {
 		cfg.AdminUsername = o.AdminUsername
 	}
 	if keySet(keys, env.KeyAdminMustChangePwd) {
 		cfg.AdminMustChangePassword = o.AdminMustChangePwd
-	}
-	if keySet(keys, env.KeyProviders) {
-		cfg.Providers = make([]Provider, len(o.Providers))
-		for i, p := range o.Providers {
-			var priority *int
-			var enabled *bool
-			if p.Priority != nil {
-				priority = p.Priority
-			}
-			if p.Enabled != nil {
-				enabled = p.Enabled
-			}
-			cfg.Providers[i] = Provider{
-				Name:        p.Name,
-				Host:        p.Host,
-				Port:        p.Port,
-				Username:    p.Username,
-				Password:    p.Password,
-				Connections: p.Connections,
-				UseSSL:      p.UseSSL,
-				Priority:    priority,
-				Enabled:     enabled,
-			}
-		}
 	}
 	if keySet(keys, env.KeyIndexers) {
 		cfg.Indexers = make([]IndexerConfig, len(o.Indexers))
@@ -1263,7 +1043,7 @@ func ApplyEnvOverrides(cfg *Config, o env.ConfigOverrides, keys []string) {
 				Name:    idx.Name,
 				URL:     idx.URL,
 				APIKey:  idx.APIKey,
-				Type:    "newznab",
+				Type:    "torznab",
 				Enabled: &enabled,
 			}
 		}
@@ -1278,22 +1058,11 @@ func (c *Config) RedactForAPI() Config {
 	out := *c
 	out.AdminPasswordHash = ""
 	out.AdminToken = ""
-	out.ProxyAuthUser = ""
-	out.ProxyAuthPass = ""
 	out.IndexerQueryHeader = ""
 	out.IndexerGrabHeader = ""
-	out.ProviderHeader = ""
 	out.IndexerProxyURL = RedactProxyURLForAPI(c.IndexerProxyURL)
-	out.AvailNZBAPIKey = ""
 	out.TMDBAPIKey = ""
 	out.TVDBAPIKey = ""
-	out.Providers = make([]Provider, len(c.Providers))
-	for i, provider := range c.Providers {
-		redactedProvider := provider
-		redactedProvider.Username = ""
-		redactedProvider.Password = ""
-		out.Providers[i] = redactedProvider
-	}
 	out.Indexers = make([]IndexerConfig, len(c.Indexers))
 	for i, indexer := range c.Indexers {
 		redactedIndexer := indexer
@@ -1328,57 +1097,18 @@ func CopyEnvOverridesFrom(src, dst *Config) {
 			dst.LogLevel = src.LogLevel
 		case env.KeyKeepLogFiles:
 			dst.KeepLogFiles = src.KeepLogFiles
-		case env.KeyAvailNZBAPIKey:
-			dst.AvailNZBAPIKey = src.AvailNZBAPIKey
 		case env.KeyTMDBAPIKey:
 			dst.TMDBAPIKey = src.TMDBAPIKey
 		case env.KeyIndexerQueryHeader:
 			dst.IndexerQueryHeader = src.IndexerQueryHeader
 		case env.KeyIndexerGrabHeader:
 			dst.IndexerGrabHeader = src.IndexerGrabHeader
-		case env.KeyProviderHeader:
-			dst.ProviderHeader = src.ProviderHeader
 		case env.KeyTVDBAPIKey:
 			dst.TVDBAPIKey = src.TVDBAPIKey
-		case env.KeyProxyPort:
-			dst.ProxyPort = src.ProxyPort
-		case env.KeyProxyHost:
-			dst.ProxyHost = src.ProxyHost
-		case env.KeyProxyEnabled:
-			dst.ProxyEnabled = src.ProxyEnabled
-		case env.KeyProxyAuthUser:
-			dst.ProxyAuthUser = src.ProxyAuthUser
-		case env.KeyProxyAuthPass:
-			dst.ProxyAuthPass = src.ProxyAuthPass
 		case env.KeyAdminUsername:
 			dst.AdminUsername = src.AdminUsername
 		case env.KeyAdminMustChangePwd:
 			dst.AdminMustChangePassword = src.AdminMustChangePassword
-		case env.KeyProviders:
-			dst.Providers = make([]Provider, len(src.Providers))
-			for i, p := range src.Providers {
-				var priority *int
-				var enabled *bool
-				if p.Priority != nil {
-					priorityVal := *p.Priority
-					priority = &priorityVal
-				}
-				if p.Enabled != nil {
-					enabledVal := *p.Enabled
-					enabled = &enabledVal
-				}
-				dst.Providers[i] = Provider{
-					Name:        p.Name,
-					Host:        p.Host,
-					Port:        p.Port,
-					Username:    p.Username,
-					Password:    p.Password,
-					Connections: p.Connections,
-					UseSSL:      p.UseSSL,
-					Priority:    priority,
-					Enabled:     enabled,
-				}
-			}
 		case env.KeyIndexers:
 			dst.Indexers = make([]IndexerConfig, len(src.Indexers))
 			copy(dst.Indexers, src.Indexers)

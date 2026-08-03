@@ -1,8 +1,6 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react'
 import { useForm, useFieldArray } from 'react-hook-form'
-import { AlertTriangle, Network, SlidersHorizontal, Server, Globe, Search, Loader2, Save, HardDrive, Magnet } from "lucide-react"
-import { IndexerSettings } from "@/components/IndexerSettings"
-import { ProviderSettings } from "@/components/ProviderSettings"
+import { AlertTriangle, Network, SlidersHorizontal, Search, Loader2, Save, HardDrive, Magnet } from "lucide-react"
 import { TorrentClientSettings } from "@/components/TorrentClientSettings"
 import { TorrentTrackerSettings } from "@/components/TorrentTrackerSettings"
 import { SearchQuerySettings } from "@/components/SearchQuerySettings"
@@ -15,13 +13,10 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { useSettingsState } from './hooks/useSettingsState'
-import { normalizeAvailNZBMode } from './lib/availnzb'
 
 const TABS = [
   { id: 'network', label: 'Network', icon: Network },
-  { id: 'indexers', label: 'Indexers', icon: Server },
   { id: 'torrent_trackers', label: 'Torrent Trackers', icon: Magnet },
-  { id: 'providers', label: 'Providers', icon: Globe },
   { id: 'torrent_clients', label: 'Torrent Clients', icon: HardDrive },
   { id: 'search_query', label: 'Search', icon: Search },
   { id: 'advanced', label: 'Advanced', icon: SlidersHorizontal },
@@ -84,7 +79,6 @@ function Settings({
   saveStatus,
   clearSaveStatus,
   isSaving,
-  onRefreshAvailNZBStatus,
   indexerCaps,
   stats,
 }) {
@@ -103,8 +97,6 @@ function Settings({
 
   const form = useForm({
     defaultValues: {
-      providers: [],
-      indexers: [],
       torznab_trackers: [],
       torrent_clients: [],
       movie_search_queries: [],
@@ -114,16 +106,6 @@ function Settings({
 
   const envOverrides = initialConfig?.env_overrides ?? []
   const { control, reset, setError, clearErrors, watch, getValues } = form
-  const { fields, append, remove, replace } = useFieldArray({
-    control,
-    name: 'providers'
-  })
-  
-  const { fields: indexerFields, append: appendIndexer, remove: removeIndexer, update: updateIndexer, replace: replaceIndexers } = useFieldArray({
-    control,
-    name: 'indexers'
-  })
-
   const { fields: torznabTrackerFields, append: appendTorznabTracker, remove: removeTorznabTracker, update: updateTorznabTracker, replace: replaceTorznabTrackers } = useFieldArray({
     control,
     name: 'torznab_trackers'
@@ -150,44 +132,18 @@ function Settings({
       const formattedData = {
         ...configForForm,
         addon_port: Number(initialConfig.addon_port),
-        proxy_port: Number(initialConfig.proxy_port),
-        proxy_enabled: initialConfig.proxy_enabled !== false,
-        availnzb_mode: normalizeAvailNZBMode(initialConfig.availnzb_mode),
-        availnzb_filter_reported_bad: initialConfig.availnzb_filter_reported_bad === true,
         failover_fast_mode: initialConfig.failover_fast_mode != null ? initialConfig.failover_fast_mode === true : true,
         tmdb_api_key: initialConfig.tmdb_api_key ?? '',
         tvdb_api_key: initialConfig.tvdb_api_key ?? '',
         indexer_query_header: initialConfig.indexer_query_header ?? '',
         indexer_grab_header: initialConfig.indexer_grab_header ?? '',
-        provider_header: initialConfig.provider_header ?? '',
         movie_categories: initialConfig.movie_categories ?? '',
         tv_categories: initialConfig.tv_categories ?? '',
         extra_search_terms: initialConfig.extra_search_terms ?? '',
         memory_limit_mb: Number(initialConfig.memory_limit_mb || 0),
         keep_log_files: Number(initialConfig.keep_log_files ?? 9) || 9,
-        nzb_history_retention_days: initialConfig.nzb_history_retention_days == null ? 90 : Number(initialConfig.nzb_history_retention_days),
         session_ttl_minutes: initialConfig.session_ttl_minutes == null ? 30 : Number(initialConfig.session_ttl_minutes),
         session_post_playback_ttl_minutes: initialConfig.session_post_playback_ttl_minutes == null ? 240 : Number(initialConfig.session_post_playback_ttl_minutes),
-        providers: initialConfig.providers?.map((p, index) => ({
-          ...p,
-          priority: p.priority != null ? p.priority : index + 1,
-          enabled: p.enabled != null ? p.enabled : true,
-          port: Number(p.port),
-          connections: Number(p.connections)
-        })) || [],
-        indexers: initialConfig.indexers?.filter(idx => !isTorrentIndexerType(idx.type))?.map(idx => ({
-          ...idx,
-          enabled: idx.enabled != null ? idx.enabled : true,
-          api_path: idx.api_path || '/api',
-          api_hits_day: Number(idx.api_hits_day || 0),
-          downloads_day: Number(idx.downloads_day || 0),
-          rate_limit_rps: Number(idx.rate_limit_rps || 0),
-          timeout_seconds: Number(idx.timeout_seconds || 0),
-          username: idx.username || '',
-          password: idx.password || '',
-          disable_id_search: idx.disable_id_search === true,
-          disable_string_search: idx.disable_string_search === true
-        })) || [],
         torznab_trackers: initialConfig.indexers?.filter(idx => isTorrentIndexerType(idx.type))?.map(idx => ({
           ...idx,
           type: 'torznab',
@@ -206,6 +162,7 @@ function Settings({
           password: tc.password || '',
           category: tc.category || 'seedstream',
           save_path: tc.save_path || '',
+          remote_path: tc.remote_path || '',
           enabled: tc.enabled !== false,
         })) || [],
         movie_search_queries: initialConfig.movie_search_queries?.map((query) => ({
@@ -231,8 +188,6 @@ function Settings({
         })) || []
       }
       reset({
-        providers: formattedData.providers,
-        indexers: formattedData.indexers,
         torznab_trackers: formattedData.torznab_trackers,
         torrent_clients: formattedData.torrent_clients,
         movie_search_queries: formattedData.movie_search_queries,
@@ -378,17 +333,16 @@ function Settings({
           onProceedTabChange={handleAdvancedProceedTabChange}
           onPersist={handleAdvancedPersist}
           onClearCache={handleClearCache}
-          onRefreshAvailNZBStatus={onRefreshAvailNZBStatus}
           />
         )}
 
-        {activeTab === 'indexers' && (
+        {activeTab === 'torrent_trackers' && (
           <div className="space-y-4">
             {envOverrides.includes('indexers') && (
               <div className="rounded-lg border border-border bg-muted/50 p-3">
                 <p className="text-sm text-muted-foreground flex items-center gap-2">
                   <AlertTriangle className="h-4 w-4 shrink-0" />
-                  Indexer list is overwritten by environment variables (INDEXER_1_*, etc.) on restart.
+                  Tracker list is overwritten by environment variables (INDEXER_1_*, etc.) on restart.
                 </p>
               </div>
             )}
@@ -397,7 +351,7 @@ function Settings({
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0 flex-1 max-w-[26rem] space-y-0.5">
                     <CardTitle>Default Proxy</CardTitle>
-                    <CardDescription>Global HTTP(S) proxy used by indexers when a per-indexer proxy is not set.</CardDescription>
+                    <CardDescription>Global HTTP(S) proxy used by trackers when a per-tracker proxy is not set.</CardDescription>
                   </div>
                   <TooltipProvider delayDuration={100}>
                     <Tooltip>
@@ -410,11 +364,10 @@ function Settings({
                           onClick={async () => {
                             setSavingGlobalIndexerProxy(true)
                             try {
-                              const payload = { indexer_proxy_url: globalIndexerProxyURL }
-                              await submitSettings(payload, 'indexers')
-                              showFooterStatus({ type: 'success', message: `Global indexer proxy saved.${' Search cache cleared.'}` })
+                              await submitSettings({ indexer_proxy_url: globalIndexerProxyURL }, 'torrent_trackers')
+                              showFooterStatus({ type: 'success', message: 'Global tracker proxy saved. Search cache cleared.' })
                             } catch (error) {
-                              showFooterStatus({ type: 'error', message: error?.message || 'Failed to save global indexer proxy.' })
+                              showFooterStatus({ type: 'error', message: error?.message || 'Failed to save global tracker proxy.' })
                             } finally {
                               setSavingGlobalIndexerProxy(false)
                             }
@@ -444,25 +397,6 @@ function Settings({
                 </div>
               </CardContent>
             </Card>
-            <IndexerSettings
-              fields={indexerFields}
-              defaultProxyURL={globalIndexerProxyURL}
-              indexerCaps={indexerCaps || {}}
-              stats={stats}
-              streamsByName={liveStreamsByName}
-              append={appendIndexer}
-              update={updateIndexer}
-              remove={removeIndexer}
-              replace={replaceIndexers}
-              onClearStatus={clearTransientStatus}
-              onPersist={(nextNzbIndexers) => submitSettings({ indexers: [...nextNzbIndexers, ...getValues('torznab_trackers')] }, 'indexers')}
-              onStatus={(status) => showFooterStatus(status)}
-            />
-          </div>
-        )}
-
-        {activeTab === 'torrent_trackers' && (
-          <div className="space-y-4">
             <TorrentTrackerSettings
               fields={torznabTrackerFields}
               append={appendTorznabTracker}
@@ -470,31 +404,7 @@ function Settings({
               remove={removeTorznabTracker}
               replace={replaceTorznabTrackers}
               onClearStatus={clearTransientStatus}
-              onPersist={(nextTorznabTrackers) => submitSettings({ indexers: [...getValues('indexers'), ...nextTorznabTrackers] }, 'indexers')}
-              onStatus={(status) => showFooterStatus(status)}
-            />
-          </div>
-        )}
-
-        {activeTab === 'providers' && (
-          <div className="space-y-4">
-            {envOverrides.includes('providers') && (
-              <div className="rounded-lg border border-border bg-muted/50 p-3">
-                <p className="text-sm text-muted-foreground flex items-center gap-2">
-                  <AlertTriangle className="h-4 w-4 shrink-0" />
-                  Provider list is overwritten by environment variables (PROVIDER_1_*, etc.) on restart.
-                </p>
-              </div>
-            )}
-            <ProviderSettings
-              fields={fields}
-              stats={stats}
-              streamsByName={liveStreamsByName}
-              append={append}
-              remove={remove}
-              replace={replace}
-              onClearStatus={clearTransientStatus}
-              onPersist={(nextProviders) => submitSettings({ providers: nextProviders }, 'providers')}
+              onPersist={(nextTorznabTrackers) => submitSettings({ indexers: nextTorznabTrackers }, 'torrent_trackers')}
               onStatus={(status) => showFooterStatus(status)}
             />
           </div>

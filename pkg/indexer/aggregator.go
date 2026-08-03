@@ -216,9 +216,9 @@ func (a *Aggregator) searchCombined(req SearchRequest) (*SearchResponse, error) 
 			continue
 		}
 
-		// Include protocol in the key so that a usenet NZB and a torrent release
+		// Include protocol in the key so that a torrent and a non-torrent result
 		// for the same title+size are never collapsed into one.
-		protocol := "usenet"
+		protocol := "other"
 		if item.IsTorrent() {
 			protocol = "torrent"
 		}

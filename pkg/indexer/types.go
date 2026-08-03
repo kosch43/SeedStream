@@ -126,9 +126,8 @@ func (i *Item) GetAttribute(name string) string {
 	return ""
 }
 
-// IsTorrent reports whether this item came from a Torznab tracker rather than
-// a Newznab/Usenet indexer. The check mirrors the protocol detection in ToRelease
-// so the two are always in sync.
+// IsTorrent reports whether this item came from a Torznab tracker. The check
+// mirrors the protocol detection in ToRelease so the two are always in sync.
 func (i *Item) IsTorrent() bool {
 	return i.GetAttribute("magneturl") != "" ||
 		i.GetAttribute("infohash") != "" ||
@@ -161,7 +160,7 @@ func (i *Item) ToRelease() *release.Release {
 		indexerName = i.SourceIndexer.Name()
 	}
 
-	// Torznab torrent attributes (absent for Usenet indexers).
+	// Torznab torrent attributes.
 	magnet := i.GetAttribute("magneturl")
 	infoHash := strings.ToLower(strings.TrimSpace(i.GetAttribute("infohash")))
 	seeders := atoiOrZero(i.GetAttribute("seeders"))
@@ -172,7 +171,7 @@ func (i *Item) ToRelease() *release.Release {
 
 	// A result is a torrent if it advertises any torrent-specific signal: a
 	// magnet, an info hash, seeders, or a bittorrent enclosure type.
-	protocol := "usenet"
+	protocol := "other"
 	if magnet != "" || infoHash != "" || i.GetAttribute("seeders") != "" ||
 		strings.Contains(strings.ToLower(i.Enclosure.Type), "bittorrent") ||
 		strings.HasPrefix(strings.ToLower(i.Link), "magnet:") {

@@ -162,7 +162,6 @@ func TestIndexerConfigEffectiveTimeoutDefaults(t *testing.T) {
 		{name: "aggregator", cfg: IndexerConfig{Type: "aggregator"}, want: DefaultAggregatorIndexerTimeoutSeconds},
 		{name: "nzbhydra", cfg: IndexerConfig{Type: "nzbhydra"}, want: DefaultAggregatorIndexerTimeoutSeconds},
 		{name: "prowlarr", cfg: IndexerConfig{Type: "prowlarr"}, want: DefaultAggregatorIndexerTimeoutSeconds},
-		{name: "easynews", cfg: IndexerConfig{Type: "easynews"}, want: DefaultEasynewsIndexerTimeoutSeconds},
 	}
 
 	for _, tt := range tests {
@@ -227,25 +226,6 @@ func TestRedactProxyURLForAPI(t *testing.T) {
 	want := "http://proxy:8888"
 	if got != want {
 		t.Fatalf("RedactProxyURLForAPI = %q, want %q", got, want)
-	}
-}
-
-func TestMigrateLegacyIndexersBackfillsEasynewsTimeout(t *testing.T) {
-	cfg := &Config{
-		Indexers: []IndexerConfig{
-			{Name: "Easynews", Type: "easynews"},
-			{Name: "SceneNZBs", Type: "newznab"},
-		},
-	}
-
-	if !cfg.MigrateLegacyIndexers() {
-		t.Fatalf("expected legacy indexers to be migrated")
-	}
-	if cfg.Indexers[0].TimeoutSeconds != DefaultEasynewsIndexerTimeoutSeconds {
-		t.Fatalf("Easynews timeout = %d, want %d", cfg.Indexers[0].TimeoutSeconds, DefaultEasynewsIndexerTimeoutSeconds)
-	}
-	if cfg.Indexers[1].TimeoutSeconds != 0 {
-		t.Fatalf("non-Easynews timeout = %d, want 0", cfg.Indexers[1].TimeoutSeconds)
 	}
 }
 
@@ -327,48 +307,12 @@ func TestApplyEnvOverridesForcesAdminPasswordResetPrompt(t *testing.T) {
 	}
 }
 
-func TestConfigEffectiveAvailNZBFilterReportedBadDefaultsDisabled(t *testing.T) {
-	cfg := &Config{}
-	if cfg.EffectiveAvailNZBFilterReportedBad() {
-		t.Fatalf("EffectiveAvailNZBFilterReportedBad() = true, want false")
-	}
-}
-
-func TestConfigEffectiveAvailNZBFilterReportedBadHonorsExplicitValue(t *testing.T) {
-	cfg := &Config{AvailNZBFilterReportedBad: ptrBool(true)}
-	if !cfg.EffectiveAvailNZBFilterReportedBad() {
-		t.Fatalf("EffectiveAvailNZBFilterReportedBad() = false, want true")
-	}
-	cfg = &Config{AvailNZBFilterReportedBad: ptrBool(false)}
-	if cfg.EffectiveAvailNZBFilterReportedBad() {
-		t.Fatalf("EffectiveAvailNZBFilterReportedBad() = true, want false")
-	}
-}
-
-func TestConfigEffectiveAvailNZBFilterReportedBadDisabledWhenAvailNZBModeOff(t *testing.T) {
-	cfg := &Config{
-		AvailNZBMode:              "off",
-		AvailNZBFilterReportedBad: ptrBool(true),
-	}
-	if cfg.EffectiveAvailNZBFilterReportedBad() {
-		t.Fatalf("EffectiveAvailNZBFilterReportedBad() = true, want false when mode is off")
-	}
-}
-
 func TestApplyStreamModelUpgradeDefaultsCreatesQueriesAndDefaultStream(t *testing.T) {
 	cfg := &Config{
-		Providers: []Provider{
-			{Host: "news.newshosting.com"},
-			{Name: "eweka", Host: "news.eweka.nl"},
-		},
 		Indexers: []IndexerConfig{
-			{Name: "Indexer A"},
-			{Name: "Indexer B"},
+			{Name: "Tracker A"},
+			{Name: "Tracker B"},
 		},
-	}
-
-	if !cfg.ApplyProviderDefaults() {
-		t.Fatalf("expected provider defaults to derive provider names")
 	}
 
 	if !cfg.applyStreamModelUpgradeDefaults() {
@@ -413,14 +357,8 @@ func TestApplyStreamModelUpgradeDefaultsCreatesQueriesAndDefaultStream(t *testin
 	if stream.EnableFailover == nil || !*stream.EnableFailover {
 		t.Fatalf("expected default stream failover enabled, got %#v", stream.EnableFailover)
 	}
-	if stream.AutoAddProviders == nil || !*stream.AutoAddProviders {
-		t.Fatalf("expected default stream auto add providers enabled, got %#v", stream.AutoAddProviders)
-	}
 	if stream.AutoAddIndexers == nil || !*stream.AutoAddIndexers {
 		t.Fatalf("expected default stream auto add indexers enabled, got %#v", stream.AutoAddIndexers)
-	}
-	if len(stream.ProviderSelections) != 2 || stream.ProviderSelections[0] != "newshosting" {
-		t.Fatalf("unexpected provider selections: %#v", stream.ProviderSelections)
 	}
 	if len(stream.IndexerSelections) != 2 {
 		t.Fatalf("unexpected indexer selections: %#v", stream.IndexerSelections)
@@ -468,27 +406,3 @@ func TestSaveFileUpdatesLoadedPath(t *testing.T) {
 	}
 }
 
-func TestSaveFileDoesNotPersistAvailNZBAPIKey(t *testing.T) {
-	tempDir := t.TempDir()
-	configPath := filepath.Join(tempDir, "config.json")
-
-	cfg := &Config{
-		AddonPort:      7001,
-		AvailNZBAPIKey: "secret-should-not-be-written",
-	}
-	if err := cfg.SaveFile(configPath); err != nil {
-		t.Fatalf("SaveFile: %v", err)
-	}
-
-	raw, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
-	}
-	content := string(raw)
-	if strings.Contains(content, "availnzb_api_key") {
-		t.Fatalf("config.json should not contain availnzb_api_key, got: %s", content)
-	}
-	if strings.Contains(content, "secret-should-not-be-written") {
-		t.Fatalf("config.json should not contain AvailNZBAPIKey value")
-	}
-}

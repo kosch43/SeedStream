@@ -1,29 +1,20 @@
 package api
 
 import (
-	"fmt"
-	"net"
 	"sort"
 	"time"
 
 	"seedstream/pkg/core/logger"
 	"seedstream/pkg/core/persistence"
 	"seedstream/pkg/indexer"
-	"seedstream/pkg/server/stremio"
 	"seedstream/pkg/session"
-	usenetpool "seedstream/pkg/usenet/pool"
 )
 
 type SystemStats struct {
-	Timestamp         time.Time                   `json:"timestamp"`
-	TotalSpeed        float64                     `json:"total_speed_mbps"`
-	ActiveStreams     int                         `json:"active_streams"`
-	TotalConnections  int                         `json:"total_connections"`
-	ActiveConnections int                         `json:"active_connections"`
-	TotalDownloadedMB float64                     `json:"total_downloaded_mb"`
-	Providers         []ProviderStats             `json:"providers"`
-	Indexers          []IndexerStats              `json:"indexers"`
-	ActiveSessions    []session.ActiveSessionInfo `json:"active_sessions"`
+	Timestamp      time.Time                   `json:"timestamp"`
+	ActiveStreams  int                         `json:"active_streams"`
+	Indexers       []IndexerStats              `json:"indexers"`
+	ActiveSessions []session.ActiveSessionInfo `json:"active_sessions"`
 }
 
 type IndexerStats struct {
@@ -39,94 +30,17 @@ type IndexerStats struct {
 	SearchesCount        int     `json:"searches_count"`
 	UniqueHitsCount      int64   `json:"unique_hits_count"`
 	AvgResponseMS        float64 `json:"avg_response_ms"`
-	AvailAvailableCount  int64   `json:"avail_available_count"`
-	AvailDiscardedCount  int64   `json:"avail_discarded_count"`
-}
-
-type ProviderStats struct {
-	Name                  string  `json:"name"`
-	Host                  string  `json:"host"`
-	ActiveConns           int     `json:"active_conns"`
-	IdleConns             int     `json:"idle_conns"`
-	MaxConns              int     `json:"max_conns"`
-	CurrentSpeed          float64 `json:"current_speed_mbps"`
-	DownloadedMB          float64 `json:"downloaded_mb"`
-	UsagePercent          float64 `json:"usage_percent"`
-	ArticleAvailableCount int64   `json:"article_available_count"`
-	ArticleMissingCount   int64   `json:"article_missing_count"`
 }
 
 func (s *Server) collectStats() SystemStats {
 	logger.Trace("collectStats start")
 	stats := SystemStats{
 		Timestamp: time.Now(),
-		Providers: make([]ProviderStats, 0),
 	}
-
-	var totalActive, totalMax int
-	var totalDownloadedMB float64
-
-	s.mu.RLock()
-	pools := s.providerPools
-	application := s.app
-	s.mu.RUnlock()
-	articleByProvider := map[string]usenetpool.ProviderArticleStats{}
-	articleByHost := map[string]usenetpool.ProviderArticleStats{}
-	if application != nil {
-		if comp := application.Components(); comp != nil && comp.UsenetPool != nil {
-			for _, providerStat := range comp.UsenetPool.ProviderArticleStats() {
-				articleByProvider[providerStat.ProviderID] = providerStat
-				if providerStat.Host != "" {
-					articleByHost[providerStat.Host] = providerStat
-				}
-			}
-		}
-	}
-
-	for name, pool := range pools {
-		downloadedMB := pool.TotalMegabytes()
-
-		pStats := ProviderStats{
-			Name:         name,
-			Host:         pool.Host(),
-			ActiveConns:  pool.ActiveConnections(),
-			IdleConns:    pool.IdleConnections(),
-			MaxConns:     pool.MaxConn(),
-			CurrentSpeed: pool.GetSpeed(),
-			DownloadedMB: downloadedMB,
-		}
-		if articleStat, ok := articleByProvider[name]; ok {
-			pStats.ArticleAvailableCount = articleStat.AvailableCount
-			pStats.ArticleMissingCount = articleStat.UnavailableCount
-		} else if articleStat, ok := articleByHost[pStats.Host]; ok {
-			pStats.ArticleAvailableCount = articleStat.AvailableCount
-			pStats.ArticleMissingCount = articleStat.UnavailableCount
-		}
-
-		totalActive += pStats.ActiveConns
-		totalMax += pStats.MaxConns
-		stats.TotalSpeed += pStats.CurrentSpeed
-		totalDownloadedMB += downloadedMB
-
-		stats.Providers = append(stats.Providers, pStats)
-	}
-
-	if totalDownloadedMB > 0 {
-		for i := range stats.Providers {
-			stats.Providers[i].UsagePercent = (stats.Providers[i].DownloadedMB / totalDownloadedMB) * 100
-		}
-		stats.TotalDownloadedMB = totalDownloadedMB
-	}
-
-	sort.Slice(stats.Providers, func(i, j int) bool {
-		return stats.Providers[i].Name < stats.Providers[j].Name
-	})
 
 	if s.indexer != nil {
-		availIndexerStats := map[string]stremio.AvailIndexerStats{}
 		uniqueIndexerHits := map[string]int64{}
 		if s.strmServer != nil {
-			availIndexerStats = s.strmServer.GetAvailIndexerStats()
 			uniqueIndexerHits = s.strmServer.GetUniqueIndexerHits()
 		}
 
@@ -156,66 +70,19 @@ func (s *Server) collectStats() SystemStats {
 				SearchesCount:        usage.SearchesCount,
 				UniqueHitsCount:      uniqueIndexerHits[idx.Name()],
 				AvgResponseMS:        usage.AvgResponseMS,
-				AvailAvailableCount:  availIndexerStats[idx.Name()].AvailableReturned,
-				AvailDiscardedCount:  availIndexerStats[idx.Name()].Discarded,
 			})
 		}
+		sort.Slice(stats.Indexers, func(i, j int) bool {
+			return stats.Indexers[i].Name < stats.Indexers[j].Name
+		})
 	}
-
-	stats.ActiveConnections = totalActive
-	stats.TotalConnections = totalMax
 
 	stats.ActiveSessions = s.sessionMgr.GetActiveSessions()
-
-	s.mu.RLock()
-	if s.proxyServer != nil {
-		proxySessions := s.proxyServer.GetSessions()
-
-		type proxyGroup struct {
-			count int
-			group string
-			ip    string
-		}
-		groups := make(map[string]*proxyGroup)
-
-		for _, ps := range proxySessions {
-
-			ip := ps.RemoteAddr
-			if host, _, err := net.SplitHostPort(ip); err == nil {
-				ip = host
-			}
-
-			if _, exists := groups[ip]; !exists {
-				groups[ip] = &proxyGroup{ip: ip}
-			}
-			g := groups[ip]
-			g.count++
-
-			if ps.CurrentGroup != "" {
-				g.group = ps.CurrentGroup
-			}
-		}
-
-		for ip, g := range groups {
-			title := fmt.Sprintf("Proxy Client (%d conns)", g.count)
-			if g.group != "" {
-				title = fmt.Sprintf("Proxy: %s (%d conns)", g.group, g.count)
-			}
-
-			stats.ActiveSessions = append(stats.ActiveSessions, session.ActiveSessionInfo{
-				ID:      fmt.Sprintf("proxy-%s", ip),
-				Title:   title,
-				Clients: []string{ip},
-			})
-		}
-	}
-	s.mu.RUnlock()
-
 	stats.ActiveStreams = len(stats.ActiveSessions)
 
 	s.maybePersistMetrics(stats)
 
-	logger.Trace("collectStats done", "providers", len(stats.Providers), "sessions", len(stats.ActiveSessions))
+	logger.Trace("collectStats done", "sessions", len(stats.ActiveSessions))
 	return stats
 }
 
@@ -239,41 +106,22 @@ func (s *Server) maybePersistMetrics(stats SystemStats) {
 	s.metricsInFlight = true
 	s.metricsMu.Unlock()
 
-	providers := make([]persistence.ProviderMetric, 0, len(stats.Providers))
-	for _, p := range stats.Providers {
-		providers = append(providers, persistence.ProviderMetric{
-			CollectedAt:      now,
-			ProviderName:     p.Name,
-			Host:             p.Host,
-			ActiveConns:      p.ActiveConns,
-			IdleConns:        p.IdleConns,
-			MaxConns:         p.MaxConns,
-			CurrentSpeedMbps: p.CurrentSpeed,
-			DownloadedMB:     p.DownloadedMB,
-			UsagePercent:     p.UsagePercent,
-			ArticleAvailable: p.ArticleAvailableCount,
-			ArticleMissing:   p.ArticleMissingCount,
-		})
-	}
-
 	indexers := make([]persistence.IndexerMetric, 0, len(stats.Indexers))
 	for _, idx := range stats.Indexers {
 		indexers = append(indexers, persistence.IndexerMetric{
-			CollectedAt:         now,
-			IndexerName:         idx.Name,
-			APIHitsUsed:         idx.APIHitsUsed,
-			APIHitsLimit:        idx.APIHitsLimit,
-			DownloadsUsed:       idx.DownloadsUsed,
-			DownloadsLimit:      idx.DownloadsLimit,
-			SearchesCount:       idx.SearchesCount,
-			UniqueHitsCount:     idx.UniqueHitsCount,
-			AvgResponseMS:       idx.AvgResponseMS,
-			AvailAvailableCount: idx.AvailAvailableCount,
-			AvailDiscardedCount: idx.AvailDiscardedCount,
+			CollectedAt:     now,
+			IndexerName:     idx.Name,
+			APIHitsUsed:     idx.APIHitsUsed,
+			APIHitsLimit:    idx.APIHitsLimit,
+			DownloadsUsed:   idx.DownloadsUsed,
+			DownloadsLimit:  idx.DownloadsLimit,
+			SearchesCount:   idx.SearchesCount,
+			UniqueHitsCount: idx.UniqueHitsCount,
+			AvgResponseMS:   idx.AvgResponseMS,
 		})
 	}
 
-	if err := mgr.RecordMetricsSnapshot(providers, indexers); err != nil {
+	if err := mgr.RecordMetricsSnapshot(nil, indexers); err != nil {
 		s.metricsMu.Lock()
 		s.metricsInFlight = false
 		s.metricsMu.Unlock()
@@ -281,67 +129,8 @@ func (s *Server) maybePersistMetrics(stats SystemStats) {
 		return
 	}
 
-	// Record event-based provider deltas (NZBHydra2-style analogue). The
-	// SystemStats carry monotonic cumulative counters; we keep the last-seen
-	// value per provider and record only the increment so SUM-over-window stays
-	// correct without per-article write storms. This is additive to the
-	// snapshot persistence above (the Dashboard still relies on snapshots).
-	s.recordProviderDeltas(mgr, now, stats.Providers)
-
 	s.metricsMu.Lock()
 	s.lastMetricsAt = now
 	s.metricsInFlight = false
 	s.metricsMu.Unlock()
-}
-
-// recordProviderDeltas computes per-provider increments since the last tick and
-// records one provider_access_deltas row per provider that changed.
-func (s *Server) recordProviderDeltas(mgr *persistence.StateManager, now time.Time, providers []ProviderStats) {
-	if mgr == nil {
-		return
-	}
-	s.metricsMu.Lock()
-	if s.providerDeltaState == nil {
-		s.providerDeltaState = make(map[string]providerCumulative)
-	}
-	type pending struct {
-		name                             string
-		host                             string
-		availDelta, missDelta, byteDelta int64
-	}
-	var toRecord []pending
-	for _, p := range providers {
-		available := p.ArticleAvailableCount
-		missing := p.ArticleMissingCount
-		bytes := int64(p.DownloadedMB * 1024 * 1024)
-
-		prev, seen := s.providerDeltaState[p.Name]
-		s.providerDeltaState[p.Name] = providerCumulative{available: available, missing: missing, bytes: bytes}
-		if !seen {
-			// First observation establishes a baseline; the cumulative counters
-			// predate this tick, so do not record a spurious large delta.
-			continue
-		}
-		availDelta := maxInt64(0, available-prev.available)
-		missDelta := maxInt64(0, missing-prev.missing)
-		byteDelta := maxInt64(0, bytes-prev.bytes)
-		if availDelta == 0 && missDelta == 0 && byteDelta == 0 {
-			continue
-		}
-		toRecord = append(toRecord, pending{p.Name, p.Host, availDelta, missDelta, byteDelta})
-	}
-	s.metricsMu.Unlock()
-
-	for _, r := range toRecord {
-		if err := mgr.RecordProviderAccessDelta(now, r.name, r.host, r.availDelta, r.missDelta, r.byteDelta); err != nil {
-			logger.Debug("Failed to record provider access delta", "provider", r.name, "err", err)
-		}
-	}
-}
-
-func maxInt64(a, b int64) int64 {
-	if a > b {
-		return a
-	}
-	return b
 }

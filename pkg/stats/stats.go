@@ -1,4 +1,4 @@
-// Package stats records individual Usenet statistics events (searches,
+// Package stats records individual tracker statistics events (searches,
 // downloads, provider access deltas) for query-time aggregation, mirroring
 // NZBHydra2's event-based model. Recording is non-blocking on the request path
 // and never panics or surfaces DB errors to callers — failures are logged at

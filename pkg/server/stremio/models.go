@@ -50,5 +50,4 @@ type SearchReleaseTag struct {
 	DetailsURL   string `json:"details_url"`
 	Size         int64  `json:"size"`
 	Indexer      string `json:"indexer"`
-	Availability string `json:"availability"`
 }

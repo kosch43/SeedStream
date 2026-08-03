@@ -259,7 +259,7 @@ func TestMetadataLogTitlesHandleMissingJapaneseAlternativeTitles(t *testing.T) {
 
 	params := &SearchParams{
 		Req: indexer.SearchRequest{TMDBID: "129"},
-		ContentIDs: &session.AvailReportMeta{
+		ContentIDs: &session.ContentMeta{
 			ImdbID: "tt0245429",
 		},
 		Metadata: metadata,
@@ -938,7 +938,7 @@ func TestRunConfiguredSearchRequestsKeepsMetadataValidationQueryForTextSearch(t 
 		},
 		MovieTitleQueries:  make(map[string][]string),
 		SeriesTitleQueries: make(map[string][]string),
-		ContentIDs: &session.AvailReportMeta{
+		ContentIDs: &session.ContentMeta{
 			ImdbID: "tt26443597",
 			TmdbID: "1084242",
 		},
@@ -1082,7 +1082,7 @@ func TestRunConfiguredSearchRequestsUniqueHitsOnlyFirstResultRequestInCombineMod
 		},
 		MovieTitleQueries:  make(map[string][]string),
 		SeriesTitleQueries: make(map[string][]string),
-		ContentIDs: &session.AvailReportMeta{
+		ContentIDs: &session.ContentMeta{
 			ImdbID: "tt26443597",
 			TmdbID: "1084242",
 		},
@@ -1138,7 +1138,7 @@ func TestRunConfiguredSearchRequestsUniqueHitsInFirstHitMode(t *testing.T) {
 		},
 		MovieTitleQueries:  make(map[string][]string),
 		SeriesTitleQueries: make(map[string][]string),
-		ContentIDs: &session.AvailReportMeta{
+		ContentIDs: &session.ContentMeta{
 			ImdbID: "tt26443597",
 			TmdbID: "1084242",
 		},

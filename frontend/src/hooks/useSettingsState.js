@@ -5,28 +5,20 @@ import { apiFetch } from '../api'
 const NETWORK_TAB_FIELDS = [
   'addon_port',
   'addon_base_url',
-  'proxy_enabled',
-  'proxy_port',
-  'proxy_host',
-  'proxy_auth_user',
-  'proxy_auth_pass',
   'indexer_query_header',
   'indexer_grab_header',
-  'provider_header',
 ]
 
 const ADVANCED_TAB_FIELDS = [
   'log_level',
-  'verbose_nntp_logging',
   'keep_log_files',
-  'nzb_history_retention_days',
   'playback_startup_timeout_seconds',
   'failover_fast_mode',
   'session_ttl_minutes',
   'session_post_playback_ttl_minutes',
   'memory_limit_mb',
-  'availnzb_mode',
-  'availnzb_filter_reported_bad',
+  'cerberus_base_url',
+  'cerberus_api_key',
   'tmdb_api_key',
   'tvdb_api_key',
 ]
@@ -45,9 +37,8 @@ export function fieldToTab(fieldName) {
       'series_search_scope',
     ]
     if (searchQueryFields.some((suffix) => fieldName.endsWith(`.${suffix}`))) return 'search_query'
-    return 'indexers'
+    return 'torrent_trackers'
   }
-  if (fieldName.startsWith('providers')) return 'providers'
   if (fieldName.startsWith('movie_search_queries') || fieldName.startsWith('series_search_queries')) return 'search_query'
   if (NETWORK_TAB_FIELDS.includes(fieldName)) return 'network'
   if (ADVANCED_TAB_FIELDS.includes(fieldName)) return 'advanced'
@@ -91,11 +82,8 @@ function buildNamedValidationSummary(errors, prefix, items, fallbackLabel) {
 
 function summarizeConfigErrors(errors, sourceTab, values) {
   if (!errors) return ''
-  if (sourceTab === 'providers') {
-    return buildNamedValidationSummary(errors, 'providers', values?.providers, 'Provider')
-  }
-  if (sourceTab === 'indexers') {
-    return buildNamedValidationSummary(errors, 'indexers', values?.indexers, 'Indexer')
+  if (sourceTab === 'torrent_trackers') {
+    return buildNamedValidationSummary(errors, 'indexers', values?.torznab_trackers, 'Tracker')
   }
   if (sourceTab === 'search_query') {
     const movieSummary = buildNamedValidationSummary(errors, 'movie_search_queries', values?.movie_search_queries, 'Movie Query')
@@ -191,7 +179,7 @@ export function useSettingsState({
   useEffect(() => {
     if (!isConfigTab(lastConfigSaveSource)) return
     if (tabsWithErrors.size > 0 && !tabsWithErrors.has(activeTab)) {
-      const firstErrorTabOrder = ['network', 'indexers', 'providers', 'search_query', 'advanced']
+      const firstErrorTabOrder = ['network', 'torrent_trackers', 'torrent_clients', 'search_query', 'advanced']
       const firstErrorTab = firstErrorTabOrder.find((tabId) => tabsWithErrors.has(tabId))
       if (firstErrorTab) setActiveTab(firstErrorTab)
     }
@@ -202,12 +190,11 @@ export function useSettingsState({
     network: 'Network',
     advanced: 'Advanced',
     addon: 'Addon',
-    proxy: 'NNTP Proxy Server',
     useragent: 'User-Agent',
     admin: 'Logs',
     memory: 'Memory & Cache',
     playback: 'Playback',
-    availnzb: 'AvailNZB',
+    cerberus: 'Cerberus',
     metadata: 'Metadata APIs',
   }
   const successSuffix = saveStatus.type === 'success' && typeof saveStatus.msg === 'string' && saveStatus.msg.includes('Search cache cleared')
@@ -256,8 +243,8 @@ export function useSettingsState({
 
       const baseValues = {
         ...configSnapshot,
-        providers: getValues('providers'),
-        indexers: getValues('indexers'),
+        indexers: getValues('torznab_trackers'),
+        torrent_clients: getValues('torrent_clients'),
         movie_search_queries: getValues('movie_search_queries'),
         series_search_queries: getValues('series_search_queries'),
       }
@@ -269,8 +256,6 @@ export function useSettingsState({
       }
       const keepLog = Number(trimmedFullData.keep_log_files)
       trimmedFullData.keep_log_files = Math.min(50, Math.max(1, Number.isNaN(keepLog) ? 9 : keepLog))
-      const nzbHistoryRetention = Number(trimmedFullData.nzb_history_retention_days)
-      trimmedFullData.nzb_history_retention_days = Math.min(3650, Math.max(0, Number.isNaN(nzbHistoryRetention) ? 90 : nzbHistoryRetention))
       const playbackStartupTimeout = Number(trimmedFullData.playback_startup_timeout_seconds)
       trimmedFullData.playback_startup_timeout_seconds = Math.min(60, Math.max(1, Number.isNaN(playbackStartupTimeout) ? 5 : playbackStartupTimeout))
       const sessionTtl = Number(trimmedFullData.session_ttl_minutes)
@@ -307,8 +292,7 @@ export function useSettingsState({
       return true
     } catch (error) {
       const summary = summarizeConfigErrors(error?.fieldErrors, sourceTab, {
-        providers: getValues('providers'),
-        indexers: getValues('indexers'),
+        torznab_trackers: getValues('torznab_trackers'),
         movie_search_queries: getValues('movie_search_queries'),
         series_search_queries: getValues('series_search_queries'),
       })
@@ -322,7 +306,7 @@ export function useSettingsState({
         }
       }
       console.error('Error saving configuration:', errorMessage, error)
-      if (sourceTab !== 'network' && sourceTab !== 'advanced' && sourceTab !== 'providers' && sourceTab !== 'indexers') {
+      if (sourceTab !== 'network' && sourceTab !== 'advanced') {
         showFooterStatus({ type: 'error', message: errorMessage })
       }
       setError('root', { message: `Failed to save configuration: ${errorMessage}` })

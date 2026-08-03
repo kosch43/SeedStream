@@ -37,8 +37,6 @@ func TestHandlePersistedStatsIncludesUniqueHitsCount(t *testing.T) {
 			SearchesCount:       8,
 			UniqueHitsCount:     3,
 			AvgResponseMS:       120,
-			AvailAvailableCount: 2,
-			AvailDiscardedCount: 1,
 		},
 	})
 	if err != nil {

@@ -19,16 +19,12 @@ import (
 	"seedstream/pkg/core/logger"
 	"seedstream/pkg/core/paths"
 	"seedstream/pkg/indexer"
-	"seedstream/pkg/indexer/easynews"
 	"seedstream/pkg/indexer/newznab"
 	"seedstream/pkg/initialization"
 	"seedstream/pkg/search/triage"
 	"seedstream/pkg/server/stremio"
-	"seedstream/pkg/services/availnzb"
 	"seedstream/pkg/services/metadata/tmdb"
 	"seedstream/pkg/services/metadata/tvdb"
-	"seedstream/pkg/usenet/nntp"
-	"seedstream/pkg/usenet/validation"
 
 	"github.com/gorilla/websocket"
 )
@@ -246,14 +242,10 @@ func (s *Server) handleSaveConfigWS(conn *websocket.Conn, client *Client, payloa
 		newCfg.AdminToken = currentCfg.AdminToken
 		newCfg.AdminMustChangePassword = currentCfg.AdminMustChangePassword
 		newCfg.Streams = cloneStreamEntries(currentCfg.Streams)
-		providerRenames := renamedNamesByIndex(currentCfg.Providers, newCfg.Providers, func(provider config.Provider) string {
-			return provider.Name
-		})
 		indexerRenames := renamedNamesByIndex(currentCfg.Indexers, newCfg.Indexers, func(indexer config.IndexerConfig) string {
 			return indexer.Name
 		})
-		applyStreamNameRenames(newCfg.Streams, providerRenames, indexerRenames)
-		newCfg.ApplyProviderDefaults()
+		applyStreamNameRenames(newCfg.Streams, indexerRenames)
 		applyStreamAutoSelections(&newCfg)
 
 		if currentLoadedPath == "" {
@@ -286,8 +278,6 @@ func (s *Server) handleSaveConfigWS(conn *websocket.Conn, client *Client, payloa
 
 func (s *Server) reloadConfigAsync(newCfg *config.Config) {
 	go func() {
-		s.ensureAvailNZBReadyForReload(newCfg)
-
 		if s.app != nil {
 			comp, fullReload, err := s.app.Reload(newCfg)
 			if err != nil {
@@ -303,15 +293,11 @@ func (s *Server) reloadConfigAsync(newCfg *config.Config) {
 			logger.Error("Reload: BuildComponents failed", "err", err)
 			return
 		}
-		validator := validation.NewChecker(base.UsenetPool, 5, 6)
 		triageService := triage.NewService()
 		s.mu.RLock()
-		availNZBURL := s.availNZBURL
-		availNZBAPIKey := s.availNZBAPIKey
 		tmdbAPIKey := s.tmdbAPIKey
 		tvdbAPIKey := s.tvdbAPIKey
 		s.mu.RUnlock()
-		availClient := availnzb.NewClient(availNZBURL, availNZBAPIKey)
 		tmdbClient := tmdb.NewClient(tmdbAPIKey)
 		dataDir := filepath.Dir(base.Config.LoadedPath)
 		if dataDir == "" {
@@ -319,18 +305,12 @@ func (s *Server) reloadConfigAsync(newCfg *config.Config) {
 		}
 		tvdbClient := tvdb.NewClient(tvdbAPIKey, dataDir)
 		comp := &app.Components{
-			Config:               base.Config,
-			Indexer:              base.Indexer,
-			ProviderPools:        base.ProviderPools,
-			ProviderOrder:        base.ProviderOrder,
-			StreamingPools:       base.StreamingPools,
-			AvailNZBIndexerHosts: base.AvailNZBIndexerHosts,
-			IndexerCaps:          base.IndexerCaps,
-			Validator:            validator,
-			Triage:               triageService,
-			AvailClient:          availClient,
-			TMDBClient:           tmdbClient,
-			TVDBClient:           tvdbClient,
+			Config:      base.Config,
+			Indexer:     base.Indexer,
+			IndexerCaps: base.IndexerCaps,
+			Triage:      triageService,
+			TMDBClient:  tmdbClient,
+			TVDBClient:  tvdbClient,
 		}
 		s.ReloadFromComponents(comp, true)
 		logger.Info("Reload: configuration reloaded successfully")
@@ -406,30 +386,24 @@ func (s *Server) validateConfig(cfg *config.Config) map[string]string {
 
 type configValidationPlan struct {
 	validateKeepLogFiles           bool
-	validateNZBHistoryRetention    bool
 	validatePlaybackStartupTimeout bool
 	validateIndexerProxyURL        bool
 	validateMovieSearchQueries     bool
 	validateSeriesSearchQueries    bool
 	validateDeviceAssignments      bool
-	validateProviders              bool
 	validateIndexers               bool
-	providerDeletionOnly           bool
 	indexerDeletionOnly            bool
-	changedProviderIndexes         map[int]bool
 	changedIndexerIndexes          map[int]bool
 }
 
 func fullConfigValidationPlan() configValidationPlan {
 	return configValidationPlan{
 		validateKeepLogFiles:           true,
-		validateNZBHistoryRetention:    true,
 		validatePlaybackStartupTimeout: true,
 		validateIndexerProxyURL:        true,
 		validateMovieSearchQueries:     true,
 		validateSeriesSearchQueries:    true,
 		validateDeviceAssignments:      true,
-		validateProviders:              true,
 		validateIndexers:               true,
 	}
 }
@@ -450,9 +424,6 @@ func validationPlanFromPatch(body []byte, currentCfg, nextCfg *config.Config) co
 	if _, ok := raw["keep_log_files"]; ok {
 		plan.validateKeepLogFiles = true
 	}
-	if _, ok := raw["nzb_history_retention_days"]; ok {
-		plan.validateNZBHistoryRetention = true
-	}
 	if _, ok := raw["playback_startup_timeout_seconds"]; ok {
 		plan.validatePlaybackStartupTimeout = true
 	}
@@ -466,14 +437,6 @@ func validationPlanFromPatch(body []byte, currentCfg, nextCfg *config.Config) co
 	if _, ok := raw["series_search_queries"]; ok {
 		plan.validateSeriesSearchQueries = true
 		plan.validateDeviceAssignments = true
-	}
-	if _, ok := raw["providers"]; ok {
-		plan.validateProviders = true
-		if len(nextCfg.Providers) < len(currentCfg.Providers) {
-			plan.providerDeletionOnly = true
-		} else {
-			plan.changedProviderIndexes = changedIndexes(currentCfg.Providers, nextCfg.Providers)
-		}
 	}
 	if _, ok := raw["indexers"]; ok {
 		plan.validateIndexers = true
@@ -500,25 +463,6 @@ func changedIndexes[T any](current, next []T) map[int]bool {
 func pingIndexerWithTimeout(indexerCfg config.IndexerConfig) error {
 	pingTimeout := indexerCfg.EffectiveTimeout()
 	ping := func() error {
-		if strings.EqualFold(indexerCfg.Type, "easynews") {
-			client, err := easynews.NewClient(
-				indexerCfg.Username,
-				indexerCfg.Password,
-				indexerCfg.Name,
-				"",
-				indexerCfg.APIHitsDay,
-				indexerCfg.DownloadsDay,
-				indexerCfg.RateLimitRPS,
-				indexerCfg.EffectiveTimeoutSeconds(),
-				indexerCfg.ProxyURL,
-				indexerCfg.GrabHeader,
-				nil,
-			)
-			if err != nil {
-				return err
-			}
-			return client.Ping()
-		}
 		return newznab.NewClient(indexerCfg, nil).Ping()
 	}
 
@@ -554,14 +498,8 @@ func verifyGlobalIndexerProxy(cfg *config.Config) error {
 		if idx.Enabled != nil && !*idx.Enabled {
 			continue
 		}
-		if strings.EqualFold(idx.Type, "easynews") {
-			if strings.TrimSpace(idx.Username) == "" || strings.TrimSpace(idx.Password) == "" {
-				continue
-			}
-		} else {
-			if strings.TrimSpace(idx.URL) == "" || strings.Contains(idx.APIPath, "{indexer_id}") {
-				continue
-			}
+		if strings.TrimSpace(idx.URL) == "" || strings.Contains(idx.APIPath, "{indexer_id}") {
+			continue
 		}
 
 		testCfg := idx
@@ -579,11 +517,7 @@ func verifyGlobalIndexerProxy(cfg *config.Config) error {
 			err := pingIndexerWithTimeout(testCfg)
 			name := strings.TrimSpace(testCfg.Name)
 			if name == "" {
-				if strings.EqualFold(testCfg.Type, "easynews") {
-					name = "easynews"
-				} else {
-					name = testCfg.URL
-				}
+				name = testCfg.URL
 			}
 			select {
 			case resultCh <- probeResult{name: name, err: err}:
@@ -618,9 +552,6 @@ func (s *Server) validateConfigWithPlan(cfg *config.Config, plan configValidatio
 	errors := make(map[string]string)
 	if plan.validateKeepLogFiles && (cfg.KeepLogFiles < 1 || cfg.KeepLogFiles > 50) {
 		errors["keep_log_files"] = "Must be between 1 and 50"
-	}
-	if plan.validateNZBHistoryRetention && (cfg.NZBHistoryRetentionDays < 0 || cfg.NZBHistoryRetentionDays > 3650) {
-		errors["nzb_history_retention_days"] = "Must be between 0 and 3650 days"
 	}
 	if plan.validatePlaybackStartupTimeout && (cfg.PlaybackStartupTimeoutSeconds < 1 || cfg.PlaybackStartupTimeoutSeconds > config.MaxPlaybackStartupTimeoutSeconds) {
 		errors["playback_startup_timeout_seconds"] = "Must be between 1 and 60 seconds"
@@ -719,33 +650,6 @@ func (s *Server) validateConfigWithPlan(cfg *config.Config, plan configValidatio
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 
-	if plan.validateProviders && !plan.providerDeletionOnly {
-		for i, p := range cfg.Providers {
-			if len(plan.changedProviderIndexes) > 0 && !plan.changedProviderIndexes[i] {
-				continue
-			}
-			wg.Add(1)
-			go func(idx int, provider config.Provider) {
-				defer wg.Done()
-				if provider.Enabled != nil && !*provider.Enabled {
-					return
-				}
-				if provider.Host == "" {
-					mu.Lock()
-					errors[fmt.Sprintf("providers.%d.host", idx)] = "Host is required"
-					mu.Unlock()
-					return
-				}
-				pool := nntp.NewClientPool(provider.Host, provider.Port, provider.UseSSL, provider.Username, provider.Password, 1)
-				if err := pool.Validate(); err != nil {
-					mu.Lock()
-					errors[fmt.Sprintf("providers.%d.host", idx)] = err.Error()
-					mu.Unlock()
-				}
-			}(i, p)
-		}
-	}
-
 	if plan.validateIndexers && !plan.indexerDeletionOnly {
 		for i, idx := range cfg.Indexers {
 			if len(plan.changedIndexerIndexes) > 0 && !plan.changedIndexerIndexes[i] {
@@ -755,36 +659,6 @@ func (s *Server) validateConfigWithPlan(cfg *config.Config, plan configValidatio
 			go func(index int, indexerCfg config.IndexerConfig) {
 				defer wg.Done()
 				if indexerCfg.Enabled != nil && !*indexerCfg.Enabled {
-					return
-				}
-				if strings.EqualFold(indexerCfg.Type, "easynews") {
-					if indexerCfg.Username == "" {
-						mu.Lock()
-						errors[fmt.Sprintf("indexers.%d.username", index)] = "Username is required"
-						mu.Unlock()
-					}
-					if indexerCfg.Password == "" {
-						mu.Lock()
-						errors[fmt.Sprintf("indexers.%d.password", index)] = "Password is required"
-						mu.Unlock()
-					}
-					if err := config.ValidateIndexerProxyURL(indexerCfg.ProxyURL); err != nil {
-						mu.Lock()
-						errors[fmt.Sprintf("indexers.%d.proxy_url", index)] = err.Error()
-						mu.Unlock()
-						return
-					}
-					testCfg := indexerCfg
-					effectiveProxyURL := strings.TrimSpace(indexerCfg.ProxyURL)
-					if effectiveProxyURL == "" && plan.validateIndexerProxyURL {
-						effectiveProxyURL = strings.TrimSpace(cfg.IndexerProxyURL)
-					}
-					testCfg.ProxyURL = effectiveProxyURL
-					if err := pingIndexerWithTimeout(testCfg); err != nil {
-						mu.Lock()
-						errors[fmt.Sprintf("indexers.%d.username", index)] = err.Error()
-						mu.Unlock()
-					}
 					return
 				}
 				if indexerCfg.URL == "" {
