@@ -56,7 +56,7 @@ There are two ways to get it:
 
 **Directly, in Settings → Network → HTTPS.** Turn on *Serve HTTPS directly* and give SeedStream a certificate, then set Base URL to `https://`. Either:
 
-- **Automatic certificate domain** — requests a free Let's Encrypt certificate. The domain must resolve to this machine and port 80 must be reachable, since that is where renewals are validated. Certificates are cached in `certs/` next to your config.
+- **Automatic certificate domain** — requests a free Let's Encrypt certificate. Let's Encrypt validates only on port 80 or 443, so publishing just `7000:7000` is not enough: add `"80:80"` to the `ports:` list in `docker-compose.yml` and point the domain's DNS at this host, or issuance will never complete. Certificates are cached under your data directory, so they survive restarts and are not re-requested on every boot.
 - **Certificate file / key file** — PEM paths for a certificate you already have, e.g. from certbot or a Cloudflare origin certificate.
 
 A restart is required for certificate changes to take effect. If the Base URL scheme and the HTTPS setting disagree, SeedStream logs a warning at startup, because that combination hands Stremio links it cannot fetch.

@@ -26,6 +26,22 @@ type SystemStats struct {
 	UploadedMB        float64 `json:"uploaded_mb"`
 	Seeds             int     `json:"seeds"`
 	Peers             int     `json:"peers"`
+
+	// TorrentClients is the same activity broken down per configured seedbox,
+	// so a client's card shows its own figures rather than the fleet total.
+	TorrentClients []TorrentClientStats `json:"torrent_clients"`
+}
+
+// TorrentClientStats is live activity for one configured torrent client.
+type TorrentClientStats struct {
+	Name              string  `json:"name"`
+	DownloadSpeedMbps float64 `json:"download_speed_mbps"`
+	UploadSpeedMbps   float64 `json:"upload_speed_mbps"`
+	ActiveTorrents    int     `json:"active_torrents"`
+	TotalTorrents     int     `json:"total_torrents"`
+	Seeds             int     `json:"seeds"`
+	Peers             int     `json:"peers"`
+	Reachable         bool    `json:"reachable"`
 }
 
 type IndexerStats struct {
@@ -104,6 +120,20 @@ func (s *Server) collectStats() SystemStats {
 		stats.UploadedMB = float64(agg.UploadedBytes) / (1024 * 1024)
 		stats.Seeds = agg.Seeds
 		stats.Peers = agg.Peers
+
+		stats.TorrentClients = make([]TorrentClientStats, 0, len(agg.Clients))
+		for _, c := range agg.Clients {
+			stats.TorrentClients = append(stats.TorrentClients, TorrentClientStats{
+				Name:              c.Name,
+				DownloadSpeedMbps: float64(c.DownloadSpeedBps) * bitsPerByte / 1e6,
+				UploadSpeedMbps:   float64(c.UploadSpeedBps) * bitsPerByte / 1e6,
+				ActiveTorrents:    c.ActiveTorrents,
+				TotalTorrents:     c.TotalTorrents,
+				Seeds:             c.Seeds,
+				Peers:             c.Peers,
+				Reachable:         c.Reachable,
+			})
+		}
 	}
 
 	s.maybePersistMetrics(stats)
