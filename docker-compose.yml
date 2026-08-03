@@ -15,7 +15,6 @@ services:
       - TZ=Etc/UTC
     ports:
       - "7000:7000"   # addon UI + Stremio / AIOStreams manifest
-      - "119:119"     # NNTP proxy for SABnzbd / NZBGet (optional; remove if unused)
     volumes:
       # Persists config.json, login, and state across container updates. Keep it.
       - ./data:/app/data

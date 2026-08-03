@@ -13,7 +13,6 @@ import (
 	"seedstream/pkg/indexer"
 	"seedstream/pkg/release"
 	"seedstream/pkg/search"
-	"seedstream/pkg/services/availnzb"
 	"seedstream/pkg/services/cerberus"
 	"seedstream/pkg/services/metadata/tmdb"
 	"seedstream/pkg/session"
@@ -26,7 +25,7 @@ type SearchParams struct {
 	ContentTitle       string
 	Req                indexer.SearchRequest
 	PreparedQueries    []string
-	ContentIDs         *session.AvailReportMeta
+	ContentIDs         *session.ContentMeta
 	ImdbForText        string
 	TmdbForText        string
 	MovieTitleQueries  map[string][]string
@@ -817,9 +816,7 @@ func logStreamConfiguration(streamLabel, contentType string, stream *auth.Stream
 		}(),
 		"results_mode", streamResultsMode(stream),
 		"failover", streamFailoverEnabled(stream),
-		"availnzb", streamUsesAvailNZB(stream),
-		"providers", append([]string(nil), stream.ProviderSelections...),
-		"indexers", append([]string(nil), stream.IndexerSelections...),
+		"trackers", append([]string(nil), stream.IndexerSelections...),
 		"requests", append([]string(nil), selectedQueries...),
 	)
 }
@@ -849,52 +846,6 @@ func searchLimitForLog(limit int) any {
 		return "max"
 	}
 	return limit
-}
-
-func newAvailContext(result *availnzb.ReleasesResult, inputResults int) *AvailContext {
-	ctx := &AvailContext{
-		Result:                  result,
-		InputResults:            inputResults,
-		ByDetailsURL:            make(map[string]*availnzb.ReleaseWithStatus),
-		AvailableByDetailsURL:   make(map[string]bool),
-		UnavailableByDetailsURL: make(map[string]bool),
-	}
-	if result == nil {
-		return ctx
-	}
-	for _, rws := range result.Releases {
-		if rws == nil || rws.Release == nil || rws.Release.DetailsURL == "" {
-			continue
-		}
-		ctx.ByDetailsURL[rws.Release.DetailsURL] = rws
-		if rws.Available && rws.Release.Link != "" {
-			ctx.AvailableByDetailsURL[rws.Release.DetailsURL] = true
-			continue
-		}
-		if !rws.Available {
-			ctx.UnavailableByDetailsURL[rws.Release.DetailsURL] = true
-		}
-	}
-	return ctx
-}
-
-func (s *Server) loadAvailContext(params *SearchParams, stream *auth.Stream) *AvailContext {
-	if params == nil || params.ContentIDs == nil {
-		return newAvailContext(nil, 0)
-	}
-	contentIDs := params.ContentIDs
-	if !streamUsesAvailNZB(stream) || s.availClient == nil || s.availClient.BaseURL == "" {
-		return newAvailContext(nil, 0)
-	}
-	if strings.TrimSpace(params.Req.TMDBID) == "" && contentIDs.ImdbID == "" && contentIDs.TvdbID == "" {
-		return newAvailContext(nil, 0)
-	}
-	availResult, _ := s.availClient.GetReleases(contentIDs.ImdbID, params.Req.TMDBID, contentIDs.TvdbID, contentIDs.Season, contentIDs.Episode, s.indexerHostsForStream(stream), s.providerHostsForStream(stream))
-	inputResults := 0
-	if availResult != nil {
-		inputResults = len(availResult.Releases)
-	}
-	return newAvailContext(availResult, inputResults)
 }
 
 func (s *Server) runConfiguredSearchRequests(contentType, id, streamLabel string, stream *auth.Stream, selectedQueries []string, params *SearchParams) ([]*release.Release, int, error) {
@@ -1047,9 +998,9 @@ func (s *Server) streamIndexer(_ *auth.Stream, _ *indexer.SearchRequest) indexer
 
 // filterBlockedTorrents drops torrent releases whose info hash is on the
 // Cerberus blocklist for this content, so a known-bad torrent (one the
-// watchdog already gave up on) is not offered for playback again. Usenet
-// releases and releases without a resolvable info hash pass through untouched.
-func (s *Server) filterBlockedTorrents(streamLabel string, releases []*release.Release, contentIDs *session.AvailReportMeta) []*release.Release {
+// watchdog already gave up on) is not offered for playback again. Releases
+// without a resolvable info hash pass through untouched.
+func (s *Server) filterBlockedTorrents(streamLabel string, releases []*release.Release, contentIDs *session.ContentMeta) []*release.Release {
 	if s.cerberusClient == nil || contentIDs == nil || len(releases) == 0 {
 		return releases
 	}
@@ -1155,69 +1106,6 @@ func dedupeCombinedSearchResults(streamLabel string, stream *auth.Stream, releas
 	return releases
 }
 
-func alignAvailContextWithSearch(availCtx *AvailContext, indexerReleases []*release.Release) *AvailContext {
-	if availCtx == nil || availCtx.Result == nil {
-		return newAvailContext(nil, 0)
-	}
-	indexerDetailsURLs := make(map[string]bool)
-	for _, r := range indexerReleases {
-		if r != nil && r.DetailsURL != "" {
-			indexerDetailsURLs[r.DetailsURL] = true
-		}
-	}
-	if len(indexerDetailsURLs) == 0 {
-		return availCtx
-	}
-	filtered := availCtx.Result.Releases[:0]
-	for _, rws := range availCtx.Result.Releases {
-		if rws == nil || rws.Release == nil {
-			continue
-		}
-		if !indexerDetailsURLs[rws.Release.DetailsURL] {
-			continue
-		}
-		filtered = append(filtered, rws)
-	}
-	return newAvailContext(&availnzb.ReleasesResult{ImdbID: availCtx.Result.ImdbID, Count: availCtx.Result.Count, Releases: filtered}, availCtx.InputResults)
-}
-
-func enrichSearchResultsWithAvail(streamLabel string, indexerReleases []*release.Release, availCtx *AvailContext) {
-	if availCtx == nil {
-		availCtx = newAvailContext(nil, 0)
-	}
-	availableResults := 0
-	matchedResults := 0
-	missingDetailsURL := 0
-	indexerDetailsURLs := make(map[string]bool, len(indexerReleases))
-	for _, rel := range indexerReleases {
-		if rel == nil {
-			continue
-		}
-		if rel.DetailsURL == "" {
-			missingDetailsURL++
-			continue
-		}
-		indexerDetailsURLs[rel.DetailsURL] = true
-	}
-	for detailsURL := range availCtx.ByDetailsURL {
-		if !indexerDetailsURLs[detailsURL] {
-			continue
-		}
-		matchedResults++
-		if availCtx.AvailableByDetailsURL[detailsURL] {
-			availableResults++
-		}
-	}
-	logger.Debug("AvailNZB enrichment",
-		"stream", streamLabel,
-		"AvailNZB_results", availCtx.InputResults,
-		"search_results", len(indexerReleases),
-		"matched_results", matchedResults,
-		"available_results", availableResults,
-		"missing_details_url", missingDetailsURL,
-	)
-}
-
 func (s *Server) buildRawSearchResult(ctx context.Context, contentType, id string, stream *auth.Stream) (*rawSearchResult, error) {
 	selectedQueries := streamSearchQueryNames(stream, contentType)
 	if len(selectedQueries) == 0 {
@@ -1251,36 +1139,26 @@ func (s *Server) buildRawSearchResult(ctx context.Context, contentType, id strin
 		return &rawSearchResult{
 			Params:          params,
 			IndexerReleases: nil,
-			Avail: &AvailContext{
-				ByDetailsURL:            make(map[string]*availnzb.ReleaseWithStatus),
-				AvailableByDetailsURL:   make(map[string]bool),
-				UnavailableByDetailsURL: make(map[string]bool),
-			},
 		}, nil
 	}
 	logStreamConfiguration(streamLabel, contentType, stream, selectedQueries)
-	availCtx := s.loadAvailContext(params, stream)
 	indexerReleases, executedRequests, err := s.runConfiguredSearchRequests(contentType, id, streamLabel, stream, selectedQueries, params)
 	if err != nil {
 		return nil, err
 	}
 	indexerReleases = dedupeCombinedSearchResults(streamLabel, stream, indexerReleases, executedRequests)
 	indexerReleases = s.filterBlockedTorrents(streamLabel, indexerReleases, params.ContentIDs)
-	availCtx = alignAvailContextWithSearch(availCtx, indexerReleases)
-	enrichSearchResultsWithAvail(streamLabel, indexerReleases, availCtx)
 	logger.Debug("Playback candidate build finished",
 		"stream", streamLabel,
 		"type", contentType,
 		"id", id,
 		"executed_requests", executedRequests,
 		"releases", len(indexerReleases),
-		"avail_matches", len(availCtx.AvailableByDetailsURL)+len(availCtx.UnavailableByDetailsURL),
 	)
 
 	return &rawSearchResult{
 		Params:          params,
 		IndexerReleases: indexerReleases,
-		Avail:           availCtx,
 	}, nil
 }
 
@@ -1447,7 +1325,7 @@ func (s *Server) buildSearchParamsBase(contentType, id string, searchQuery *conf
 	}
 	seasonNum, _ := strconv.Atoi(req.Season)
 	episodeNum, _ := strconv.Atoi(req.Episode)
-	contentIDs := &session.AvailReportMeta{ImdbID: req.IMDbID, TmdbID: req.TMDBID, TvdbID: req.TVDBID, Season: seasonNum, Episode: episodeNum}
+	contentIDs := &session.ContentMeta{ImdbID: req.IMDbID, TmdbID: req.TMDBID, TvdbID: req.TVDBID, Season: seasonNum, Episode: episodeNum}
 	if contentType == "movie" && req.TMDBID != "" && s.tmdbClient != nil {
 		if tmdbIDNum, err := strconv.Atoi(req.TMDBID); err == nil {
 			if details, err := s.tmdbClient.GetMovieDetails(tmdbIDNum); err == nil {
@@ -1569,10 +1447,6 @@ func (s *Server) buildSearchParamsFromBase(base *SearchParams, searchQuery *conf
 				continue
 			}
 			eff := config.MergeIndexerSearch(ic, queryIndexerConfig, s.config)
-			if strings.EqualFold(ic.Type, "easynews") {
-				t := true
-				eff.DisableIdSearch = &t
-			}
 			req.EffectiveByIndexer[ic.Name] = eff
 			indexerTypeByName[ic.Name] = ic.Type
 		}

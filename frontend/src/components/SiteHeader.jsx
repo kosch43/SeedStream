@@ -4,8 +4,6 @@ const pageTitles = {
   dashboard: "Dashboard",
   statistics: "Statistics",
   install: "Streams",
-  "nzb-history": "NZB History",
-  "direct-play": "Direct Play",
   logs: "Logs",
   profile: "Profile",
   settings: "Settings",

@@ -53,13 +53,10 @@ function normalizeStreamDraft(draft) {
     filter_sorting_mode: normalizedFilterSortingMode,
     indexer_mode: draft?.indexer_mode === 'failover' ? 'failover' : 'combine',
     username: (draft?.username || '').trim(),
-    use_availnzb: draft?.use_availnzb !== false,
     combine_results: draft?.combine_results !== false,
     enable_failover: draft?.enable_failover !== false,
     results_mode: normalizedFilterSortingMode === 'aiostreams' || draft?.results_mode === 'display_all' ? 'display_all' : 'combined_stream',
-    auto_add_providers: draft?.auto_add_providers === true,
     auto_add_indexers: draft?.auto_add_indexers === true,
-    providers: uniquePreserveOrder(draft?.providers),
     indexers: uniquePreserveOrder(draft?.indexers),
     indexer_overrides: draft?.indexer_overrides || {},
     movie_search_queries: uniquePreserveOrder(draft?.movie_search_queries),
@@ -75,13 +72,10 @@ function buildStreamDraft(stream) {
     filter_sorting_mode: stream?.filter_sorting_mode,
     indexer_mode: stream?.indexer_mode,
     username: stream?.username || '',
-    use_availnzb: stream?.use_availnzb,
     combine_results: stream?.combine_results,
     enable_failover: stream?.enable_failover,
     results_mode: stream?.results_mode,
-    auto_add_providers: stream?.auto_add_providers,
     auto_add_indexers: stream?.auto_add_indexers,
-    providers: stream?.provider_selections || stream?.providers || [],
     indexers: stream?.indexer_selections || stream?.indexers || Object.keys(stream?.indexer_overrides || {}),
     indexer_overrides: stream?.indexer_overrides || {},
     movie_search_queries: stream?.movie_search_queries || [],
@@ -114,13 +108,10 @@ function buildStreamStateFromDraft(username, token, draft, existingOverrides = {
     token: token || '',
     filter_sorting_mode: draft.filter_sorting_mode,
     indexer_mode: draft.indexer_mode,
-    use_availnzb: draft.use_availnzb,
     combine_results: draft.combine_results,
     enable_failover: draft.enable_failover,
     results_mode: draft.results_mode,
-    auto_add_providers: draft.auto_add_providers,
     auto_add_indexers: draft.auto_add_indexers,
-    provider_selections: draft.providers || [],
     indexer_selections: draft.indexers || [],
     indexer_overrides: buildIndexerOverrides(draft.indexers || [], draft.indexer_overrides || existingOverrides),
     movie_search_queries: draft.movie_search_queries || [],
@@ -137,13 +128,11 @@ function generalCompactValues(stream) {
 
 function generalDetailValues(stream) {
   return [
-    `AvailNZB ${stream?.use_availnzb !== false ? 'On' : 'Off'}`,
     `Failover ${stream?.enable_failover !== false ? 'On' : 'Off'}`,
-    `Indexers ${(stream?.indexer_mode || 'combine') === 'failover' ? 'Failover' : 'Combine'}`,
+    `Trackers ${(stream?.indexer_mode || 'combine') === 'failover' ? 'Failover' : 'Combine'}`,
     `Search ${stream?.combine_results !== false ? 'Combine' : 'First hit'}`,
     `Results ${stream?.results_mode === 'display_all' ? 'All' : 'Combine'}`,
-    `Auto providers ${stream?.auto_add_providers === true ? 'On' : 'Off'}`,
-    `Auto indexers ${stream?.auto_add_indexers === true ? 'On' : 'Off'}`,
+    `Auto trackers ${stream?.auto_add_indexers === true ? 'On' : 'Off'}`,
   ]
 }
 
@@ -357,8 +346,7 @@ function SelectionSection({ title, values, selected, onToggle, onMove, error, he
 
 const STREAM_DIALOG_TABS = [
   { id: 'general', label: 'General' },
-  { id: 'providers', label: 'Providers' },
-  { id: 'indexers', label: 'Indexers' },
+  { id: 'indexers', label: 'Trackers' },
   { id: 'movie', label: 'Movie' },
   { id: 'tv', label: 'TV' },
   { id: 'torrent', label: 'Connections' },
@@ -379,12 +367,10 @@ function nextStreamName(streams) {
   return `Stream${Date.now()}`
 }
 
-function getInitialStreamDraft(initialStream, isEditing, enabledProviderNames = [], enabledIndexerNames = []) {
+function getInitialStreamDraft(initialStream, isEditing, enabledIndexerNames = []) {
   const base = buildStreamDraft(initialStream)
   if (!isEditing) {
-    base.auto_add_providers = true
     base.auto_add_indexers = true
-    base.providers = uniquePreserveOrder(enabledProviderNames)
     base.indexers = uniquePreserveOrder(enabledIndexerNames)
   }
   return base
@@ -395,8 +381,6 @@ function StreamDialog({
   onOpenChange,
   initialStream,
   mode = 'edit',
-  providerNames,
-  enabledProviderNames,
   indexerNames,
   enabledIndexerNames,
   movieQueryNames,
@@ -405,7 +389,7 @@ function StreamDialog({
   saving,
 }) {
   const isEditing = mode === 'edit'
-  const [draft, setDraft] = useState(() => getInitialStreamDraft(initialStream, isEditing, enabledProviderNames, enabledIndexerNames))
+  const [draft, setDraft] = useState(() => getInitialStreamDraft(initialStream, isEditing, enabledIndexerNames))
   const [saveError, setSaveError] = useState('')
   const [fieldErrors, setFieldErrors] = useState({})
   const [activeTab, setActiveTab] = useState('general')
@@ -416,16 +400,16 @@ function StreamDialog({
 
   useEffect(() => {
     if (open && (!wasOpen || dialogIdentity !== lastDialogIdentity)) {
-      setDraft(getInitialStreamDraft(initialStream, isEditing, enabledProviderNames, enabledIndexerNames))
+      setDraft(getInitialStreamDraft(initialStream, isEditing, enabledIndexerNames))
       setSaveError('')
       setFieldErrors({})
       setActiveTab('general')
       setLastDialogIdentity(dialogIdentity)
     }
     setWasOpen(open)
-  }, [open, initialStream, isEditing, wasOpen, dialogIdentity, lastDialogIdentity, enabledProviderNames, enabledIndexerNames])
+  }, [open, initialStream, isEditing, wasOpen, dialogIdentity, lastDialogIdentity, enabledIndexerNames])
 
-  const normalizedInitial = JSON.stringify(getInitialStreamDraft(initialStream, isEditing, enabledProviderNames, enabledIndexerNames))
+  const normalizedInitial = JSON.stringify(getInitialStreamDraft(initialStream, isEditing, enabledIndexerNames))
   const normalizedCurrent = JSON.stringify(normalizeStreamDraft(draft))
   const isDirty = normalizedInitial !== normalizedCurrent
   const aiostreamsMode = draft.filter_sorting_mode === 'aiostreams'
@@ -464,11 +448,8 @@ function StreamDialog({
     if (!next.username) {
       nextFieldErrors.username = 'Stream name is required'
     }
-    if (next.providers.length === 0) {
-      nextFieldErrors.providers = 'Add at least one provider.'
-    }
     if (next.indexers.length === 0) {
-      nextFieldErrors.indexers = 'Add at least one indexer.'
+      nextFieldErrors.indexers = 'Add at least one tracker.'
     }
     if (next.movie_search_queries.length === 0) {
       nextFieldErrors.movie_search_queries = 'Add at least one movie search request.'
@@ -480,7 +461,6 @@ function StreamDialog({
       setFieldErrors(nextFieldErrors)
       setSaveError(
         nextFieldErrors.username ||
-          nextFieldErrors.providers ||
           nextFieldErrors.indexers ||
           nextFieldErrors.movie_search_queries ||
           nextFieldErrors.series_search_queries ||
@@ -504,7 +484,7 @@ function StreamDialog({
       <DialogContent className="flex h-[85vh] max-h-[85vh] max-w-3xl flex-col overflow-visible" onOpenAutoFocus={focusDialogCloseButton}>
         <DialogHeader>
           <DialogTitle>{isEditing ? 'Change Stream' : 'Add Stream'}</DialogTitle>
-          <DialogDescription>Create a stream or manage its provider, indexer, and search request assignments.</DialogDescription>
+          <DialogDescription>Create a stream or manage its tracker and search request assignments.</DialogDescription>
         </DialogHeader>
 
         <div className="flex-1 space-y-4 overflow-y-auto px-1">
@@ -569,19 +549,6 @@ function StreamDialog({
 
               <div className="rounded-md border border-border/60 p-3">
                 <div className="flex items-center justify-between gap-4">
-                  <div className="text-sm font-medium">AvailNZB</div>
-                  <Switch
-                    checked={draft.use_availnzb}
-                    onCheckedChange={(checked) => setDraft((current) => ({ ...current, use_availnzb: checked === true }))}
-                  />
-                </div>
-                <p className="mt-3 text-sm text-muted-foreground">
-                  Use AvailNZB for this stream when AvailNZB is enabled in Network settings.
-                </p>
-              </div>
-
-              <div className="rounded-md border border-border/60 p-3">
-                <div className="flex items-center justify-between gap-4">
                   <div className="text-sm font-medium">Failover</div>
                   <Switch
                     checked={draft.enable_failover}
@@ -589,7 +556,7 @@ function StreamDialog({
                   />
                 </div>
                 <p className="mt-3 text-sm text-muted-foreground">
-                  If enabled, SeedStream automatically tries the next release in order when the current NZB fails during playback.
+                  If enabled, SeedStream automatically tries the next release in order when the current torrent fails during playback.
                 </p>
               </div>
 
@@ -671,40 +638,6 @@ function StreamDialog({
                   </p>
                 </div>
               </div>
-            </div>
-          )}
-
-          {activeTab === 'providers' && (
-            <div className="space-y-4">
-              <div className="rounded-md border border-border/60 p-3">
-                <div className="flex items-center justify-between gap-4">
-                  <div className="text-sm font-medium">Automatic sync</div>
-                  <Switch
-                    checked={draft.auto_add_providers === true}
-                    onCheckedChange={(checked) => setDraft((current) => (
-                      checked === true
-                        ? { ...current, auto_add_providers: true, providers: uniquePreserveOrder(enabledProviderNames || []) }
-                        : { ...current, auto_add_providers: false }
-                    ))}
-                  />
-                </div>
-                <p className="mt-3 text-sm text-muted-foreground">
-                  Keep this stream in sync with globally enabled providers. Disabled providers are removed automatically.
-                </p>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  Disable automatic sync to manage providers manually.
-                </p>
-              </div>
-              <SelectionSection
-                title="Providers"
-                values={providerNames}
-                selected={draft.providers || []}
-                onToggle={(value, checked) => toggleListValue('providers', value, checked)}
-                onMove={(fromIndex, toIndex) => moveListValue('providers', fromIndex, toIndex)}
-                error={fieldErrors.providers}
-                helperText="Priority is based on position. Drag to reorder."
-                membershipLocked={draft.auto_add_providers === true}
-              />
             </div>
           )}
 
@@ -908,17 +841,6 @@ function StreamManagement({ globalConfig, movieSearchQueries = [], seriesSearchQ
     () => (globalConfig?.indexers || []).map((indexer) => indexer.name).filter(Boolean),
     [globalConfig]
   )
-  const providerNames = useMemo(
-    () => (globalConfig?.providers || []).map((provider) => provider.name).filter(Boolean),
-    [globalConfig]
-  )
-  const enabledProviderNames = useMemo(
-    () => (globalConfig?.providers || [])
-      .filter((provider) => provider?.enabled !== false)
-      .map((provider) => provider.name)
-      .filter(Boolean),
-    [globalConfig]
-  )
   const movieQueryNames = useMemo(() => movieSearchQueries.map((query) => query.name).filter(Boolean), [movieSearchQueries])
   const seriesQueryNames = useMemo(() => seriesSearchQueries.map((query) => query.name).filter(Boolean), [seriesSearchQueries])
   const enabledIndexerNames = useMemo(
@@ -927,10 +849,6 @@ function StreamManagement({ globalConfig, movieSearchQueries = [], seriesSearchQ
       .map((indexer) => indexer.name)
       .filter(Boolean),
     [globalConfig]
-  )
-  const enabledProviderSignature = useMemo(
-    () => JSON.stringify(enabledProviderNames),
-    [enabledProviderNames]
   )
   const enabledIndexerSignature = useMemo(
     () => JSON.stringify(enabledIndexerNames),
@@ -991,7 +909,7 @@ function StreamManagement({ globalConfig, movieSearchQueries = [], seriesSearchQ
 
   useEffect(() => {
     fetchStreams(false, { silent: true }).catch(() => {})
-  }, [enabledProviderSignature, enabledIndexerSignature, fetchStreams])
+  }, [enabledIndexerSignature, fetchStreams])
 
   useEffect(() => {
     if (initialFetchStartedRef.current) return
@@ -1018,13 +936,10 @@ function StreamManagement({ globalConfig, movieSearchQueries = [], seriesSearchQ
       [username]: {
         filter_sorting_mode: draft.filter_sorting_mode,
         indexer_mode: draft.indexer_mode,
-        use_availnzb: draft.use_availnzb,
         combine_results: draft.combine_results,
         enable_failover: draft.enable_failover,
         results_mode: draft.results_mode,
-        auto_add_providers: draft.auto_add_providers,
         auto_add_indexers: draft.auto_add_indexers,
-        provider_selections: draft.providers || [],
         indexer_selections: draft.indexers || [],
         indexer_overrides: buildIndexerOverrides(draft.indexers, existingStream?.indexer_overrides),
         movie_search_queries: draft.movie_search_queries || [],
@@ -1095,13 +1010,10 @@ function StreamManagement({ globalConfig, movieSearchQueries = [], seriesSearchQ
       filter_sorting_mode: stream.filter_sorting_mode,
       indexer_mode: stream.indexer_mode,
       username: nextName,
-      use_availnzb: stream.use_availnzb,
       combine_results: stream.combine_results,
       enable_failover: stream.enable_failover,
       results_mode: stream.results_mode,
-      auto_add_providers: stream.auto_add_providers,
       auto_add_indexers: stream.auto_add_indexers,
-      providers: stream.provider_selections || [],
       indexers: stream.indexer_selections || Object.keys(stream.indexer_overrides || {}),
       indexer_overrides: stream.indexer_overrides || {},
       movie_search_queries: stream.movie_search_queries || [],
@@ -1227,7 +1139,7 @@ function StreamManagement({ globalConfig, movieSearchQueries = [], seriesSearchQ
           <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-3">
             <div className="min-w-0 space-y-0.5">
               <CardTitle>Streams</CardTitle>
-              <CardDescription className="break-words">Configure stream-specific manifests and their provider, indexer and search order.</CardDescription>
+              <CardDescription className="break-words">Configure stream-specific manifests and their tracker and search order.</CardDescription>
             </div>
             <Tooltip>
               <TooltipTrigger asChild>
@@ -1347,8 +1259,7 @@ function StreamManagement({ globalConfig, movieSearchQueries = [], seriesSearchQ
                         {expandedStreams[stream.username] ? (
                           <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-6">
                             <SummaryRow label="General" icon={Settings} values={generalDetailValues(stream)} />
-                            <SummaryRow label="Providers" icon={Globe} values={stream.provider_selections || []} />
-                            <SummaryRow label="Indexers" icon={Server} values={stream.indexer_selections || Object.keys(stream.indexer_overrides || {})} />
+                            <SummaryRow label="Trackers" icon={Server} values={stream.indexer_selections || Object.keys(stream.indexer_overrides || {})} />
                             <SummaryRow label="Movie" icon={Search} values={stream.movie_search_queries || []} />
                             <SummaryRow label="TV" icon={Search} values={stream.series_search_queries || []} />
                             <SummaryRow label="Filter/Sorting" icon={ArrowUpDown} values={filterSortingSummaryValues(stream)} />
@@ -1370,15 +1281,8 @@ function StreamManagement({ globalConfig, movieSearchQueries = [], seriesSearchQ
                             </div>
                             <div className="space-y-1 text-center sm:text-left">
                               <div className="flex items-center justify-center gap-1.5 text-xs font-medium uppercase tracking-wide text-muted-foreground sm:justify-start">
-                                <Globe className="h-3.5 w-3.5" />
-                                <span className="hidden sm:inline">Providers</span>
-                              </div>
-                              <div className="inline-flex items-center justify-center rounded-full border border-border px-2 py-1 text-xs text-muted-foreground">{(stream.provider_selections || []).length}</div>
-                            </div>
-                            <div className="space-y-1 text-center sm:text-left">
-                              <div className="flex items-center justify-center gap-1.5 text-xs font-medium uppercase tracking-wide text-muted-foreground sm:justify-start">
                                 <Server className="h-3.5 w-3.5" />
-                                <span className="hidden sm:inline">Indexers</span>
+                                <span className="hidden sm:inline">Trackers</span>
                               </div>
                               <div className="inline-flex items-center justify-center rounded-full border border-border px-2 py-1 text-xs text-muted-foreground">{(stream.indexer_selections || Object.keys(stream.indexer_overrides || {})).length}</div>
                             </div>
@@ -1444,8 +1348,6 @@ function StreamManagement({ globalConfig, movieSearchQueries = [], seriesSearchQ
             }}
             initialStream={addDialogDraft}
             mode="add"
-            providerNames={providerNames}
-            enabledProviderNames={enabledProviderNames}
             indexerNames={indexerNames}
             enabledIndexerNames={enabledIndexerNames}
             movieQueryNames={movieQueryNames}
@@ -1461,8 +1363,6 @@ function StreamManagement({ globalConfig, movieSearchQueries = [], seriesSearchQ
             }}
             initialStream={editingStream}
             mode="edit"
-            providerNames={providerNames}
-            enabledProviderNames={enabledProviderNames}
             indexerNames={indexerNames}
             enabledIndexerNames={enabledIndexerNames}
             movieQueryNames={movieQueryNames}

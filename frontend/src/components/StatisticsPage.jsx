@@ -39,11 +39,6 @@ function parseDateValue(raw) {
   return Number.isNaN(d.getTime()) ? null : d
 }
 
-function formatDownloadedBytes(bytes) {
-  const mb = toNumber(bytes) / (1024 * 1024)
-  return mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.toFixed(1)} MB`
-}
-
 function fmtPct(v) { return `${toNumber(v).toFixed(1)}%` }
 
 function fmtDate(date) {
@@ -83,22 +78,6 @@ function normalizeIndexerRow(item) {
     downloadSharePct: toNumber(pick(item, 'download_share_pct', 'DownloadSharePct')),
     uniqueDownloads:  toNumber(pick(item, 'unique_downloads', 'UniqueDownloads')),
     uniquenessScore:  toNumber(pick(item, 'avg_uniqueness_score', 'AvgUniquenessScore')),
-    protocol:         String(pick(item, 'protocol', 'Protocol', 'usenet') || 'usenet').toLowerCase() === 'torrent' ? 'torrent' : 'usenet',
-  }
-}
-
-function normalizeProviderRow(item) {
-  const name = String(pick(item, 'provider_name', 'ProviderName', '') || '').trim()
-  if (!name) return null
-  return {
-    name,
-    host:            String(pick(item, 'host', 'Host', '')),
-    articles:        toNumber(pick(item, 'articles', 'Articles')),
-    available:       toNumber(pick(item, 'available', 'Available')),
-    missing:         toNumber(pick(item, 'missing', 'Missing')),
-    successRatePct:  toNumber(pick(item, 'success_rate_pct', 'SuccessRatePct')),
-    downloadedBytes: toNumber(pick(item, 'downloaded_bytes', 'DownloadedBytes')),
-    dataSharePct:    toNumber(pick(item, 'data_share_pct', 'DataSharePct')),
   }
 }
 
@@ -318,21 +297,20 @@ function IndexerDetailPanel({ row, allRows, winAvgMs }) {
 // ── Section toggle labels ─────────────────────────────────────────────────────
 
 const SECTION_LABELS = {
-  indexerScores:     'Indexer scores',
+  indexerScores:     'Tracker scores',
   avgResponseTimes:  'Avg. response times',
-  apiAccesses:       'Indexer API accesses',
-  nzbDownloads:      'NZB downloads per indexer',
+  apiAccesses:       'Tracker API accesses',
+  nzbDownloads:      'Grabs per tracker',
   searchesByHour:    'Searches per hour of day',
   searchesByWeekday: 'Searches per day of week',
-  downloadsByHour:   'NZB downloads per hour of day',
-  downloadsByWeekday:'NZB downloads per day of week',
+  downloadsByHour:   'Grabs per hour of day',
+  downloadsByWeekday:'Grabs per day of week',
 }
 
 // ── Main component ────────────────────────────────────────────────────────────
 
 export function StatisticsPage() {
   const [indexerStats, setIndexerStats] = useState([])
-  const [providerStats, setProviderStats] = useState([])
   const [timeDist, setTimeDist] = useState(null)
   const [preset, setPreset] = useState('30d')
   const [customRange, setCustomRange] = useState(defaultRange())
@@ -342,10 +320,8 @@ export function StatisticsPage() {
   const [sections, setSections] = useState(
     Object.fromEntries(Object.keys(SECTION_LABELS).map((k) => [k, true]))
   )
-  // Which indexer score row is expanded (name string or null)
+  // Which tracker score row is expanded (name string or null)
   const [expandedIndexer, setExpandedIndexer] = useState(null)
-  // 'usenet' (Newznab indexers) or 'torrent' (Torznab trackers)
-  const [statScope, setStatScope] = useState('usenet')
   const inFlightRef = useRef(false)
 
   function toggleSection(key) {
@@ -365,17 +341,13 @@ export function StatisticsPage() {
       if (from) qs.set('from', from)
       if (to) qs.set('to', to)
       const q = qs.toString()
-      const [idxData, provData] = await Promise.all([
-        apiFetch(`/api/stats/indexers${q ? `?${q}` : ''}`),
-        apiFetch(`/api/stats/providers${q ? `?${q}` : ''}`),
-      ])
+      const idxData = await apiFetch(`/api/stats/indexers${q ? `?${q}` : ''}`)
       setIndexerStats((Array.isArray(idxData?.indexers) ? idxData.indexers : []).map(normalizeIndexerRow).filter(Boolean))
-      setProviderStats((Array.isArray(provData?.providers) ? provData.providers : []).map(normalizeProviderRow).filter(Boolean))
       setTimeDist(idxData?.time_distribution ?? null)
     } catch (err) {
       if (!background) {
         setLoadError(err?.message || 'Failed to load statistics.')
-        setIndexerStats([]); setProviderStats([]); setTimeDist(null)
+        setIndexerStats([]); setTimeDist(null)
       }
     } finally {
       if (!background) setLoading(false)
@@ -417,13 +389,7 @@ export function StatisticsPage() {
     return ''
   }, [customRange.from, customRange.to, preset])
 
-  // Separate Torznab tracker stats from Usenet indexer stats. The scope toggle
-  // only appears once tracker stats exist, so usenet-only setups are unchanged.
-  const hasTrackerStats = useMemo(() => indexerStats.some((r) => r.protocol === 'torrent'), [indexerStats])
-  const effectiveScope = hasTrackerStats ? statScope : 'usenet'
-  const scopedRows = useMemo(
-    () => indexerStats.filter((r) => r.protocol === effectiveScope),
-    [indexerStats, effectiveScope])
+  const scopedRows = indexerStats
 
   const winAvgMs   = useMemo(() => calcWindowAvgMs(scopedRows), [scopedRows])
   const rangeLabel = useMemo(() => `${activeRange.from || 'Beginning'} – ${activeRange.to || 'Now'}`, [activeRange])
@@ -448,8 +414,6 @@ export function StatisticsPage() {
   const downloadsByHour    = useMemo(() => buildHourData(timeDist?.downloads_by_hour ?? new Array(24).fill(0)), [timeDist])
   const downloadsByWeekday = useMemo(() => buildWeekdayData(timeDist?.downloads_by_weekday ?? new Array(7).fill(0)), [timeDist])
 
-  const provSorted    = useMemo(() => [...providerStats].sort((a, b) => b.downloadedBytes - a.downloadedBytes), [providerStats])
-  const provChartData = useMemo(() => provSorted.map(r => ({ name: r.name, value: r.dataSharePct })), [provSorted])
 
   return (
     <div className="flex flex-col gap-4 py-4 md:gap-5 md:py-6 px-4 lg:px-6">
@@ -493,25 +457,6 @@ export function StatisticsPage() {
 
       {loadError && <div className="text-sm text-destructive px-1">{loadError}</div>}
 
-      {/* Scope: Usenet indexers vs Torrent trackers (only once tracker stats exist) */}
-      {hasTrackerStats && (
-        <Card>
-          <CardContent className="pt-4 pb-4">
-            <div className="flex flex-wrap items-center gap-2">
-              <ToggleGroup type="single" value={effectiveScope}
-                onValueChange={(v) => { if (!v) return; setStatScope(v) }}
-                variant="outline" size="sm" className="justify-start">
-                <ToggleGroupItem value="usenet">Usenet indexers</ToggleGroupItem>
-                <ToggleGroupItem value="torrent">Torrent trackers</ToggleGroupItem>
-              </ToggleGroup>
-              <span className="text-xs text-muted-foreground">
-                {effectiveScope === 'torrent' ? 'Showing Torznab tracker stats' : 'Showing Usenet indexer stats'}
-              </span>
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
       {/* Section toggles */}
       <Card>
         <CardContent className="pt-3 pb-3">
@@ -530,14 +475,14 @@ export function StatisticsPage() {
       {sections.indexerScores && (
         <Card>
           <CardHeader className="pb-0 pt-4 px-4">
-            <CardTitle className="text-sm font-semibold">Indexer scores</CardTitle>
+            <CardTitle className="text-sm font-semibold">Tracker scores</CardTitle>
           </CardHeader>
           <CardContent className="px-0 pt-2 pb-0">
             <SimpleTable>
               <thead className="border-b border-border">
                 <tr>
                   <th className="px-3 py-2 font-medium text-xs text-muted-foreground text-left w-6" />
-                  <Th label="Indexer" />
+                  <Th label="Tracker" />
                   <Th label="Avg. score" right
                     help="The results uniqueness score determines how unique a downloaded result is to the indexer. A high score means the indexer often returned results which were either downloaded from that indexer or 'could've been' downloaded from it. Formula: 100 × indexers searched / indexers returning the same result." />
                   <Th label="# of dl searches" right
@@ -581,7 +526,7 @@ export function StatisticsPage() {
               </tbody>
             </SimpleTable>
             <p className="px-3 py-2 text-[11px] text-muted-foreground border-t border-border/40">
-              Click a row to see that indexer&apos;s performance charts. Don&apos;t read too much into these stats — which indexer is picked depends on its score and some random factors like NZB posting time.
+              Click a row to see that tracker&apos;s performance charts. Don&apos;t read too much into these stats — which tracker is picked depends on its score and some random factors like release posting time.
             </p>
           </CardContent>
         </Card>
@@ -594,7 +539,7 @@ export function StatisticsPage() {
           <SimpleTable>
             <thead className="border-b border-border">
               <tr>
-                <Th label="Indexer" />
+                <Th label="Tracker" />
                 <Th label="Avg. response time (ms)" right
                   help="Average response time in milliseconds for successful API searches. Lower is better." />
                 <Th label="Delta" right
@@ -625,12 +570,12 @@ export function StatisticsPage() {
 
       {/* ── Indexer API accesses ── */}
       {sections.apiAccesses && (
-        <StatsCard title="Indexer API accesses">
+        <StatsCard title="Tracker API accesses">
           <HBarChart data={apiChartData} />
           <SimpleTable>
             <thead className="border-b border-border">
               <tr>
-                <Th label="Indexer" />
+                <Th label="Tracker" />
                 <Th label="Avg. per day" right
                   help="Average number of API search calls made to this indexer per day in the selected window." />
                 <Th label="% successful" right
@@ -657,16 +602,16 @@ export function StatisticsPage() {
         </StatsCard>
       )}
 
-      {/* ── NZB downloads per indexer ── */}
+      {/* ── Grabs per tracker ── */}
       {sections.nzbDownloads && (
-        <StatsCard title="NZB downloads per indexer">
+        <StatsCard title="Grabs per tracker">
           <HBarChart data={dlChartData} />
           <SimpleTable>
             <thead className="border-b border-border">
               <tr>
-                <Th label="Indexer" />
-                <Th label="Total" right help="Total NZBs downloaded from this indexer in the selected window." />
-                <Th label="% of all enabled" right help="This indexer's share of all NZB downloads across all enabled indexers." />
+                <Th label="Tracker" />
+                <Th label="Total" right help="Total torrents grabbed from this tracker in the selected window." />
+                <Th label="% of all enabled" right help="This tracker's share of all grabs across all enabled trackers." />
               </tr>
             </thead>
             <tbody>
@@ -683,71 +628,18 @@ export function StatisticsPage() {
         </StatsCard>
       )}
 
-      {/* ── Time distribution (global activity / Usenet downloads) ── */}
-      {effectiveScope === 'usenet' && sections.searchesByHour && (
+      {/* ── Time distribution ── */}
+      {sections.searchesByHour && (
         <StatsCard title="Searches per hour of day"><TimeBarChart data={searchesByHour} /></StatsCard>
       )}
-      {effectiveScope === 'usenet' && sections.searchesByWeekday && (
+      {sections.searchesByWeekday && (
         <StatsCard title="Searches per day of week"><TimeBarChart data={searchesByWeekday} /></StatsCard>
       )}
-      {effectiveScope === 'usenet' && sections.downloadsByHour && (
-        <StatsCard title="NZB downloads per hour of day"><TimeBarChart data={downloadsByHour} /></StatsCard>
+      {sections.downloadsByHour && (
+        <StatsCard title="Grabs per hour of day"><TimeBarChart data={downloadsByHour} /></StatsCard>
       )}
-      {effectiveScope === 'usenet' && sections.downloadsByWeekday && (
-        <StatsCard title="NZB downloads per day of week"><TimeBarChart data={downloadsByWeekday} /></StatsCard>
-      )}
-
-      {/* ── Provider statistics (Usenet NNTP only) ── */}
-      {effectiveScope === 'usenet' && (
-      <StatsCard title="Provider statistics">
-        {provChartData.length > 0 && (
-          <div className="px-4 pt-2 pb-1">
-            <ChartContainer
-              config={{ value: { label: 'Data share %', color: PRIMARY } }}
-              className="w-full"
-              style={{ height: `${Math.max(140, provChartData.length * 34)}px` }}
-            >
-              <BarChart data={provChartData} layout="vertical" margin={{ top: 2, right: 12, left: 4, bottom: 2 }}>
-                <CartesianGrid horizontal={false} />
-                <XAxis type="number" tick={{ fontSize: 11 }} unit="%" />
-                <YAxis type="category" dataKey="name" width={140} tick={{ fontSize: 11 }} />
-                <ChartTooltip content={<ChartTooltipContent />} />
-                <Bar dataKey="value" fill={PRIMARY} radius={3} name="value" />
-              </BarChart>
-            </ChartContainer>
-          </div>
-        )}
-        <SimpleTable>
-          <thead className="border-b border-border">
-            <tr>
-              <Th label="Provider" />
-              <Th label="Articles" right help="Total article checks (available + missing) in this window." />
-              <Th label="Available" right help="Articles confirmed present on the server." />
-              <Th label="Missing" right help="Articles not found on the server (404)." />
-              <Th label="Success" right help="Percentage of article checks that returned an available result." />
-              <Th label="Downloaded" right help="Total data downloaded from this provider." />
-              <Th label="Data share" right help="This provider's share of all downloaded bytes across all providers." />
-            </tr>
-          </thead>
-          <tbody>
-            {provSorted.length === 0 && <EmptyRow cols={7} />}
-            {provSorted.map((row) => (
-              <tr key={row.name} className="border-b border-border/40 hover:bg-muted/30 transition-colors">
-                <Td>
-                  <div>{row.name}</div>
-                  {row.host && <div className="text-xs text-muted-foreground">{row.host}</div>}
-                </Td>
-                <Td right>{row.articles}</Td>
-                <Td right>{row.available}</Td>
-                <Td right>{row.missing}</Td>
-                <Td right>{fmtPct(row.successRatePct)}</Td>
-                <Td right>{formatDownloadedBytes(row.downloadedBytes)}</Td>
-                <Td right>{fmtPct(row.dataSharePct)}</Td>
-              </tr>
-            ))}
-          </tbody>
-        </SimpleTable>
-      </StatsCard>
+      {sections.downloadsByWeekday && (
+        <StatsCard title="Grabs per day of week"><TimeBarChart data={downloadsByWeekday} /></StatsCard>
       )}
 
     </div>

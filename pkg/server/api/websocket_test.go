@@ -34,61 +34,6 @@ func TestValidateConfigRejectsUnresolvedProwlarrIndexerPlaceholder(t *testing.T)
 	}
 }
 
-func TestValidateConfigWithPlanIgnoresUnchangedInvalidProviderDuringEdit(t *testing.T) {
-	enabled := true
-	disabled := false
-	s := &Server{}
-
-	current := &config.Config{
-		Providers: []config.Provider{
-			{Enabled: &enabled},
-			{Enabled: &disabled, Host: "provider.example"},
-		},
-	}
-	next := &config.Config{
-		Providers: []config.Provider{
-			{Enabled: &enabled},
-			{Enabled: &disabled, Host: "provider.example", Name: "Updated"},
-		},
-	}
-	body, err := json.Marshal(map[string]interface{}{"providers": next.Providers})
-	if err != nil {
-		t.Fatalf("marshal body: %v", err)
-	}
-
-	errs := s.validateConfigWithPlan(next, validationPlanFromPatch(body, current, next))
-	if got := errs["providers.0.host"]; got != "" {
-		t.Fatalf("expected unchanged invalid provider to be ignored during unrelated edit, got %q", got)
-	}
-}
-
-func TestValidateConfigWithPlanAllowsProviderDeleteDespiteOtherInvalidProvider(t *testing.T) {
-	enabled := true
-	disabled := false
-	s := &Server{}
-
-	current := &config.Config{
-		Providers: []config.Provider{
-			{Enabled: &enabled},
-			{Enabled: &disabled, Host: "provider.example"},
-		},
-	}
-	next := &config.Config{
-		Providers: []config.Provider{
-			{Enabled: &enabled},
-		},
-	}
-	body, err := json.Marshal(map[string]interface{}{"providers": next.Providers})
-	if err != nil {
-		t.Fatalf("marshal body: %v", err)
-	}
-
-	errs := s.validateConfigWithPlan(next, validationPlanFromPatch(body, current, next))
-	if got := errs["providers.0.host"]; got != "" {
-		t.Fatalf("expected provider delete to skip unrelated provider validation, got %q", got)
-	}
-}
-
 func TestValidateConfigWithPlanIgnoresUnchangedInvalidIndexerDuringEdit(t *testing.T) {
 	enabled := true
 	disabled := false
@@ -153,7 +98,6 @@ func TestValidateConfigRejectsOutOfRangePlaybackStartupTimeout(t *testing.T) {
 
 	errs := s.validateConfig(&config.Config{
 		KeepLogFiles:                  9,
-		NZBHistoryRetentionDays:       90,
 		PlaybackStartupTimeoutSeconds: 0,
 	})
 
@@ -167,7 +111,6 @@ func TestValidateConfigRejectsInvalidGlobalIndexerProxyURL(t *testing.T) {
 
 	errs := s.validateConfig(&config.Config{
 		KeepLogFiles:                  9,
-		NZBHistoryRetentionDays:       90,
 		PlaybackStartupTimeoutSeconds: 5,
 		IndexerProxyURL:               "socks5://127.0.0.1:1080",
 	})
@@ -189,7 +132,6 @@ func TestValidateConfigRejectsUnreachableGlobalIndexerProxyURL(t *testing.T) {
 	enabled := true
 	errs := s.validateConfig(&config.Config{
 		KeepLogFiles:                  9,
-		NZBHistoryRetentionDays:       90,
 		PlaybackStartupTimeoutSeconds: 5,
 		IndexerProxyURL:               "http://" + addr,
 		Indexers: []config.IndexerConfig{{

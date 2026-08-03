@@ -33,7 +33,6 @@ FROM alpine:latest
 RUN apk add --no-cache ca-certificates tzdata
 WORKDIR /app
 COPY --from=backend /out/seedstream .
-# 7000: addon UI + Stremio/AIOStreams.  119: NNTP proxy for SABnzbd/NZBGet (optional).
+# 7000: addon UI + Stremio/AIOStreams.
 EXPOSE 7000
-EXPOSE 119
 CMD ["./seedstream"]

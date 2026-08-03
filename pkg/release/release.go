@@ -44,26 +44,26 @@ type Release struct {
 	Available *bool
 	Duration  float64
 
-	// Protocol distinguishes the source type: "usenet" (NZB) or "torrent".
-	// Empty is treated as "usenet" for backward compatibility.
+	// Protocol distinguishes the source type. "torrent" marks a Torznab result;
+	// anything else (including empty) is a non-torrent result SeedStream cannot play.
 	Protocol string
 
-	// Torrent-only fields, populated from Torznab attributes. Zero/empty for NZBs.
+	// Torrent fields, populated from Torznab attributes.
 	Magnet   string // magnet: URI when the indexer provides one
 	InfoHash string // BitTorrent v1 info hash (lowercased)
 	Seeders  int    // current seeders reported by the indexer
 	Peers    int    // current leechers/peers reported by the indexer
 
-	// Uniqueness plumbing for event-based statistics (NZBHydra2-style).
-	// IndexersInSearch is the number of indexers that participated in the
-	// originating search; IndexersWithResult is how many distinct indexers
+	// Uniqueness plumbing for event-based statistics.
+	// IndexersInSearch is the number of trackers that participated in the
+	// originating search; IndexersWithResult is how many distinct trackers
 	// returned this same (normalized-title) result. Used to compute the
-	// download uniqueness score: 100 * IndexersInSearch / IndexersWithResult.
+	// grab uniqueness score: 100 * IndexersInSearch / IndexersWithResult.
 	IndexersInSearch   int
 	IndexersWithResult int
 }
 
-// IsTorrent reports whether this release is a torrent rather than a Usenet NZB.
+// IsTorrent reports whether this release is a playable torrent.
 func (r *Release) IsTorrent() bool {
 	if r == nil {
 		return false

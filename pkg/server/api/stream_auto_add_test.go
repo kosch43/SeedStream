@@ -11,126 +11,97 @@ func boolPtr(v bool) *bool { return &v }
 
 func TestApplyStreamAutoSelectionsSyncsEnabledAndKeepsOrderPreference(t *testing.T) {
 	nextCfg := &config.Config{
-		Providers: []config.Provider{
-			{Name: "ProviderA", Enabled: boolPtr(true)},
-			{Name: "ProviderB", Enabled: boolPtr(false)},
-			{Name: "ProviderC", Enabled: boolPtr(true)},
-		},
 		Indexers: []config.IndexerConfig{
-			{Name: "IndexerA", Enabled: boolPtr(true)},
-			{Name: "IndexerB", Enabled: boolPtr(false)},
-			{Name: "IndexerC", Enabled: boolPtr(true)},
+			{Name: "TrackerA", Enabled: boolPtr(true)},
+			{Name: "TrackerB", Enabled: boolPtr(false)},
+			{Name: "TrackerC", Enabled: boolPtr(true)},
 		},
 		Streams: map[string]*config.StreamEntry{
 			"default": {
-				AutoAddProviders:   boolPtr(true),
-				AutoAddIndexers:    boolPtr(true),
-				ProviderSelections: []string{"ProviderC", "ProviderB", "ProviderA", "Missing"},
-				IndexerSelections:  []string{"IndexerC", "IndexerB", "IndexerA", "Missing"},
+				AutoAddIndexers:   boolPtr(true),
+				IndexerSelections: []string{"TrackerC", "TrackerB", "TrackerA", "Missing"},
 				IndexerOverrides: map[string]config.IndexerSearchConfig{
-					"IndexerC": {SearchResultLimit: 10},
-					"IndexerB": {SearchResultLimit: 20},
+					"TrackerC": {SearchResultLimit: 10},
+					"TrackerB": {SearchResultLimit: 20},
 				},
 			},
 			"custom": {
-				AutoAddProviders:   boolPtr(false),
-				AutoAddIndexers:    boolPtr(false),
-				ProviderSelections: []string{"ProviderA", "ProviderB"},
-				IndexerSelections:  []string{"IndexerA", "IndexerB"},
+				AutoAddIndexers:   boolPtr(false),
+				IndexerSelections: []string{"TrackerA", "TrackerB"},
 			},
 		},
 	}
 
 	applyStreamAutoSelections(nextCfg)
 
-	if got := nextCfg.Streams["default"].ProviderSelections; !reflect.DeepEqual(got, []string{"ProviderC", "ProviderA"}) {
-		t.Fatalf("default provider selections = %#v", got)
+	if got := nextCfg.Streams["default"].IndexerSelections; !reflect.DeepEqual(got, []string{"TrackerC", "TrackerA"}) {
+		t.Fatalf("default tracker selections = %#v", got)
 	}
-	if got := nextCfg.Streams["default"].IndexerSelections; !reflect.DeepEqual(got, []string{"IndexerC", "IndexerA"}) {
-		t.Fatalf("default indexer selections = %#v", got)
+	if _, ok := nextCfg.Streams["default"].IndexerOverrides["TrackerB"]; ok {
+		t.Fatalf("expected disabled tracker override to be removed")
 	}
-	if _, ok := nextCfg.Streams["default"].IndexerOverrides["IndexerB"]; ok {
-		t.Fatalf("expected disabled indexer override to be removed")
+	if _, ok := nextCfg.Streams["default"].IndexerOverrides["TrackerC"]; !ok {
+		t.Fatalf("expected enabled tracker override to remain")
 	}
-	if _, ok := nextCfg.Streams["default"].IndexerOverrides["IndexerC"]; !ok {
-		t.Fatalf("expected enabled indexer override to remain")
-	}
-	if got := nextCfg.Streams["custom"].ProviderSelections; !reflect.DeepEqual(got, []string{"ProviderA", "ProviderB"}) {
-		t.Fatalf("custom provider selections = %#v", got)
-	}
-	if got := nextCfg.Streams["custom"].IndexerSelections; !reflect.DeepEqual(got, []string{"IndexerA", "IndexerB"}) {
-		t.Fatalf("custom indexer selections = %#v", got)
+	if got := nextCfg.Streams["custom"].IndexerSelections; !reflect.DeepEqual(got, []string{"TrackerA", "TrackerB"}) {
+		t.Fatalf("custom tracker selections = %#v", got)
 	}
 }
 
 func TestApplyStreamAutoSelectionsSkipsWhenFlagMissing(t *testing.T) {
 	nextCfg := &config.Config{
-		Providers: []config.Provider{
-			{Name: "ProviderA", Enabled: boolPtr(true)},
-			{Name: "ProviderB", Enabled: boolPtr(false)},
+		Indexers: []config.IndexerConfig{
+			{Name: "TrackerA", Enabled: boolPtr(true)},
+			{Name: "TrackerB", Enabled: boolPtr(false)},
 		},
 		Streams: map[string]*config.StreamEntry{
 			"stream": {
-				ProviderSelections: []string{"ProviderA"},
+				IndexerSelections: []string{"TrackerA"},
 			},
 		},
 	}
 
 	applyStreamAutoSelections(nextCfg)
 
-	if got := nextCfg.Streams["stream"].ProviderSelections; !reflect.DeepEqual(got, []string{"ProviderA"}) {
-		t.Fatalf("provider selections = %#v", got)
+	if got := nextCfg.Streams["stream"].IndexerSelections; !reflect.DeepEqual(got, []string{"TrackerA"}) {
+		t.Fatalf("tracker selections = %#v", got)
 	}
 }
 
 func TestApplyStreamNameRenamesRenamesSelectionsAndOverrides(t *testing.T) {
 	streams := map[string]*config.StreamEntry{
 		"stream": {
-			ProviderSelections: []string{"ProviderOne", "ProviderTwo"},
-			IndexerSelections:  []string{"IndexerOne", "IndexerTwo"},
+			IndexerSelections: []string{"TrackerOne", "TrackerTwo"},
 			IndexerOverrides: map[string]config.IndexerSearchConfig{
-				"IndexerOne": {SearchResultLimit: 10},
-				"IndexerTwo": {SearchResultLimit: 20},
+				"TrackerOne": {SearchResultLimit: 10},
+				"TrackerTwo": {SearchResultLimit: 20},
 			},
 		},
 	}
 
-	applyStreamNameRenames(
-		streams,
-		map[string]string{"providerone": "ProviderRenamed"},
-		map[string]string{"indexerone": "IndexerRenamed"},
-	)
+	applyStreamNameRenames(streams, map[string]string{"trackerone": "TrackerRenamed"})
 
-	if got := streams["stream"].ProviderSelections; !reflect.DeepEqual(got, []string{"ProviderRenamed", "ProviderTwo"}) {
-		t.Fatalf("provider selections = %#v", got)
+	if got := streams["stream"].IndexerSelections; !reflect.DeepEqual(got, []string{"TrackerRenamed", "TrackerTwo"}) {
+		t.Fatalf("tracker selections = %#v", got)
 	}
-	if got := streams["stream"].IndexerSelections; !reflect.DeepEqual(got, []string{"IndexerRenamed", "IndexerTwo"}) {
-		t.Fatalf("indexer selections = %#v", got)
-	}
-	if _, ok := streams["stream"].IndexerOverrides["IndexerRenamed"]; !ok {
+	if _, ok := streams["stream"].IndexerOverrides["TrackerRenamed"]; !ok {
 		t.Fatalf("expected renamed override to exist")
 	}
-	if _, ok := streams["stream"].IndexerOverrides["IndexerOne"]; ok {
+	if _, ok := streams["stream"].IndexerOverrides["TrackerOne"]; ok {
 		t.Fatalf("expected old override key to be removed")
 	}
 }
 
 func TestRenamedNamesByIndexDetectsNameChanges(t *testing.T) {
-	currentProviders := []config.Provider{
-		{Name: "ProviderOne"},
-		{Name: "ProviderTwo"},
+	current := []config.IndexerConfig{{Name: "TrackerOne"}, {Name: "TrackerTwo"}}
+	next := []config.IndexerConfig{{Name: "TrackerRenamed"}, {Name: "TrackerTwo"}}
+
+	renames := renamedNamesByIndex(current, next, func(idx config.IndexerConfig) string { return idx.Name })
+
+	if got := renames["trackerone"]; got != "TrackerRenamed" {
+		t.Fatalf("tracker rename map = %#v", renames)
 	}
-	nextProviders := []config.Provider{
-		{Name: "ProviderRenamed"},
-		{Name: "ProviderTwo"},
-	}
-	providerRenames := renamedNamesByIndex(currentProviders, nextProviders, func(provider config.Provider) string {
-		return provider.Name
-	})
-	if got := providerRenames["providerone"]; got != "ProviderRenamed" {
-		t.Fatalf("provider rename map = %#v", providerRenames)
-	}
-	if _, exists := providerRenames["providertwo"]; exists {
-		t.Fatalf("unexpected rename for unchanged provider: %#v", providerRenames)
+	if _, exists := renames["trackertwo"]; exists {
+		t.Fatalf("unexpected rename for unchanged tracker: %#v", renames)
 	}
 }

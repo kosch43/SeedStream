@@ -40,14 +40,11 @@ type Stream struct {
 	Order               int                                   `json:"order,omitempty"`
 	FilterSortingMode   string                                `json:"filter_sorting_mode,omitempty"`
 	IndexerMode         string                                `json:"indexer_mode,omitempty"`
-	UseAvailNZB         *bool                                 `json:"use_availnzb,omitempty"`
 	CombineResults      *bool                                 `json:"combine_results,omitempty"`
 	EnableFailover      *bool                                 `json:"enable_failover,omitempty"`
 	ResultsMode         string                                `json:"results_mode,omitempty"`
-	AutoAddProviders    *bool                                 `json:"auto_add_providers,omitempty"`
 	AutoAddIndexers     *bool                                 `json:"auto_add_indexers,omitempty"`
 	IndexerOverrides    map[string]config.IndexerSearchConfig `json:"indexer_overrides"`
-	ProviderSelections  []string                              `json:"provider_selections,omitempty"`
 	IndexerSelections   []string                              `json:"indexer_selections,omitempty"`
 	MovieSearchQueries  []string                              `json:"movie_search_queries,omitempty"`
 	SeriesSearchQueries []string                              `json:"series_search_queries,omitempty"`
@@ -159,14 +156,11 @@ func (dm *StreamManager) load() error {
 				Order:               d.Order,
 				FilterSortingMode:   d.FilterSortingMode,
 				IndexerMode:         d.IndexerMode,
-				UseAvailNZB:         d.UseAvailNZB,
 				CombineResults:      d.CombineResults,
 				EnableFailover:      d.EnableFailover,
 				ResultsMode:         d.ResultsMode,
-				AutoAddProviders:    d.AutoAddProviders,
 				AutoAddIndexers:     d.AutoAddIndexers,
 				IndexerOverrides:    d.IndexerOverrides,
-				ProviderSelections:  append([]string(nil), d.ProviderSelections...),
 				IndexerSelections:   append([]string(nil), d.IndexerSelections...),
 				MovieSearchQueries:  append([]string(nil), d.MovieSearchQueries...),
 				SeriesSearchQueries: append([]string(nil), d.SeriesSearchQueries...),
@@ -210,14 +204,11 @@ func (dm *StreamManager) syncStreamsFromConfigLocked() bool {
 			Order:               e.Order,
 			FilterSortingMode:   e.FilterSortingMode,
 			IndexerMode:         e.IndexerMode,
-			UseAvailNZB:         e.UseAvailNZB,
 			CombineResults:      e.CombineResults,
 			EnableFailover:      e.EnableFailover,
 			ResultsMode:         e.ResultsMode,
-			AutoAddProviders:    e.AutoAddProviders,
 			AutoAddIndexers:     e.AutoAddIndexers,
 			IndexerOverrides:    ov,
-			ProviderSelections:  append([]string(nil), e.ProviderSelections...),
 			IndexerSelections:   append([]string(nil), e.IndexerSelections...),
 			MovieSearchQueries:  append([]string(nil), e.MovieSearchQueries...),
 			SeriesSearchQueries: append([]string(nil), e.SeriesSearchQueries...),
@@ -250,14 +241,11 @@ func (dm *StreamManager) saveLocked() error {
 				Order:               d.Order,
 				FilterSortingMode:   d.FilterSortingMode,
 				IndexerMode:         d.IndexerMode,
-				UseAvailNZB:         d.UseAvailNZB,
 				CombineResults:      d.CombineResults,
 				EnableFailover:      d.EnableFailover,
 				ResultsMode:         d.ResultsMode,
-				AutoAddProviders:    d.AutoAddProviders,
 				AutoAddIndexers:     d.AutoAddIndexers,
 				IndexerOverrides:    ov,
-				ProviderSelections:  append([]string(nil), d.ProviderSelections...),
 				IndexerSelections:   append([]string(nil), d.IndexerSelections...),
 				MovieSearchQueries:  append([]string(nil), d.MovieSearchQueries...),
 				SeriesSearchQueries: append([]string(nil), d.SeriesSearchQueries...),
@@ -415,14 +403,11 @@ func (dm *StreamManager) GetAllStreams() []Stream {
 			Order:               stream.Order,
 			FilterSortingMode:   stream.FilterSortingMode,
 			IndexerMode:         stream.IndexerMode,
-			UseAvailNZB:         stream.UseAvailNZB,
 			CombineResults:      stream.CombineResults,
 			EnableFailover:      stream.EnableFailover,
 			ResultsMode:         stream.ResultsMode,
-			AutoAddProviders:    stream.AutoAddProviders,
 			AutoAddIndexers:     stream.AutoAddIndexers,
 			IndexerOverrides:    stream.IndexerOverrides,
-			ProviderSelections:  append([]string(nil), stream.ProviderSelections...),
 			IndexerSelections:   append([]string(nil), stream.IndexerSelections...),
 			MovieSearchQueries:  append([]string(nil), stream.MovieSearchQueries...),
 			SeriesSearchQueries: append([]string(nil), stream.SeriesSearchQueries...),
@@ -496,12 +481,9 @@ func (dm *StreamManager) CreateStream(username, password string, adminUsername s
 		Token:               token,
 		Order:               dm.nextStreamOrderLocked(),
 		IndexerMode:         "combine",
-		UseAvailNZB:         ptrBool(true),
 		CombineResults:      ptrBool(true),
-		AutoAddProviders:    ptrBool(true),
 		AutoAddIndexers:     ptrBool(true),
 		IndexerOverrides:    make(map[string]config.IndexerSearchConfig),
-		ProviderSelections:  []string{},
 		IndexerSelections:   []string{},
 		MovieSearchQueries:  []string{},
 		SeriesSearchQueries: []string{},
@@ -600,24 +582,7 @@ func (dm *StreamManager) UpdateStreamSearchQueries(username string, movieSearchQ
 	return nil
 }
 
-func (dm *StreamManager) UpdateStreamProviderSelections(username string, providerSelections []string) error {
-	dm.mu.Lock()
-	defer dm.mu.Unlock()
-
-	stream, exists := dm.streams[username]
-	if !exists {
-		return fmt.Errorf("stream not found")
-	}
-
-	stream.ProviderSelections = append([]string(nil), providerSelections...)
-
-	if err := dm.saveLocked(); err != nil {
-		return fmt.Errorf("failed to save stream provider selections: %w", err)
-	}
-	return nil
-}
-
-func (dm *StreamManager) UpdateStreamGeneralSettings(username, filterSortingMode, indexerMode string, useAvailNZB, combineResults, enableFailover *bool, resultsMode string) error {
+func (dm *StreamManager) UpdateStreamGeneralSettings(username, filterSortingMode, indexerMode string, combineResults, enableFailover *bool, resultsMode string) error {
 	dm.mu.Lock()
 	defer dm.mu.Unlock()
 
@@ -628,7 +593,6 @@ func (dm *StreamManager) UpdateStreamGeneralSettings(username, filterSortingMode
 
 	stream.FilterSortingMode = strings.TrimSpace(filterSortingMode)
 	stream.IndexerMode = strings.TrimSpace(indexerMode)
-	stream.UseAvailNZB = useAvailNZB
 	stream.CombineResults = combineResults
 	stream.EnableFailover = enableFailover
 	stream.ResultsMode = strings.TrimSpace(resultsMode)
@@ -654,18 +618,15 @@ func (dm *StreamManager) UpdateStreamConfig(username string, streamConfig *Strea
 
 	stream.FilterSortingMode = strings.TrimSpace(streamConfig.FilterSortingMode)
 	stream.IndexerMode = strings.TrimSpace(streamConfig.IndexerMode)
-	stream.UseAvailNZB = streamConfig.UseAvailNZB
 	stream.CombineResults = streamConfig.CombineResults
 	stream.EnableFailover = streamConfig.EnableFailover
 	stream.ResultsMode = strings.TrimSpace(streamConfig.ResultsMode)
-	stream.AutoAddProviders = streamConfig.AutoAddProviders
 	stream.AutoAddIndexers = streamConfig.AutoAddIndexers
 	if streamConfig.IndexerOverrides == nil {
 		stream.IndexerOverrides = make(map[string]config.IndexerSearchConfig)
 	} else {
 		stream.IndexerOverrides = streamConfig.IndexerOverrides
 	}
-	stream.ProviderSelections = append([]string(nil), streamConfig.ProviderSelections...)
 	stream.IndexerSelections = append([]string(nil), streamConfig.IndexerSelections...)
 	stream.MovieSearchQueries = append([]string(nil), streamConfig.MovieSearchQueries...)
 	stream.SeriesSearchQueries = append([]string(nil), streamConfig.SeriesSearchQueries...)

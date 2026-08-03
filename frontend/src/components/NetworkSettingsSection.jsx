@@ -13,22 +13,15 @@ import { cn } from "@/lib/utils"
 
 const CARD_FIELDS = {
   addon: ['addon_base_url', 'addon_port'],
-  proxy: ['proxy_enabled', 'proxy_host', 'proxy_port', 'proxy_auth_user', 'proxy_auth_pass'],
-  useragent: ['indexer_query_header', 'indexer_grab_header', 'provider_header'],
+  useragent: ['indexer_query_header', 'indexer_grab_header'],
 }
 
 function pickInitialValues(values = {}) {
   return {
     addon_port: Number(values.addon_port ?? 7000),
     addon_base_url: values.addon_base_url ?? '',
-    proxy_enabled: values.proxy_enabled !== false,
-    proxy_port: Number(values.proxy_port ?? 119),
-    proxy_host: values.proxy_host ?? '',
-    proxy_auth_user: values.proxy_auth_user ?? '',
-    proxy_auth_pass: values.proxy_auth_pass ?? '',
     indexer_query_header: values.indexer_query_header ?? '',
     indexer_grab_header: values.indexer_grab_header ?? '',
-    provider_header: values.provider_header ?? '',
   }
 }
 
@@ -69,7 +62,6 @@ export const NetworkSettingsSection = forwardRef(function NetworkSettingsSection
   const form = useForm({ defaultValues: defaults })
   const { control, handleSubmit, reset, getValues, formState } = form
   const watchedValues = useWatch({ control })
-  const proxyEnabled = form.watch('proxy_enabled') !== false
 
   useEffect(() => {
     const currentValues = pickInitialValues(watchedValues)
@@ -124,11 +116,6 @@ export const NetworkSettingsSection = forwardRef(function NetworkSettingsSection
   const handleCardSave = (cardId) => handleSubmit(async () => {
     if (cardId === 'addon' && formState.dirtyFields?.addon_port) {
       setRestartTarget('addon')
-      setShowRestartConfirm(true)
-      return
-    }
-    if (cardId === 'proxy' && formState.dirtyFields?.proxy_port) {
-      setRestartTarget('proxy')
       setShowRestartConfirm(true)
       return
     }
@@ -207,84 +194,6 @@ export const NetworkSettingsSection = forwardRef(function NetworkSettingsSection
             </CardContent>
           </Card>
 
-          <Card>
-            <CardHeader>
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0 flex-1 max-w-[26rem] space-y-0.5">
-                  <CardTitle>NNTP Proxy Server</CardTitle>
-                  <CardDescription>Allow other apps (SABnzbd, NZBGet) to use SeedStream as a localized news server.</CardDescription>
-                </div>
-                <div className="shrink-0">{renderSaveButton('proxy')}</div>
-              </div>
-              {(envOverrides.includes('proxy_port') || envOverrides.includes('proxy_host') || envOverrides.includes('proxy_enabled') || envOverrides.includes('proxy_auth_user') || envOverrides.includes('proxy_auth_pass')) && (
-                <div className="mt-1">
-                  <EnvOverrideIndicator show message="Some settings are overwritten by environment variables (NNTP_PROXY_*) on restart." />
-                </div>
-              )}
-            </CardHeader>
-            <CardContent>
-              <div className="mb-4">
-                <FormField control={control} name="proxy_enabled" render={({ field }) => (
-                  <FormItem className="rounded-md border border-border/60 p-3">
-                    <div className={stackedFieldRowClass}>
-                      <FormLabel className={labelClass}>Enable NNTP Proxy</FormLabel>
-                      <FormControl><Switch checked={field.value !== false} onCheckedChange={field.onChange} className={showUnsavedHighlights && formState.dirtyFields?.proxy_enabled ? 'ring-2 ring-destructive ring-offset-2 ring-offset-background' : ''} /></FormControl>
-                    </div>
-                    <FormDescription className="mt-3">Turn the local NNTP proxy server on or off.</FormDescription>
-                  </FormItem>
-                )} />
-              </div>
-              <div className="rounded-md border border-border/60">
-                <FormField control={control} name="proxy_host" render={({ field }) => (
-                  <FormItem className="rounded-none border-0 p-3">
-                    <div className={stackedFieldRowClass}>
-                      <FormLabel className={cn(labelClass, 'sm:flex-1')}>Bind Host</FormLabel>
-                      <FormControl><Input placeholder="0.0.0.0" disabled={!proxyEnabled} className={fieldClassName('proxy_host', `h-9 ${controlWideClass}`)} {...field} /></FormControl>
-                    </div>
-                    <FormDescription className="mt-3">Which local address the proxy server should bind to.</FormDescription>
-                    <FormMessage />
-                  </FormItem>
-                )} />
-                <FormField control={control} name="proxy_port" render={({ field }) => (
-                  <FormItem className="relative rounded-none border-0 p-3">
-                    <div className="absolute left-3 right-3 top-0 border-t border-border/60" />
-                    <div className={stackedFieldRowClass}>
-                      <FormLabel className={cn(labelClass, 'sm:flex-1')}>Port</FormLabel>
-                      <FormControl><Input type="number" disabled={!proxyEnabled} className={fieldClassName('proxy_port', `h-9 ${controlMediumClass}`)} {...field} onChange={e => field.onChange(e.target.valueAsNumber)} /></FormControl>
-                    </div>
-                    <FormDescription className="mt-3">The port other apps use when connecting to the local NNTP proxy.</FormDescription>
-                    <FormMessage />
-                  </FormItem>
-                )} />
-                <FormField control={control} name="proxy_auth_user" render={({ field }) => (
-                  <FormItem className="relative rounded-none border-0 p-3">
-                    <div className="absolute left-3 right-3 top-0 border-t border-border/60" />
-                    <div className={stackedFieldRowClass}>
-                      <FormLabel className={cn(labelClass, 'sm:flex-1')}>Proxy Username</FormLabel>
-                      <FormControl><Input disabled={!proxyEnabled} className={fieldClassName('proxy_auth_user', `h-9 ${controlWideClass}`)} {...field} /></FormControl>
-                    </div>
-                    <FormDescription className="mt-3">Optional username clients must provide when using the proxy.</FormDescription>
-                    <FormMessage />
-                  </FormItem>
-                )} />
-                <FormField control={control} name="proxy_auth_pass" render={({ field }) => (
-                  <FormItem className="relative rounded-none border-0 p-3">
-                    <div className="absolute left-3 right-3 top-0 border-t border-border/60" />
-                    <div className={stackedFieldRowClass}>
-                      <FormLabel className={cn(labelClass, 'sm:flex-1')}>Proxy Password</FormLabel>
-                      <FormControl>
-                        <div className={controlWideClass}>
-                          <PasswordInput disabled={!proxyEnabled} className={fieldClassName('proxy_auth_pass', 'h-9 w-full')} {...field} />
-                        </div>
-                      </FormControl>
-                    </div>
-                    <FormDescription className="mt-3">Optional password clients must provide when using the proxy.</FormDescription>
-                    <FormMessage />
-                  </FormItem>
-                )} />
-              </div>
-            </CardContent>
-          </Card>
         </div>
 
         <Card>
@@ -292,7 +201,7 @@ export const NetworkSettingsSection = forwardRef(function NetworkSettingsSection
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0 flex-1 max-w-[34rem] space-y-0.5">
                 <CardTitle>User-Agent</CardTitle>
-                <CardDescription>Custom User-Agent headers for indexer queries, NZB grabs, and provider-facing requests.</CardDescription>
+                <CardDescription>Custom User-Agent headers for tracker queries and torrent grabs.</CardDescription>
               </div>
               <div className="shrink-0">{renderSaveButton('useragent')}</div>
             </div>
@@ -302,10 +211,10 @@ export const NetworkSettingsSection = forwardRef(function NetworkSettingsSection
               <FormField control={control} name="indexer_query_header" render={({ field }) => (
                 <FormItem className="rounded-none border-0 p-3">
                   <div className={stackedFieldRowClass}>
-                    <FormLabel className={cn(labelClass, 'flex items-center gap-1.5 sm:flex-1')}>Indexer Query Header <EnvOverrideIndicator show={envOverrides.includes('indexer_query_header')} /></FormLabel>
+                    <FormLabel className={cn(labelClass, 'flex items-center gap-1.5 sm:flex-1')}>Tracker Query Header <EnvOverrideIndicator show={envOverrides.includes('indexer_query_header')} /></FormLabel>
                     <FormControl><Input className={fieldClassName('indexer_query_header', `h-9 ${controlWideClass}`)} {...field} value={field.value || ''} placeholder="Prowlarr/2.3.0.5236" /></FormControl>
                   </div>
-                  <FormDescription className="mt-3">Used for indexer search and capability requests.</FormDescription>
+                  <FormDescription className="mt-3">Used for tracker search and capability requests.</FormDescription>
                   <FormMessage />
                 </FormItem>
               )} />
@@ -313,21 +222,10 @@ export const NetworkSettingsSection = forwardRef(function NetworkSettingsSection
                 <FormItem className="relative rounded-none border-0 p-3">
                   <div className="absolute left-3 right-3 top-0 border-t border-border/60" />
                   <div className={stackedFieldRowClass}>
-                    <FormLabel className={cn(labelClass, 'flex items-center gap-1.5 sm:flex-1')}>Indexer Grab Header <EnvOverrideIndicator show={envOverrides.includes('indexer_grab_header')} /></FormLabel>
-                    <FormControl><Input className={fieldClassName('indexer_grab_header', `h-9 ${controlWideClass}`)} {...field} value={field.value || ''} placeholder="SABnzbd/4.5.5" /></FormControl>
+                    <FormLabel className={cn(labelClass, 'flex items-center gap-1.5 sm:flex-1')}>Tracker Grab Header <EnvOverrideIndicator show={envOverrides.includes('indexer_grab_header')} /></FormLabel>
+                    <FormControl><Input className={fieldClassName('indexer_grab_header', `h-9 ${controlWideClass}`)} {...field} value={field.value || ''} placeholder="qBittorrent/5.0" /></FormControl>
                   </div>
-                  <FormDescription className="mt-3">Used when grabbing NZBs from indexers.</FormDescription>
-                  <FormMessage />
-                </FormItem>
-              )} />
-              <FormField control={control} name="provider_header" render={({ field }) => (
-                <FormItem className="relative rounded-none border-0 p-3">
-                  <div className="absolute left-3 right-3 top-0 border-t border-border/60" />
-                  <div className={stackedFieldRowClass}>
-                    <FormLabel className={cn(labelClass, 'flex items-center gap-1.5 sm:flex-1')}>Provider Header <EnvOverrideIndicator show={envOverrides.includes('provider_header')} /></FormLabel>
-                    <FormControl><Input className={fieldClassName('provider_header', `h-9 ${controlWideClass}`)} {...field} value={field.value || ''} placeholder="VLC/1.2.3.4" /></FormControl>
-                  </div>
-                  <FormDescription className="mt-3">Custom provider-facing User-Agent header.</FormDescription>
+                  <FormDescription className="mt-3">Used when grabbing .torrent files from trackers.</FormDescription>
                   <FormMessage />
                 </FormItem>
               )} />
@@ -342,9 +240,7 @@ export const NetworkSettingsSection = forwardRef(function NetworkSettingsSection
             if (!nextOpen) setRestartTarget('')
           }}
           title="Restart required"
-          description={restartTarget === 'proxy'
-            ? 'Changing the NNTP proxy port requires a SeedStream restart. Do you want to save this change now?'
-            : 'Changing the addon port requires a SeedStream restart. Do you want to save this change now?'}
+          description="Changing the addon port requires a SeedStream restart. Do you want to save this change now?"
           confirmLabel="Save"
           confirmVariant="destructive"
           onConfirm={() => {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"os"
@@ -8,8 +9,6 @@ import (
 	"runtime/debug"
 	"strings"
 	"time"
-
-	"context"
 
 	"seedstream/pkg/auth"
 	"seedstream/pkg/core/app"
@@ -21,19 +20,14 @@ import (
 	"seedstream/pkg/server/api"
 	"seedstream/pkg/server/stremio"
 	"seedstream/pkg/server/web"
-	"seedstream/pkg/services/availnzb"
 	"seedstream/pkg/services/cerberus"
 	"seedstream/pkg/session"
 	"seedstream/pkg/torrent"
-	"seedstream/pkg/usenet/nntp/proxy"
 
 	"github.com/joho/godotenv"
 )
 
 var (
-	AvailNZBURL    = "https://snzb.stream"
-	AvailNZBAPIKey = ""
-
 	TMDBKey = ""
 
 	TVDBKey = ""
@@ -58,25 +52,14 @@ func main() {
 		initialization.WaitForInputAndExit(fmt.Errorf("configuration error: %w", err))
 	}
 	logger.SetLevel(cfg.LogLevel)
-	logger.SetVerboseNNTPLogging(cfg.VerboseNNTPLogging)
 	logger.PurgeOldLogs(cfg.KeepLogFiles)
 
 	if cfg.MemoryLimitMB > 0 {
 		limit := int64(cfg.MemoryLimitMB) * 1024 * 1024
 		debug.SetMemoryLimit(limit)
 		logger.Info("Go memory limit set", "mb", cfg.MemoryLimitMB)
-		// Note: SetMemoryLimit is soft — the runtime may temporarily exceed it. We reserve 150 MB
-		// for non-cache (session, NZB, runtime) and use the rest for segment cache so we stay closer to the limit.
 	}
 
-	availNZBUrl := os.Getenv(env.AvailNZBURL)
-	if availNZBUrl == "" {
-		availNZBUrl = AvailNZBURL
-	}
-	availNZBAPIKey := os.Getenv(env.AvailNZBAPIKey)
-	if availNZBAPIKey == "" {
-		availNZBAPIKey = AvailNZBAPIKey
-	}
 	userTMDBKey := os.Getenv(env.TMDBAPIKey)
 	if userTMDBKey == "" {
 		userTMDBKey = strings.TrimSpace(cfg.TMDBAPIKey)
@@ -93,7 +76,7 @@ func main() {
 	if effectiveTVDBKey == "" {
 		effectiveTVDBKey = TVDBKey
 	}
-	env.SetRuntimeHeaders(cfg.IndexerQueryHeader, cfg.IndexerGrabHeader, cfg.ProviderHeader)
+	env.SetRuntimeHeaders(cfg.IndexerQueryHeader, cfg.IndexerGrabHeader)
 
 	dataDir := filepath.Dir(cfg.LoadedPath)
 	if dataDir == "" || dataDir == "." {
@@ -153,20 +136,15 @@ func main() {
 						Order:               stream.Order,
 						FilterSortingMode:   stream.FilterSortingMode,
 						IndexerMode:         stream.IndexerMode,
-						UseAvailNZB:         stream.UseAvailNZB,
 						CombineResults:      stream.CombineResults,
 						EnableFailover:      stream.EnableFailover,
 						ResultsMode:         stream.ResultsMode,
-						AutoAddProviders:    stream.AutoAddProviders,
 						AutoAddIndexers:     stream.AutoAddIndexers,
 						IndexerOverrides:    ov,
-						ProviderSelections:  append([]string(nil), stream.ProviderSelections...),
 						IndexerSelections:   append([]string(nil), stream.IndexerSelections...),
 						MovieSearchQueries:  append([]string(nil), stream.MovieSearchQueries...),
 						SeriesSearchQueries: append([]string(nil), stream.SeriesSearchQueries...),
 						TorrentClient:       stream.TorrentClient,
-						ProwlarrURL:         stream.ProwlarrURL,
-						ProwlarrAPIKey:      stream.ProwlarrAPIKey,
 						PasswordHash:        stream.PasswordHash,
 						MustChangePassword:  stream.MustChangePassword,
 					}
@@ -183,19 +161,8 @@ func main() {
 		}
 	}
 
-	if config.NormalizeAvailNZBMode(cfg.AvailNZBMode) != "off" {
-		availNZBAPIKey, err = availnzb.ResolveAPIKey(stateMgr, availNZBUrl, availNZBAPIKey, availnzb.DefaultAppName)
-		if err != nil {
-			initialization.WaitForInputAndExit(fmt.Errorf("failed to resolve AvailNZB API key: %w", err))
-		}
-	} else {
-		logger.Debug("AvailNZB key bootstrap skipped", "reason", "disabled mode")
-	}
-
 	application := app.New()
 	comp, err := application.Build(cfg, app.BuildOpts{
-		AvailNZBURL:        availNZBUrl,
-		AvailNZBAPIKey:     availNZBAPIKey,
 		TMDBAPIKey:         userTMDBKey,
 		TVDBAPIKey:         userTVDBKey,
 		FallbackTMDBAPIKey: TMDBKey,
@@ -216,31 +183,27 @@ func main() {
 
 	sessionTTL := time.Duration(cfg.EffectiveSessionTTLSeconds()) * time.Second
 	postPlaybackTTL := time.Duration(cfg.EffectiveSessionPostPlaybackTTLSeconds()) * time.Second
-	sessionManager := session.NewManager(comp.StreamingPools, comp.UsenetPool, sessionTTL)
+	sessionManager := session.NewManager(sessionTTL)
 	sessionManager.SetPostPlaybackEvictTTL(postPlaybackTTL)
 	logger.Info("Session manager initialized", "ttl", sessionTTL, "post_playback_ttl", postPlaybackTTL)
 
 	saveConfig := func() error { return cfg.Save() }
 	streamManager, err := auth.NewStreamManagerFromConfig(cfg, saveConfig)
 	if err != nil {
-		initialization.WaitForInputAndExit(fmt.Errorf("failed to initialize device manager: %v", err))
+		initialization.WaitForInputAndExit(fmt.Errorf("failed to initialize stream manager: %v", err))
 	}
 	stremioServer, err := stremio.NewServer(&stremio.ServerOptions{
-		Config:               comp.Config,
-		BaseURL:              comp.Config.AddonBaseURL,
-		Port:                 comp.Config.AddonPort,
-		Indexer:              comp.Indexer,
-		Validator:            comp.Validator,
-		SessionManager:       sessionManager,
-		TriageService:        comp.Triage,
-		AvailClient:          comp.AvailClient,
-		AvailNZBIndexerHosts: comp.AvailNZBIndexerHosts,
-		TMDBClient:           comp.TMDBClient,
-		TVDBClient:           comp.TVDBClient,
-		StreamManager:        streamManager,
-		Version:              Version,
-		AttemptRecorder:      stateMgr,
-		CerberusClient:       cerberusClient,
+		Config:         comp.Config,
+		BaseURL:        comp.Config.AddonBaseURL,
+		Port:           comp.Config.AddonPort,
+		Indexer:        comp.Indexer,
+		SessionManager: sessionManager,
+		TriageService:  comp.Triage,
+		TMDBClient:     comp.TMDBClient,
+		TVDBClient:     comp.TVDBClient,
+		StreamManager:  streamManager,
+		Version:        Version,
+		CerberusClient: cerberusClient,
 	})
 	if err != nil {
 		initialization.WaitForInputAndExit(fmt.Errorf("failed to initialize Stremio server: %v", err))
@@ -252,40 +215,19 @@ func main() {
 		go watchdog.Start(context.Background(), torrent.WatchdogConfig{})
 		logger.Info("Cerberus torrent watchdog enabled")
 	} else {
-		logger.Debug("Cerberus torrent watchdog disabled (no torrent clients or indexers configured)")
+		logger.Debug("Cerberus torrent watchdog disabled (no torrent clients or trackers configured)")
 	}
 
-	apiServer := api.NewServerWithApp(comp.Config, comp.ProviderPools, sessionManager, stremioServer, comp.Indexer, streamManager, application, availNZBUrl, availNZBAPIKey, effectiveTMDBKey, effectiveTVDBKey)
+	apiServer := api.NewServerWithApp(comp.Config, sessionManager, stremioServer, comp.Indexer, streamManager, application, effectiveTMDBKey, effectiveTVDBKey)
 	apiServer.SetIndexerCaps(comp.IndexerCaps)
 	apiServer.SetAttemptLister(stateMgr)
 	stremioServer.SetWebHandler(web.Handler())
 	stremioServer.SetAPIHandler(apiServer.Handler())
-	stremioServer.SetOnAttemptRecorded(apiServer.BroadcastNZBAttemptsUpdate)
 
 	mux := http.NewServeMux()
 	stremioServer.SetupRoutes(mux)
 
 	mux.Handle("/api/", apiServer.Handler())
-
-	{
-		if comp.Config.ProxyEnabled {
-			proxyServer, err := proxy.NewServer(comp.Config.ProxyHost, comp.Config.ProxyPort, comp.UsenetPool, comp.Config.ProxyAuthUser, comp.Config.ProxyAuthPass)
-			if err != nil {
-				initialization.WaitForInputAndExit(fmt.Errorf("failed to initialize NNTP proxy: %v", err))
-			}
-
-			apiServer.SetProxyServer(proxyServer)
-
-			go func() {
-				logger.Info("Starting NNTP proxy", "host", comp.Config.ProxyHost, "port", comp.Config.ProxyPort)
-				if err := proxyServer.Start(); err != nil {
-					initialization.WaitForInputAndExit(fmt.Errorf("nntp proxy failed: %w", err))
-				}
-			}()
-		} else {
-			logger.Info("NNTP proxy disabled")
-		}
-	}
 
 	addr := fmt.Sprintf(":%d", comp.Config.AddonPort)
 

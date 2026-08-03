@@ -26,7 +26,7 @@ func buildStreamMetadata(url, filename string, cand triage.Candidate, sizeGB flo
 		Name:           name,
 		Description:    description,
 		BehaviorHints:  hints,
-		StreamType:     "usenet",
+		StreamType:     "torrent",
 		Score:          cand.Score,
 		ParsedMetadata: cand.Metadata,
 		Release:        rel,
