@@ -25,6 +25,8 @@ const (
 	DefaultAggregatorIndexerTimeoutSeconds = 10
 	DefaultPlaybackStartupTimeoutSeconds   = 5
 	MaxPlaybackStartupTimeoutSeconds       = 60
+	DefaultTorrentBufferBytes              = 16 * 1024 * 1024
+	DefaultTorrentPrepareTimeoutSeconds    = 90
 	DefaultSessionTTLMinutes               = 30
 	MinSessionTTLMinutes                   = 1
 	MaxSessionTTLMinutes                   = 1440
@@ -238,6 +240,24 @@ func (c *Config) EffectivePlaybackStartupTimeout() time.Duration {
 	return time.Duration(c.EffectivePlaybackStartupTimeoutSeconds()) * time.Second
 }
 
+func (c *Config) EffectiveTorrentBufferBytes() int64 {
+	if c != nil && c.TorrentBufferBytes > 0 {
+		return c.TorrentBufferBytes
+	}
+	return DefaultTorrentBufferBytes
+}
+
+func (c *Config) EffectiveTorrentPrepareTimeoutSeconds() int {
+	if c != nil && c.TorrentPrepareTimeoutSeconds > 0 {
+		return c.TorrentPrepareTimeoutSeconds
+	}
+	return DefaultTorrentPrepareTimeoutSeconds
+}
+
+func (c *Config) EffectiveTorrentPrepareTimeout() time.Duration {
+	return time.Duration(c.EffectiveTorrentPrepareTimeoutSeconds()) * time.Second
+}
+
 func (c *Config) EffectiveFailoverFastMode() bool {
 	if c == nil {
 		return true
@@ -424,6 +444,12 @@ type Config struct {
 
 	// PlaybackStartupTimeoutSeconds bounds probe/open work before the first playable response is ready. Default 5.
 	PlaybackStartupTimeoutSeconds int `json:"playback_startup_timeout_seconds,omitempty"`
+	// TorrentBufferBytes is how much of the target file's head must be on disk
+	// before playback starts. Default 16 MiB; lower = faster first frame.
+	TorrentBufferBytes int64 `json:"torrent_buffer_bytes,omitempty"`
+	// TorrentPrepareTimeoutSeconds bounds how long PrepareForPlayback waits for
+	// the head buffer before giving up. Default 90.
+	TorrentPrepareTimeoutSeconds int `json:"torrent_prepare_timeout_seconds,omitempty"`
 	// SessionTTLMinutes controls how long a deferred/inactive stream session is kept in memory. Default 30.
 	SessionTTLMinutes int `json:"session_ttl_minutes,omitempty"`
 	// SessionPostPlaybackTTLMinutes controls how long a session stays in memory after playback ends (paused/stopped). Default 240 (4 hours).
