@@ -10,7 +10,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"seedstream/pkg/core/env"
@@ -29,7 +28,6 @@ var (
 	sensitiveJSONKVRe  = regexp.MustCompile(`(?i)("(?:api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|token|password|passwd|pwd|secret|auth_session)"\s*:\s*")([^"]+)`)
 	authorizationKVRe  = regexp.MustCompile(`(?i)\b(authorization[=:]\s*)(bearer\s+|basic\s+)?([^\s,;]+)`)
 	hexPathSegmentRe   = regexp.MustCompile(`(/)(?i:[0-9a-f]{64})(/|$|[?#])`)
-	verboseNNTPLogging atomic.Bool
 )
 
 func sanitizeString(s string) string {
@@ -387,21 +385,6 @@ func PurgeOldLogs(keepCount int) {
 
 func SetLevel(levelStr string) {
 	Init(levelStr)
-}
-
-func SetVerboseNNTPLogging(enabled bool) {
-	verboseNNTPLogging.Store(enabled)
-}
-
-func VerboseNNTPLoggingEnabled() bool {
-	return verboseNNTPLogging.Load()
-}
-
-func VerboseNNTP(msg string, args ...any) {
-	if !VerboseNNTPLoggingEnabled() {
-		return
-	}
-	Debug(msg, args...)
 }
 
 func Trace(msg string, args ...any) {
