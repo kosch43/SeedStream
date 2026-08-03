@@ -25,6 +25,7 @@ import (
 	"seedstream/pkg/torrent"
 
 	"github.com/joho/godotenv"
+	"golang.org/x/crypto/acme/autocert"
 )
 
 var (
@@ -230,11 +231,50 @@ func main() {
 	mux.Handle("/api/", apiServer.Handler())
 
 	addr := fmt.Sprintf(":%d", comp.Config.AddonPort)
+	srv := &http.Server{Addr: addr, Handler: mux}
 
-	logger.Info("Stremio addon server starting", "base_url", comp.Config.AddonBaseURL, "port", comp.Config.AddonPort)
+	tlsMode := comp.Config.EffectiveTLSMode()
+	if comp.Config.TLSEnabled {
+		if err := comp.Config.ValidateTLS(); err != nil {
+			initialization.WaitForInputAndExit(fmt.Errorf("HTTPS is enabled but misconfigured: %w", err))
+		}
+	}
+	if mismatch, want := comp.Config.BaseURLSchemeMismatch(); mismatch {
+		logger.Warn("Base URL scheme does not match the TLS setting — Stremio will be handed URLs that cannot be fetched",
+			"base_url", comp.Config.AddonBaseURL, "expected_scheme", want)
+	}
+
+	logger.Info("Stremio addon server starting",
+		"base_url", comp.Config.AddonBaseURL, "port", comp.Config.AddonPort, "tls", tlsMode)
 	logger.Info("Note: Access requires stream authentication tokens")
 
-	if err := http.ListenAndServe(addr, mux); err != nil {
-		initialization.WaitForInputAndExit(fmt.Errorf("server failed: %w", err))
+	var serveErr error
+	switch tlsMode {
+	case config.TLSModeAuto:
+		domain := strings.TrimSpace(comp.Config.TLSAutoDomain)
+		mgr := &autocert.Manager{
+			Prompt:     autocert.AcceptTOS,
+			HostPolicy: autocert.HostWhitelist(domain),
+			Cache:      autocert.DirCache(filepath.Join(dataDir, "certs")),
+			Email:      strings.TrimSpace(comp.Config.TLSAutoEmail),
+		}
+		srv.TLSConfig = mgr.TLSConfig()
+		// Let's Encrypt validates over port 80; this also redirects plain HTTP
+		// callers to HTTPS so an http:// stream URL still lands correctly.
+		go func() {
+			if err := http.ListenAndServe(":80", mgr.HTTPHandler(nil)); err != nil {
+				logger.Warn("ACME/HTTP redirect listener on :80 failed — certificate renewal may not work", "err", err)
+			}
+		}()
+		logger.Info("Requesting automatic certificate", "domain", domain, "cache", filepath.Join(dataDir, "certs"))
+		serveErr = srv.ListenAndServeTLS("", "")
+	case config.TLSModeFiles:
+		logger.Info("Serving HTTPS with configured certificate", "cert", comp.Config.TLSCertFile)
+		serveErr = srv.ListenAndServeTLS(comp.Config.TLSCertFile, comp.Config.TLSKeyFile)
+	default:
+		serveErr = srv.ListenAndServe()
+	}
+	if serveErr != nil {
+		initialization.WaitForInputAndExit(fmt.Errorf("server failed: %w", serveErr))
 	}
 }

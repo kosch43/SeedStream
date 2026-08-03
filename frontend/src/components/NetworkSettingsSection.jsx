@@ -13,6 +13,7 @@ import { cn } from "@/lib/utils"
 
 const CARD_FIELDS = {
   addon: ['addon_base_url', 'addon_port'],
+  https: ['tls_enabled', 'tls_cert_file', 'tls_key_file', 'tls_auto_domain', 'tls_auto_email'],
   useragent: ['indexer_query_header', 'indexer_grab_header'],
 }
 
@@ -20,6 +21,11 @@ function pickInitialValues(values = {}) {
   return {
     addon_port: Number(values.addon_port ?? 7000),
     addon_base_url: values.addon_base_url ?? '',
+    tls_enabled: values.tls_enabled === true,
+    tls_cert_file: values.tls_cert_file ?? '',
+    tls_key_file: values.tls_key_file ?? '',
+    tls_auto_domain: values.tls_auto_domain ?? '',
+    tls_auto_email: values.tls_auto_email ?? '',
     indexer_query_header: values.indexer_query_header ?? '',
     indexer_grab_header: values.indexer_grab_header ?? '',
   }
@@ -62,6 +68,8 @@ export const NetworkSettingsSection = forwardRef(function NetworkSettingsSection
   const form = useForm({ defaultValues: defaults })
   const { control, handleSubmit, reset, getValues, formState } = form
   const watchedValues = useWatch({ control })
+  const tlsEnabled = form.watch('tls_enabled') === true
+  const usingAutoCert = String(form.watch('tls_auto_domain') || '').trim() !== ''
 
   useEffect(() => {
     const currentValues = pickInitialValues(watchedValues)
@@ -187,6 +195,82 @@ export const NetworkSettingsSection = forwardRef(function NetworkSettingsSection
                       <FormControl><Input type="number" className={fieldClassName('addon_port', `h-9 ${controlMediumClass}`)} {...field} onChange={e => field.onChange(e.target.valueAsNumber)} /></FormControl>
                     </div>
                     <FormDescription className="mt-3">The local port where the addon server listens.</FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )} />
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0 flex-1 max-w-[26rem] space-y-0.5">
+                  <CardTitle>HTTPS</CardTitle>
+                  <CardDescription>Encrypt torrent streams in transit. Leave off if a reverse proxy already terminates TLS for you.</CardDescription>
+                </div>
+                <div className="shrink-0">{renderSaveButton('https')}</div>
+              </div>
+            </CardHeader>
+            <CardContent>
+              <div className="mb-4">
+                <FormField control={control} name="tls_enabled" render={({ field }) => (
+                  <FormItem className="rounded-md border border-border/60 p-3">
+                    <div className={stackedFieldRowClass}>
+                      <FormLabel className={labelClass}>Serve HTTPS directly</FormLabel>
+                      <FormControl><Switch checked={field.value === true} onCheckedChange={field.onChange} className={showUnsavedHighlights && formState.dirtyFields?.tls_enabled ? 'ring-2 ring-destructive ring-offset-2 ring-offset-background' : ''} /></FormControl>
+                    </div>
+                    <FormDescription className="mt-3">
+                      When on, SeedStream serves HTTPS on its own port. Remember to change the Base URL above to
+                      <span className="font-mono"> https://</span> as well, or Stremio will be given links it cannot fetch.
+                    </FormDescription>
+                  </FormItem>
+                )} />
+              </div>
+              <div className="rounded-md border border-border/60">
+                <FormField control={control} name="tls_auto_domain" render={({ field }) => (
+                  <FormItem className="rounded-none border-0 p-3">
+                    <div className={stackedFieldRowClass}>
+                      <FormLabel className={cn(labelClass, 'sm:flex-1')}>Automatic certificate domain</FormLabel>
+                      <FormControl><Input placeholder="seedstream.example.com" disabled={!tlsEnabled} className={fieldClassName('tls_auto_domain', `h-9 ${controlWideClass}`)} {...field} value={field.value || ''} autoComplete="off" /></FormControl>
+                    </div>
+                    <FormDescription className="mt-3">
+                      Optional. Requests a free Let&apos;s Encrypt certificate for this domain. The domain must point at this
+                      machine and port 80 must be reachable for renewal. Leave blank to use your own certificate below.
+                    </FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )} />
+                <FormField control={control} name="tls_auto_email" render={({ field }) => (
+                  <FormItem className="relative rounded-none border-0 p-3">
+                    <div className="absolute left-3 right-3 top-0 border-t border-border/60" />
+                    <div className={stackedFieldRowClass}>
+                      <FormLabel className={cn(labelClass, 'sm:flex-1')}>Contact email</FormLabel>
+                      <FormControl><Input placeholder="you@example.com" disabled={!tlsEnabled || !usingAutoCert} className={fieldClassName('tls_auto_email', `h-9 ${controlWideClass}`)} {...field} value={field.value || ''} autoComplete="off" /></FormControl>
+                    </div>
+                    <FormDescription className="mt-3">Optional address for certificate expiry notices.</FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )} />
+                <FormField control={control} name="tls_cert_file" render={({ field }) => (
+                  <FormItem className="relative rounded-none border-0 p-3">
+                    <div className="absolute left-3 right-3 top-0 border-t border-border/60" />
+                    <div className={stackedFieldRowClass}>
+                      <FormLabel className={cn(labelClass, 'sm:flex-1')}>Certificate file</FormLabel>
+                      <FormControl><Input placeholder="/etc/ssl/seedstream/fullchain.pem" disabled={!tlsEnabled || usingAutoCert} className={fieldClassName('tls_cert_file', `h-9 ${controlWideClass}`)} {...field} value={field.value || ''} autoComplete="off" /></FormControl>
+                    </div>
+                    <FormDescription className="mt-3">Path to a PEM certificate chain, e.g. from certbot or a Cloudflare origin certificate.</FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )} />
+                <FormField control={control} name="tls_key_file" render={({ field }) => (
+                  <FormItem className="relative rounded-none border-0 p-3">
+                    <div className="absolute left-3 right-3 top-0 border-t border-border/60" />
+                    <div className={stackedFieldRowClass}>
+                      <FormLabel className={cn(labelClass, 'sm:flex-1')}>Certificate key file</FormLabel>
+                      <FormControl><Input placeholder="/etc/ssl/seedstream/privkey.pem" disabled={!tlsEnabled || usingAutoCert} className={fieldClassName('tls_key_file', `h-9 ${controlWideClass}`)} {...field} value={field.value || ''} autoComplete="off" /></FormControl>
+                    </div>
+                    <FormDescription className="mt-3">Path to the matching private key. SeedStream restarts are required for certificate changes to apply.</FormDescription>
                     <FormMessage />
                   </FormItem>
                 )} />
