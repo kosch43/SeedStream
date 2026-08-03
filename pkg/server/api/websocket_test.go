@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -263,4 +264,64 @@ func TestValidateConfigWithPlanIndexerProxyChecksIndexerConnection(t *testing.T)
 	if got := errs["indexers.0.proxy_url"]; got != "" {
 		t.Fatalf("expected no standalone proxy reachability error, got %q", got)
 	}
+}
+
+// TestValidateConfigWithPlanRejectsUnbootableTLS locks in that a certificate
+// which would stop the server from starting is rejected at save time. Startup
+// treats a bad certificate as fatal, so allowing the save would leave the next
+// restart crash-looping with no way in through the UI to correct it.
+func TestValidateConfigWithPlanRejectsUnbootableTLS(t *testing.T) {
+	s := &Server{}
+
+	t.Run("enabled with no certificate", func(t *testing.T) {
+		cfg := &config.Config{TLSEnabled: true}
+		body, err := json.Marshal(map[string]any{"tls_enabled": true})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		plan := validationPlanFromPatch(body, &config.Config{}, cfg)
+		if !plan.validateTLS {
+			t.Fatalf("expected the patch to trigger TLS validation")
+		}
+		errs := s.validateConfigWithPlan(cfg, plan)
+		if _, ok := errs["tls_enabled"]; !ok {
+			t.Fatalf("expected a tls_enabled error, got %#v", errs)
+		}
+	})
+
+	t.Run("unreadable certificate path", func(t *testing.T) {
+		cfg := &config.Config{
+			TLSEnabled:  true,
+			TLSCertFile: filepath.Join(t.TempDir(), "missing.pem"),
+			TLSKeyFile:  filepath.Join(t.TempDir(), "missing.key"),
+		}
+		body, _ := json.Marshal(map[string]any{"tls_cert_file": cfg.TLSCertFile})
+		plan := validationPlanFromPatch(body, &config.Config{}, cfg)
+		errs := s.validateConfigWithPlan(cfg, plan)
+		if _, ok := errs["tls_cert_file"]; !ok {
+			t.Fatalf("expected a tls_cert_file error, got %#v", errs)
+		}
+	})
+
+	t.Run("bad auto-cert domain", func(t *testing.T) {
+		cfg := &config.Config{TLSEnabled: true, TLSAutoDomain: "not-a-domain"}
+		body, _ := json.Marshal(map[string]any{"tls_auto_domain": cfg.TLSAutoDomain})
+		plan := validationPlanFromPatch(body, &config.Config{}, cfg)
+		errs := s.validateConfigWithPlan(cfg, plan)
+		if _, ok := errs["tls_auto_domain"]; !ok {
+			t.Fatalf("expected a tls_auto_domain error, got %#v", errs)
+		}
+	})
+
+	t.Run("HTTPS off saves cleanly", func(t *testing.T) {
+		cfg := &config.Config{TLSEnabled: false, TLSCertFile: "/nope.pem"}
+		body, _ := json.Marshal(map[string]any{"tls_enabled": false})
+		plan := validationPlanFromPatch(body, &config.Config{}, cfg)
+		errs := s.validateConfigWithPlan(cfg, plan)
+		for k := range errs {
+			if len(k) >= 4 && k[:4] == "tls_" {
+				t.Fatalf("did not expect TLS errors when HTTPS is off, got %#v", errs)
+			}
+		}
+	})
 }
