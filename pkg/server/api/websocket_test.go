@@ -140,7 +140,7 @@ func TestValidateConfigRejectsUnreachableGlobalIndexerProxyURL(t *testing.T) {
 			URL:     "http://example.invalid",
 			APIPath: "/api",
 			APIKey:  "abc",
-			Type:    "newznab",
+			Type:    "torznab",
 		}},
 	})
 
@@ -187,7 +187,7 @@ func TestValidateConfigWithPlanGlobalProxyPassesWhenAnyIndexerReachable(t *testi
 				URL:     "http://fail.indexer",
 				APIPath: "/api",
 				APIKey:  "abc",
-				Type:    "newznab",
+				Type:    "torznab",
 			},
 			{
 				Enabled: &enabled,
@@ -195,7 +195,7 @@ func TestValidateConfigWithPlanGlobalProxyPassesWhenAnyIndexerReachable(t *testi
 				URL:     "http://ok.indexer",
 				APIPath: "/api",
 				APIKey:  "abc",
-				Type:    "newznab",
+				Type:    "torznab",
 			},
 		},
 	}
@@ -222,7 +222,7 @@ func TestValidateConfigWithPlanGlobalProxyFailsWhenNoIndexerReachable(t *testing
 			URL:     "http://fail.indexer",
 			APIPath: "/api",
 			APIKey:  "abc",
-			Type:    "newznab",
+			Type:    "torznab",
 		}},
 	}
 
