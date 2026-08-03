@@ -30,7 +30,7 @@ function normalizeTrackerDraft(draft) {
     // passkey: the user-specific token a private tracker issues for its Torznab/RSS
     // feed. It is sent as the ?apikey= parameter on every Torznab request, which is
     // how the tracker ties the search back to your account. Stored as api_key in
-    // IndexerConfig so the existing newznab/Torznab client picks it up automatically.
+    // IndexerConfig so the shared Torznab client picks it up automatically.
     api_key: v.api_key || '',
     type: 'torznab',
     api_hits_day: Number(v.api_hits_day || 0),

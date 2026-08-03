@@ -613,7 +613,7 @@ func TestBuildSearchParamsFromBaseTextModeUsesRequestLanguageNotPerIndexerOverri
 		Indexers: []config.IndexerConfig{
 			{Name: "IndexerA", SearchTitleLanguage: "de"},
 			{Name: "IndexerB", SearchTitleLanguage: "en"},
-			{Name: "Easynews", Type: "easynews", SearchTitleLanguage: "fr"},
+			{Name: "TrackerB", Type: "torznab", SearchTitleLanguage: "fr"},
 		},
 	}}
 	base := &SearchParams{

@@ -91,7 +91,7 @@ const SEARCH_LIMIT_HINT_ITEMS = [
     text: '0 uses Max.',
   },
   {
-    label: 'Newznab',
+    label: 'Tracker caps',
     text: 'Reads the max from caps. If caps are unavailable, it falls back to 2000.',
   },
   {
