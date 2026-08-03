@@ -3,6 +3,7 @@ package config
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -389,6 +390,22 @@ type Config struct {
 	IndexerQueryHeader string `json:"indexer_query_header,omitempty"`
 	IndexerGrabHeader  string `json:"indexer_grab_header,omitempty"`
 	IndexerProxyURL    string `json:"indexer_proxy_url,omitempty"`
+
+	// TLSEnabled makes SeedStream serve HTTPS directly on AddonPort instead of
+	// plain HTTP, so torrent streams are encrypted in transit without needing a
+	// separate reverse proxy. Leave off when something upstream (Caddy, nginx,
+	// Traefik, Cloudflare) already terminates TLS for you.
+	TLSEnabled bool `json:"tls_enabled,omitempty"`
+	// TLSCertFile and TLSKeyFile are PEM paths for your own certificate, e.g.
+	// one issued by certbot or a Cloudflare origin certificate.
+	TLSCertFile string `json:"tls_cert_file,omitempty"`
+	TLSKeyFile  string `json:"tls_key_file,omitempty"`
+	// TLSAutoDomain requests a free Let's Encrypt certificate for this domain
+	// instead of using TLSCertFile/TLSKeyFile. The domain must resolve to this
+	// host and port 80 must be reachable for the ACME challenge.
+	TLSAutoDomain string `json:"tls_auto_domain,omitempty"`
+	// TLSAutoEmail is the optional contact address for Let's Encrypt expiry notices.
+	TLSAutoEmail string `json:"tls_auto_email,omitempty"`
 
 	TVDBAPIKey string `json:"tvdb_api_key,omitempty"`
 
@@ -1114,4 +1131,88 @@ func CopyEnvOverridesFrom(src, dst *Config) {
 			copy(dst.Indexers, src.Indexers)
 		}
 	}
+}
+
+// TLSMode describes how SeedStream should obtain its certificate.
+type TLSMode string
+
+const (
+	// TLSModeOff serves plain HTTP (default).
+	TLSModeOff TLSMode = "off"
+	// TLSModeFiles uses an operator-supplied certificate and key.
+	TLSModeFiles TLSMode = "files"
+	// TLSModeAuto requests a Let's Encrypt certificate via ACME.
+	TLSModeAuto TLSMode = "auto"
+)
+
+// EffectiveTLSMode reports how TLS is configured. A configured auto domain wins
+// over cert files so a half-filled config resolves predictably.
+func (c *Config) EffectiveTLSMode() TLSMode {
+	if c == nil || !c.TLSEnabled {
+		return TLSModeOff
+	}
+	if strings.TrimSpace(c.TLSAutoDomain) != "" {
+		return TLSModeAuto
+	}
+	if strings.TrimSpace(c.TLSCertFile) != "" && strings.TrimSpace(c.TLSKeyFile) != "" {
+		return TLSModeFiles
+	}
+	return TLSModeOff
+}
+
+// ValidateTLS reports why TLS cannot start, or nil when the settings are usable.
+// Returns nil when TLS is switched off.
+func (c *Config) ValidateTLS() error {
+	if c == nil || !c.TLSEnabled {
+		return nil
+	}
+	if strings.TrimSpace(c.TLSAutoDomain) != "" {
+		domain := strings.TrimSpace(c.TLSAutoDomain)
+		if strings.Contains(domain, "/") || strings.Contains(domain, ":") {
+			return fmt.Errorf("automatic certificate domain must be a bare hostname (got %q)", domain)
+		}
+		if !strings.Contains(domain, ".") {
+			return fmt.Errorf("automatic certificate domain must be a public domain name (got %q)", domain)
+		}
+		return nil
+	}
+	certFile := strings.TrimSpace(c.TLSCertFile)
+	keyFile := strings.TrimSpace(c.TLSKeyFile)
+	if certFile == "" || keyFile == "" {
+		return fmt.Errorf("HTTPS is enabled but no certificate is configured: set a certificate and key, or an automatic certificate domain")
+	}
+	if _, err := os.Stat(certFile); err != nil {
+		return fmt.Errorf("certificate file not readable: %w", err)
+	}
+	if _, err := os.Stat(keyFile); err != nil {
+		return fmt.Errorf("certificate key file not readable: %w", err)
+	}
+	if _, err := tls.LoadX509KeyPair(certFile, keyFile); err != nil {
+		return fmt.Errorf("certificate and key could not be loaded as a pair: %w", err)
+	}
+	return nil
+}
+
+// BaseURLSchemeMismatch reports whether AddonBaseURL disagrees with the TLS
+// setting. Getting this wrong is the most common way to end up with streams
+// Stremio cannot fetch, so it is surfaced as a startup warning.
+func (c *Config) BaseURLSchemeMismatch() (mismatch bool, want string) {
+	if c == nil {
+		return false, ""
+	}
+	base := strings.TrimSpace(c.AddonBaseURL)
+	if base == "" {
+		return false, ""
+	}
+	u, err := url.Parse(base)
+	if err != nil || u.Scheme == "" {
+		return false, ""
+	}
+	servingTLS := c.EffectiveTLSMode() != TLSModeOff
+	if servingTLS && strings.EqualFold(u.Scheme, "http") {
+		return true, "https"
+	}
+	// Only flag plain-http serving when nothing upstream could be terminating
+	// TLS for us; an https base URL with TLS off is the normal reverse-proxy setup.
+	return false, ""
 }

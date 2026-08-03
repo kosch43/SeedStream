@@ -39,12 +39,29 @@ Your configuration and login live in the `./data` folder (mounted into the conta
 
 After logging in:
 
-1. **Settings → Network** — set your addon **Base URL** and **Port** (how clients reach this server). Examples: `http://192.168.1.50:7000`, `http://seedstream.example.com:7000`, or `https://seedstream.example.com` behind a reverse proxy.
+1. **Settings → Network** — set your addon **Base URL** and **Port** (how clients reach this server). Examples: `http://192.168.1.50:7000`, `http://seedstream.example.com:7000`, or `https://seedstream.example.com`. See [HTTPS](#https) below.
 2. **Settings → Torrent Trackers** — add your Torznab trackers (URL + API key), for example from Prowlarr or Jackett. Set per-tracker Hit & Run rules here if your tracker enforces them.
 3. **Settings → Torrent Clients** — add your seedbox qBittorrent (WebUI URL, login, category, and the save path SeedStream can read). If qBittorrent runs on a different host, also set the remote path so SeedStream can translate it to your local mount.
 4. **Settings → Search** — create at least one movie and/or TV search request.
 5. **Streams** — create a stream, choose which trackers/clients it uses, then copy its manifest URL.
 6. Add that manifest URL to your **Stremio** client or **AIOStreams**.
+
+## HTTPS
+
+Streams are served over whatever scheme you put in **Base URL**, and SeedStream speaks plain HTTP by default. Over the open internet that means the traffic — including your stream token — is readable in transit, so it is worth turning on encryption.
+
+There are two ways to get it:
+
+**Behind a reverse proxy.** If Caddy, nginx, Traefik or Cloudflare already terminates TLS for you, leave HTTPS off and simply set Base URL to your `https://` address. Nothing else changes.
+
+**Directly, in Settings → Network → HTTPS.** Turn on *Serve HTTPS directly* and give SeedStream a certificate, then set Base URL to `https://`. Either:
+
+- **Automatic certificate domain** — requests a free Let's Encrypt certificate. The domain must resolve to this machine and port 80 must be reachable, since that is where renewals are validated. Certificates are cached in `certs/` next to your config.
+- **Certificate file / key file** — PEM paths for a certificate you already have, e.g. from certbot or a Cloudflare origin certificate.
+
+A restart is required for certificate changes to take effect. If the Base URL scheme and the HTTPS setting disagree, SeedStream logs a warning at startup, because that combination hands Stremio links it cannot fetch.
+
+> **Stremio Web needs HTTPS.** The desktop and Android apps play plain-HTTP streams happily. `web.stremio.com` is itself served over HTTPS, so browsers block an `http://` stream as mixed content — use HTTPS if you watch there.
 
 ### Force a password reset on next startup
 

@@ -5,6 +5,11 @@ import { apiFetch } from '../api'
 const NETWORK_TAB_FIELDS = [
   'addon_port',
   'addon_base_url',
+  'tls_enabled',
+  'tls_cert_file',
+  'tls_key_file',
+  'tls_auto_domain',
+  'tls_auto_email',
   'indexer_query_header',
   'indexer_grab_header',
 ]
@@ -190,6 +195,7 @@ export function useSettingsState({
     network: 'Network',
     advanced: 'Advanced',
     addon: 'Addon',
+    https: 'HTTPS',
     useragent: 'User-Agent',
     admin: 'Logs',
     memory: 'Memory & Cache',
