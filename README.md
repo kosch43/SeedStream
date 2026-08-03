@@ -96,11 +96,13 @@ Each stream also controls its search pipeline: tracker mode (`Combine` / `Failov
 
 [AIOStreams](https://github.com/Viren070/AIOStreams) consolidates multiple Stremio addons into one super-addon with advanced filtering, sorting, and formatting.
 
-1. In SeedStream, create or choose the stream you want AIOStreams to use.
+1. In SeedStream, create or choose the stream you want AIOStreams to use, and set its **Filter/Sorting mode to `AIOStreams`** (Streams → edit stream → General). This matters: without it SeedStream returns a single combined entry, so AIOStreams has nothing to filter or sort. With it, every torrent comes back as its own entry.
 2. Copy that stream's manifest URL (e.g. `https://your-host:7000/<token>/manifest.json`).
-3. In AIOStreams, add the SeedStream preset and paste the manifest URL.
+3. In AIOStreams, use the **StreamNZB preset** and paste the manifest URL. There is no SeedStream preset — this is a StreamNZB fork and the addon interface is unchanged, so that preset builds URLs in exactly the shape SeedStream serves. If the preset rejects it, add it as a custom/manual addon instead; the result is the same.
 4. No debrid or torrent client needed in AIOStreams — SeedStream handles tracker search, the seedbox handoff, and streaming internally.
 5. Configure filtering/sorting/formatting in the AIOStreams UI.
+
+AIOStreams has to be able to reach SeedStream over the network: a cloud-hosted AIOStreams cannot fetch a manifest from a SeedStream on your LAN. If AIOStreams is served over HTTPS, serve SeedStream over HTTPS too — see [HTTPS](#https) — otherwise the stream URLs can be blocked as mixed content.
 
 ---
 
