@@ -1,6 +1,7 @@
 package stremio
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/http"
@@ -160,6 +161,18 @@ func (s *Server) GetUniqueIndexerHits() map[string]int64 {
 		out[k] = v
 	}
 	return out
+}
+
+// TorrentStats returns live aggregate activity across the configured torrent
+// clients for the dashboard. Returns a zero value when no client is set up.
+func (s *Server) TorrentStats(ctx context.Context) torrent.AggregateStats {
+	s.mu.RLock()
+	mgr := s.torrentManager
+	s.mu.RUnlock()
+	if mgr == nil {
+		return torrent.AggregateStats{}
+	}
+	return mgr.AggregateStats(ctx)
 }
 
 func (s *Server) Reload(opts *ServerOptions) {

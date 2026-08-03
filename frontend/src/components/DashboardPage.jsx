@@ -4,10 +4,33 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
-import { Activity, X, MonitorPlay, HardDrive, Magnet } from "lucide-react"
+import {
+  ChartContainer,
+  ChartTooltip,
+  ChartTooltipContent,
+} from "@/components/ui/chart"
+import { ComposedChart, Area, XAxis, YAxis } from "recharts"
+import { Activity, HardDrive, X, MonitorPlay } from "lucide-react"
 import { cn } from "@/lib/utils"
 
-export function DashboardPage({ stats, sendCommand, config }) {
+const chartConfig = {
+  speed: {
+    label: "Download",
+    color: "hsl(var(--primary))",
+  },
+  torrents: {
+    label: "Active torrents",
+    color: "hsl(var(--primary))",
+  },
+}
+
+function formatDownloadedMb(mb) {
+  const n = Number(mb) || 0
+  if (n >= 1000) return { value: (n / 1000).toFixed(2), unit: 'GB' }
+  return { value: n.toFixed(1), unit: 'MB' }
+}
+
+export function DashboardPage({ stats, chartData, sendCommand, config }) {
   const [activeSessionToClose, setActiveSessionToClose] = useState(null)
 
   const trackerUrls = useMemo(() => {
@@ -18,6 +41,17 @@ export function DashboardPage({ stats, sendCommand, config }) {
       urls.set(name, idx?.url || '')
     })
     return urls
+  }, [config])
+
+  const displayedClients = useMemo(() => {
+    return (config?.torrent_clients || []).map((tc) => ({
+      name: (tc.name || '').trim() || 'qBittorrent',
+      url: tc.url || '',
+      category: tc.category || 'seedstream',
+      savePath: tc.save_path || '',
+      remotePath: tc.remote_path || '',
+      enabled: tc.enabled !== false,
+    }))
   }, [config])
 
   const displayedTrackers = useMemo(() => {
@@ -47,9 +81,6 @@ export function DashboardPage({ stats, sendCommand, config }) {
     return rows
   }, [config, stats])
 
-  const enabledTrackers = (config?.indexers || []).filter((idx) => idx.enabled !== false).length
-  const enabledClients = (config?.torrent_clients || []).filter((tc) => tc.enabled !== false).length
-
   const confirmCloseActiveSession = () => {
     if (!activeSessionToClose) return
     sendCommand('close_session', { id: activeSessionToClose.id })
@@ -60,7 +91,7 @@ export function DashboardPage({ stats, sendCommand, config }) {
     <>
       <div className="flex flex-col gap-4 py-4 md:gap-6 md:py-6 px-4 lg:px-6">
         {/* KPI cards */}
-        <div className="grid grid-cols-2 gap-4 lg:grid-cols-3">
+        <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
           <Card>
             <CardHeader>
               <CardDescription>Active Streams</CardDescription>
@@ -70,25 +101,96 @@ export function DashboardPage({ stats, sendCommand, config }) {
           </Card>
           <Card>
             <CardHeader>
-              <div className="flex items-center justify-between gap-2">
-                <CardDescription>Torrent Trackers</CardDescription>
-                <Magnet className="h-4 w-4 text-muted-foreground" />
-              </div>
-              <CardTitle className="tabular-nums text-primary">{enabledTrackers}</CardTitle>
-              <p className="text-xs text-muted-foreground">enabled</p>
+              <CardDescription>Download Speed</CardDescription>
+              <CardTitle className="flex items-baseline gap-1.5 tabular-nums">
+                <span className="text-primary">{(stats.download_speed_mbps ?? 0).toFixed(1)}</span>
+                <span className="text-sm font-normal text-muted-foreground">Mbps</span>
+              </CardTitle>
             </CardHeader>
           </Card>
           <Card>
             <CardHeader>
-              <div className="flex items-center justify-between gap-2">
-                <CardDescription>Torrent Clients</CardDescription>
-                <HardDrive className="h-4 w-4 text-muted-foreground" />
-              </div>
-              <CardTitle className="tabular-nums text-primary">{enabledClients}</CardTitle>
-              <p className="text-xs text-muted-foreground">enabled</p>
+              <CardDescription>Upload Speed</CardDescription>
+              <CardTitle className="flex items-baseline gap-1.5 tabular-nums">
+                <span className="text-primary">{(stats.upload_speed_mbps ?? 0).toFixed(1)}</span>
+                <span className="text-sm font-normal text-muted-foreground">Mbps</span>
+              </CardTitle>
+              <p className="text-xs text-muted-foreground">seeding</p>
+            </CardHeader>
+          </Card>
+          <Card>
+            <CardHeader>
+              <CardDescription>Active Torrents</CardDescription>
+              <CardTitle className="flex items-baseline gap-1.5 tabular-nums">
+                <span className="text-primary">{stats.active_torrents ?? 0}</span>
+                <span className="text-sm font-normal text-muted-foreground">/ {stats.total_torrents ?? 0}</span>
+              </CardTitle>
+            </CardHeader>
+          </Card>
+          <Card>
+            <CardHeader>
+              <CardDescription>Uploaded Total</CardDescription>
+              <CardTitle className="flex items-baseline gap-1.5 tabular-nums">
+                {(() => {
+                  const { value, unit } = formatDownloadedMb(stats.uploaded_mb)
+                  return <><span className="text-primary">{value}</span><span className="text-sm font-normal text-muted-foreground">{unit}</span></>
+                })()}
+              </CardTitle>
+              <p className="text-xs text-muted-foreground">ratio contribution</p>
             </CardHeader>
           </Card>
         </div>
+
+        {/* Seedbox activity chart */}
+        <Card className="overflow-hidden">
+          <CardHeader>
+            <CardTitle>Seedbox activity</CardTitle>
+            <CardDescription>Download speed (Mbps) and active torrents over time</CardDescription>
+          </CardHeader>
+          <CardContent className="p-0">
+            <ChartContainer config={chartConfig} className="h-[200px] w-full">
+              <ComposedChart data={chartData} margin={{ top: 8, right: 8, bottom: 8, left: 32 }}>
+                <defs>
+                  <linearGradient id="chartSpeed" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="hsl(var(--primary))" stopOpacity={0.4} />
+                    <stop offset="100%" stopColor="hsl(var(--primary))" stopOpacity={0} />
+                  </linearGradient>
+                  <linearGradient id="chartTorrents" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="hsl(var(--primary))" stopOpacity={0.25} />
+                    <stop offset="100%" stopColor="hsl(var(--primary))" stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <XAxis dataKey="time" tick={{ fontSize: 10 }} />
+                <YAxis yAxisId="left" tick={{ fontSize: 10 }} width={28} />
+                <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 10 }} allowDecimals={false} width={28} />
+                <ChartTooltip content={<ChartTooltipContent />} />
+                <Area
+                  yAxisId="left"
+                  type="monotone"
+                  dataKey="speed"
+                  stroke="hsl(var(--primary))"
+                  strokeWidth={2}
+                  fill="url(#chartSpeed)"
+                  dot={false}
+                  isAnimationActive={false}
+                  name="speed"
+                />
+                <Area
+                  yAxisId="right"
+                  type="monotone"
+                  dataKey="torrents"
+                  stroke="hsl(var(--primary))"
+                  strokeWidth={2}
+                  strokeOpacity={0.7}
+                  fill="url(#chartTorrents)"
+                  dot={false}
+                  isAnimationActive={false}
+                  name="torrents"
+                />
+              </ComposedChart>
+            </ChartContainer>
+          </CardContent>
+        </Card>
 
         {/* Active sessions */}
         {stats.active_sessions?.length > 0 && (
@@ -130,85 +232,151 @@ export function DashboardPage({ stats, sendCommand, config }) {
           </Card>
         )}
 
-        {/* Trackers */}
-        <Card className="overflow-hidden">
-          <CardHeader>
-            <div className="flex items-center gap-2">
-              <MonitorPlay className="h-5 w-5 text-primary" />
-              <CardTitle className="text-lg font-semibold tracking-tight">Torrent Trackers</CardTitle>
-            </div>
-            <CardDescription>All configured trackers and their current usage.</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="grid gap-3 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3">
-              {displayedTrackers.map((idx) => {
-                const apiUsedPct = idx.api_hits_limit > 0 ? ((idx.api_hits_limit - idx.api_hits_remaining) / idx.api_hits_limit) * 100 : 0
-                const dlUsedPct = idx.downloads_limit > 0 ? ((idx.downloads_limit - idx.downloads_remaining) / idx.downloads_limit) * 100 : 0
-                const barColor = (pct) => pct >= 90 ? 'bg-destructive' : pct >= 75 ? 'bg-chart-4' : 'bg-primary'
-                const hasApiLimit = idx.api_hits_limit > 0
-                const hasDlLimit = idx.downloads_limit > 0
-                const isEnabled = idx.enabled !== false
-                const trackerUrl = trackerUrls.get((idx.name || '').trim()) || ''
-                return (
-                  <Card
-                    key={idx.name}
-                    className={cn("overflow-hidden h-full", !isEnabled && "opacity-60 grayscale")}
-                  >
-                    <CardHeader className="p-4 pb-2">
+        {/* Torrent clients & Trackers */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <Card className="overflow-hidden">
+            <CardHeader>
+              <div className="flex items-center gap-2">
+                <HardDrive className="h-5 w-5 text-primary" />
+                <CardTitle className="text-lg font-semibold tracking-tight">Torrent Clients</CardTitle>
+              </div>
+              <CardDescription>Seedbox clients that download and keep seeding.</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="grid gap-3 grid-cols-1 sm:grid-cols-2">
+                {displayedClients.map((c) => (
+                  <Card key={c.name} className={cn("min-h-[170px]", !c.enabled && "opacity-60 grayscale")}>
+                    <CardHeader className="p-3 pb-1">
                       <div className="flex items-center gap-2">
-                        <CardTitle className="text-base font-semibold truncate leading-tight" title={idx.name}>{idx.name}</CardTitle>
+                        <CardTitle className="text-base font-semibold truncate leading-tight" title={c.name}>{c.name}</CardTitle>
                         <TooltipProvider delayDuration={100}>
                           <Tooltip>
                             <TooltipTrigger asChild>
                               <Badge variant="outline" className="ml-auto h-5 min-w-5 rounded-full px-1.5">
-                                <span className={cn("h-1.5 w-1.5 rounded-full", isEnabled ? "bg-green-600" : "bg-destructive")} />
+                                <span className={cn("h-1.5 w-1.5 rounded-full", c.enabled ? "bg-green-600" : "bg-destructive")} />
                               </Badge>
                             </TooltipTrigger>
-                            <TooltipContent>{isEnabled ? 'Active' : 'Inactive'}</TooltipContent>
+                            <TooltipContent>{c.enabled ? 'Active' : 'Inactive'}</TooltipContent>
                           </Tooltip>
                         </TooltipProvider>
                       </div>
-                      <p className="text-[10px] text-muted-foreground truncate" title={trackerUrl}>{trackerUrl}</p>
+                      <p className="text-[10px] text-muted-foreground truncate" title={c.url}>{c.url}</p>
                     </CardHeader>
-                    <CardContent className="p-4 pt-0">
-                      <div className="grid grid-cols-2 gap-4">
-                        <div className="space-y-1.5">
-                          <p className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">API hits</p>
-                          <p className="text-lg font-bold tabular-nums text-primary">{idx.api_hits_used}</p>
-                          {hasApiLimit && (
-                            <div className="w-full bg-muted h-2 rounded-full overflow-hidden mt-1">
-                              <div className={cn("h-full transition-all duration-500 rounded-full", barColor(apiUsedPct))} style={{ width: `${apiUsedPct}%` }} />
-                            </div>
-                          )}
-                          <p className="text-[11px] text-muted-foreground">
-                            {hasApiLimit ? `of ${idx.api_hits_limit} today` : 'Unlimited'}
-                          </p>
+                    <CardContent className="p-3 pt-0">
+                      <div className="flex items-center justify-between mt-2">
+                        <div className="flex flex-col">
+                          <span className="text-[10px] uppercase text-muted-foreground font-medium">Seeds</span>
+                          <span className="text-lg font-bold tabular-nums text-primary">{stats.seeds ?? 0}</span>
                         </div>
-                        <div className="space-y-1.5">
-                          <p className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Grabs</p>
-                          <p className="text-lg font-bold tabular-nums text-primary">{idx.downloads_used}</p>
-                          {hasDlLimit && (
-                            <div className="w-full bg-muted h-2 rounded-full overflow-hidden mt-1">
-                              <div className={cn("h-full transition-all duration-500 rounded-full", barColor(dlUsedPct))} style={{ width: `${dlUsedPct}%` }} />
-                            </div>
-                          )}
-                          <p className="text-[11px] text-muted-foreground">
-                            {hasDlLimit ? `of ${idx.downloads_limit} today` : 'Unlimited'}
-                          </p>
+                        <div className="flex flex-col text-right">
+                          <span className="text-[10px] uppercase text-muted-foreground font-medium">Peers</span>
+                          <span className="text-lg font-bold tabular-nums text-primary">{stats.peers ?? 0}</span>
                         </div>
                       </div>
+                      <div className="mt-3 flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
+                        <span className="truncate" title={c.savePath}>{c.savePath || 'no save path'}</span>
+                        <TooltipProvider delayDuration={100}>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Badge variant="outline" className="h-4 px-1.5 text-[10px] shrink-0">{c.category}</Badge>
+                            </TooltipTrigger>
+                            <TooltipContent>Category</TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
+                      </div>
+                      {c.remotePath && (
+                        <p className="mt-1 text-[10px] text-muted-foreground truncate" title={`${c.remotePath} → ${c.savePath}`}>
+                          {c.remotePath} → {c.savePath}
+                        </p>
+                      )}
                     </CardContent>
                   </Card>
-                )
-              })}
-              {displayedTrackers.length === 0 && (
-                <div className="col-span-full py-8 text-center rounded-lg border border-dashed text-muted-foreground text-sm">
-                  No torrent trackers configured.
-                </div>
-              )}
-            </div>
-          </CardContent>
-        </Card>
+                ))}
+                {displayedClients.length === 0 && (
+                  <div className="col-span-full py-8 text-center rounded-lg border border-dashed text-muted-foreground text-sm">
+                    No torrent clients configured.
+                  </div>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className="overflow-hidden">
+            <CardHeader>
+              <div className="flex items-center gap-2">
+                <MonitorPlay className="h-5 w-5 text-primary" />
+                <CardTitle className="text-lg font-semibold tracking-tight">Torrent Trackers</CardTitle>
+              </div>
+              <CardDescription>All configured trackers and their current usage.</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="grid gap-3 grid-cols-1 sm:grid-cols-2">
+                {displayedTrackers.map((idx) => {
+                  const apiUsedPct = idx.api_hits_limit > 0 ? ((idx.api_hits_limit - idx.api_hits_remaining) / idx.api_hits_limit) * 100 : 0
+                  const dlUsedPct = idx.downloads_limit > 0 ? ((idx.downloads_limit - idx.downloads_remaining) / idx.downloads_limit) * 100 : 0
+                  const barColor = (pct) => pct >= 90 ? 'bg-destructive' : pct >= 75 ? 'bg-chart-4' : 'bg-primary'
+                  const hasApiLimit = idx.api_hits_limit > 0
+                  const hasDlLimit = idx.downloads_limit > 0
+                  const isEnabled = idx.enabled !== false
+                  const trackerUrl = trackerUrls.get((idx.name || '').trim()) || ''
+                  return (
+                    <Card key={idx.name} className={cn("overflow-hidden h-full", !isEnabled && "opacity-60 grayscale")}>
+                      <CardHeader className="p-4 pb-2">
+                        <div className="flex items-center gap-2">
+                          <CardTitle className="text-base font-semibold truncate leading-tight" title={idx.name}>{idx.name}</CardTitle>
+                          <TooltipProvider delayDuration={100}>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Badge variant="outline" className="ml-auto h-5 min-w-5 rounded-full px-1.5">
+                                  <span className={cn("h-1.5 w-1.5 rounded-full", isEnabled ? "bg-green-600" : "bg-destructive")} />
+                                </Badge>
+                              </TooltipTrigger>
+                              <TooltipContent>{isEnabled ? 'Active' : 'Inactive'}</TooltipContent>
+                            </Tooltip>
+                          </TooltipProvider>
+                        </div>
+                        <p className="text-[10px] text-muted-foreground truncate" title={trackerUrl}>{trackerUrl}</p>
+                      </CardHeader>
+                      <CardContent className="p-4 pt-0">
+                        <div className="grid grid-cols-2 gap-4">
+                          <div className="space-y-1.5">
+                            <p className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">API hits</p>
+                            <p className="text-lg font-bold tabular-nums text-primary">{idx.api_hits_used}</p>
+                            {hasApiLimit && (
+                              <div className="w-full bg-muted h-2 rounded-full overflow-hidden mt-1">
+                                <div className={cn("h-full transition-all duration-500 rounded-full", barColor(apiUsedPct))} style={{ width: `${apiUsedPct}%` }} />
+                              </div>
+                            )}
+                            <p className="text-[11px] text-muted-foreground">
+                              {hasApiLimit ? `of ${idx.api_hits_limit} today` : 'Unlimited'}
+                            </p>
+                          </div>
+                          <div className="space-y-1.5">
+                            <p className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Grabs</p>
+                            <p className="text-lg font-bold tabular-nums text-primary">{idx.downloads_used}</p>
+                            {hasDlLimit && (
+                              <div className="w-full bg-muted h-2 rounded-full overflow-hidden mt-1">
+                                <div className={cn("h-full transition-all duration-500 rounded-full", barColor(dlUsedPct))} style={{ width: `${dlUsedPct}%` }} />
+                              </div>
+                            )}
+                            <p className="text-[11px] text-muted-foreground">
+                              {hasDlLimit ? `of ${idx.downloads_limit} today` : 'Unlimited'}
+                            </p>
+                          </div>
+                        </div>
+                      </CardContent>
+                    </Card>
+                  )
+                })}
+                {displayedTrackers.length === 0 && (
+                  <div className="col-span-full py-8 text-center rounded-lg border border-dashed text-muted-foreground text-sm">
+                    No torrent trackers configured.
+                  </div>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+        </div>
       </div>
 
       <Dialog open={Boolean(activeSessionToClose)} onOpenChange={(open) => { if (!open) setActiveSessionToClose(null) }}>

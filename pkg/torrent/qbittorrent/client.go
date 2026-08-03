@@ -200,6 +200,11 @@ type TorrentInfo struct {
 	LastActivity int64   `json:"last_activity"`
 	Ratio        float64 `json:"ratio"`
 	Uploaded     int64   `json:"uploaded"`
+	Downloaded   int64   `json:"downloaded"`
+	DlSpeed      int64   `json:"dlspeed"`
+	UpSpeed      int64   `json:"upspeed"`
+	NumSeeds     int     `json:"num_seeds"`
+	NumLeechs    int     `json:"num_leechs"`
 }
 
 // Get returns the torrent with the given info hash, or nil if not present.
