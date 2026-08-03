@@ -364,6 +364,16 @@ func (dm *StreamManager) AuthenticateToken(token string, adminUsername, adminTok
 			IndexerOverrides: nil,
 		}, nil
 	}
+	if token != "" {
+		dm.mu.RLock()
+		defer dm.mu.RUnlock()
+		for _, stream := range dm.streams {
+			if stream != nil && stream.Token != "" && stream.Token == token {
+				cp := *stream
+				return &cp, nil
+			}
+		}
+	}
 	return nil, fmt.Errorf("invalid token")
 }
 

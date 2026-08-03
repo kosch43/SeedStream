@@ -21,6 +21,7 @@ ENV CGO_ENABLED=0 GOTOOLCHAIN=auto
 WORKDIR /src
 RUN apk add --no-cache git
 COPY go.mod go.sum ./
+COPY third_party/ ./third_party/
 RUN go mod download
 COPY . .
 # Embed the freshly built UI (pkg/server/web uses //go:embed all:static).
