@@ -1,10 +1,10 @@
 # SeedStream
 
-> Based on [streamnzb](https://github.com/Gaisberg/streamnzb) by Gaisberg.
+
 
 SeedStream is a self-hosted streaming addon for [Stremio](https://www.stremio.com/) and [AIOStreams](https://github.com/Viren070/AIOStreams). It searches your own indexers and streams the results — **both Usenet (NZB) and torrents** — from a Docker container running on your seedbox or server.
 
-- **Usenet** streams on-the-fly directly from your providers (no full download needed).
+-
 - **Torrents** are handed to a qBittorrent running on your seedbox, which downloads sequentially for instant playback and **keeps seeding** so your private-tracker ratio stays healthy. SeedStream never seeds or discards data itself.
 
 ---
