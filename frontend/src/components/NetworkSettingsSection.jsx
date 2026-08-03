@@ -235,8 +235,9 @@ export const NetworkSettingsSection = forwardRef(function NetworkSettingsSection
                       <FormControl><Input placeholder="seedstream.example.com" disabled={!tlsEnabled} className={fieldClassName('tls_auto_domain', `h-9 ${controlWideClass}`)} {...field} value={field.value || ''} autoComplete="off" /></FormControl>
                     </div>
                     <FormDescription className="mt-3">
-                      Optional. Requests a free Let&apos;s Encrypt certificate for this domain. The domain must point at this
-                      machine and port 80 must be reachable for renewal. Leave blank to use your own certificate below.
+                      Optional. Requests a free Let&apos;s Encrypt certificate for this domain. Let&apos;s Encrypt validates only
+                      on port 80 or 443, so the domain must point at this host <em>and</em> port 80 must be published to it —
+                      publishing only the addon port is not enough. Leave blank to use your own certificate below.
                     </FormDescription>
                     <FormMessage />
                   </FormItem>

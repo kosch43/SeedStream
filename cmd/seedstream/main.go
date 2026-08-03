@@ -259,11 +259,20 @@ func main() {
 			Email:      strings.TrimSpace(comp.Config.TLSAutoEmail),
 		}
 		srv.TLSConfig = mgr.TLSConfig()
-		// Let's Encrypt validates over port 80; this also redirects plain HTTP
-		// callers to HTTPS so an http:// stream URL still lands correctly.
+		// Let's Encrypt only validates on port 80 (HTTP-01) or 443
+		// (TLS-ALPN-01) — the CA dials those ports and nothing else. Serving the
+		// addon on another port is fine, but the host must still forward 80 here
+		// or issuance silently never completes, which is a confusing failure to
+		// debug from the TLS handshake alone. Say so up front.
+		if comp.Config.AddonPort != 443 {
+			logger.Warn("Automatic certificates require port 80 to reach this host — publish it (e.g. \"80:80\" in docker-compose.yml) and point the domain's DNS here, or issuance will not complete",
+				"domain", domain, "addon_port", comp.Config.AddonPort)
+		}
+		// Also redirects plain HTTP callers to HTTPS, so an http:// stream URL
+		// still lands correctly.
 		go func() {
 			if err := http.ListenAndServe(":80", mgr.HTTPHandler(nil)); err != nil {
-				logger.Warn("ACME/HTTP redirect listener on :80 failed — certificate renewal may not work", "err", err)
+				logger.Error("Could not listen on :80 for certificate validation — automatic certificates will not be issued or renewed", "err", err)
 			}
 		}()
 		logger.Info("Requesting automatic certificate", "domain", domain, "cache", filepath.Join(dataDir, "certs"))

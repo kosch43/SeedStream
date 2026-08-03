@@ -490,10 +490,26 @@ func absFilePath(remotePath, localSavePath string, info *qbittorrent.TorrentInfo
 	return full
 }
 
+// ClientStats is live activity for a single torrent client. The dashboard
+// renders one of these per configured seedbox, so figures shown on a client's
+// card belong to that client rather than to the fleet.
+type ClientStats struct {
+	Name             string
+	DownloadSpeedBps int64
+	UploadSpeedBps   int64
+	ActiveTorrents   int
+	TotalTorrents    int
+	Seeds            int
+	Peers            int
+	// Reachable is false when this client's API call failed, so the UI can say
+	// "unreachable" instead of silently showing zeros that look like idleness.
+	Reachable bool
+}
+
 // AggregateStats summarises live activity across every configured torrent
 // client, for the dashboard. Speeds are bytes/second as reported by
 // qBittorrent; Downloaded/Uploaded are cumulative totals for the SeedStream
-// category.
+// category. Clients carries the same figures broken down per client.
 type AggregateStats struct {
 	DownloadSpeedBps int64
 	UploadSpeedBps   int64
@@ -503,6 +519,7 @@ type AggregateStats struct {
 	UploadedBytes    int64
 	Seeds            int
 	Peers            int
+	Clients          []ClientStats
 }
 
 // aggregateCacheTTL bounds how often the dashboard poll actually reaches
@@ -518,38 +535,49 @@ func (m *Manager) AggregateStats(ctx context.Context) AggregateStats {
 		return AggregateStats{}
 	}
 
+	// The lock is deliberately held across the client calls. Releasing it to
+	// fetch would let every concurrent caller miss the cache at once and hit the
+	// seedbox in parallel, which is the load this cache exists to prevent. Held
+	// this way, the first caller refreshes and the rest queue briefly and then
+	// read the fresh value.
 	m.aggMu.Lock()
+	defer m.aggMu.Unlock()
 	if time.Now().Before(m.aggExpires) {
-		cached := m.aggCached
-		m.aggMu.Unlock()
-		return cached
+		return m.aggCached
 	}
-	m.aggMu.Unlock()
 
-	var out AggregateStats
+	out := AggregateStats{Clients: make([]ClientStats, 0, len(m.clients))}
 	for _, e := range m.clients {
+		cs := ClientStats{Name: e.cfg.Name}
 		list, err := e.client.ListCategory(ctx)
 		if err != nil {
 			logger.Debug("torrent aggregate stats: list failed", "client", e.cfg.Name, "err", err)
+			out.Clients = append(out.Clients, cs) // Reachable stays false
 			continue
 		}
+		cs.Reachable = true
 		for _, t := range list {
-			out.TotalTorrents++
-			out.DownloadSpeedBps += t.DlSpeed
-			out.UploadSpeedBps += t.UpSpeed
+			cs.TotalTorrents++
+			cs.DownloadSpeedBps += t.DlSpeed
+			cs.UploadSpeedBps += t.UpSpeed
+			cs.Seeds += t.NumSeeds
+			cs.Peers += t.NumLeechs
+			if t.DlSpeed > 0 || t.UpSpeed > 0 {
+				cs.ActiveTorrents++
+			}
 			out.DownloadedBytes += t.Downloaded
 			out.UploadedBytes += t.Uploaded
-			out.Seeds += t.NumSeeds
-			out.Peers += t.NumLeechs
-			if t.DlSpeed > 0 || t.UpSpeed > 0 {
-				out.ActiveTorrents++
-			}
 		}
+		out.DownloadSpeedBps += cs.DownloadSpeedBps
+		out.UploadSpeedBps += cs.UploadSpeedBps
+		out.ActiveTorrents += cs.ActiveTorrents
+		out.TotalTorrents += cs.TotalTorrents
+		out.Seeds += cs.Seeds
+		out.Peers += cs.Peers
+		out.Clients = append(out.Clients, cs)
 	}
 
-	m.aggMu.Lock()
 	m.aggCached = out
 	m.aggExpires = time.Now().Add(aggregateCacheTTL)
-	m.aggMu.Unlock()
 	return out
 }

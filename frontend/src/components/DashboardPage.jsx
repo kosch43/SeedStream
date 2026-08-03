@@ -44,15 +44,32 @@ export function DashboardPage({ stats, chartData, sendCommand, config }) {
   }, [config])
 
   const displayedClients = useMemo(() => {
-    return (config?.torrent_clients || []).map((tc) => ({
-      name: (tc.name || '').trim() || 'qBittorrent',
-      url: tc.url || '',
-      category: tc.category || 'seedstream',
-      savePath: tc.save_path || '',
-      remotePath: tc.remote_path || '',
-      enabled: tc.enabled !== false,
-    }))
-  }, [config])
+    const liveByName = new Map(
+      (stats?.torrent_clients || []).map((c) => [String(c.name || '').trim(), c])
+    )
+    return (config?.torrent_clients || []).map((tc) => {
+      const name = (tc.name || '').trim() || 'qBittorrent'
+      const live = liveByName.get(name)
+      return {
+        name,
+        url: tc.url || '',
+        category: tc.category || 'seedstream',
+        savePath: tc.save_path || '',
+        remotePath: tc.remote_path || '',
+        enabled: tc.enabled !== false,
+        // Per-client figures. Absent until the first stats tick arrives, which
+        // is why these are null rather than 0 — an unknown value and a genuinely
+        // idle client should not look the same.
+        // Unknown until the first tick, and unknown again if the client could
+        // not be reached — in neither case is zero a truthful answer.
+        seeds: live && live.reachable !== false ? live.seeds : null,
+        peers: live && live.reachable !== false ? live.peers : null,
+        activeTorrents: live && live.reachable !== false ? live.active_torrents : null,
+        totalTorrents: live && live.reachable !== false ? live.total_torrents : null,
+        reachable: live ? live.reachable !== false : null,
+      }
+    })
+  }, [config, stats])
 
   const displayedTrackers = useMemo(() => {
     const statMap = new Map((stats?.indexers || []).map((indexer) => [String(indexer.name || '').trim(), indexer]))
@@ -253,10 +270,15 @@ export function DashboardPage({ stats, chartData, sendCommand, config }) {
                           <Tooltip>
                             <TooltipTrigger asChild>
                               <Badge variant="outline" className="ml-auto h-5 min-w-5 rounded-full px-1.5">
-                                <span className={cn("h-1.5 w-1.5 rounded-full", c.enabled ? "bg-green-600" : "bg-destructive")} />
+                                <span className={cn(
+                                  "h-1.5 w-1.5 rounded-full",
+                                  !c.enabled ? "bg-destructive" : c.reachable === false ? "bg-chart-4" : "bg-green-600"
+                                )} />
                               </Badge>
                             </TooltipTrigger>
-                            <TooltipContent>{c.enabled ? 'Active' : 'Inactive'}</TooltipContent>
+                            <TooltipContent>
+                              {!c.enabled ? 'Disabled' : c.reachable === false ? 'Unreachable' : 'Connected'}
+                            </TooltipContent>
                           </Tooltip>
                         </TooltipProvider>
                       </div>
@@ -266,11 +288,11 @@ export function DashboardPage({ stats, chartData, sendCommand, config }) {
                       <div className="flex items-center justify-between mt-2">
                         <div className="flex flex-col">
                           <span className="text-[10px] uppercase text-muted-foreground font-medium">Seeds</span>
-                          <span className="text-lg font-bold tabular-nums text-primary">{stats.seeds ?? 0}</span>
+                          <span className="text-lg font-bold tabular-nums text-primary">{c.seeds ?? '—'}</span>
                         </div>
                         <div className="flex flex-col text-right">
                           <span className="text-[10px] uppercase text-muted-foreground font-medium">Peers</span>
-                          <span className="text-lg font-bold tabular-nums text-primary">{stats.peers ?? 0}</span>
+                          <span className="text-lg font-bold tabular-nums text-primary">{c.peers ?? '—'}</span>
                         </div>
                       </div>
                       <div className="mt-3 flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
