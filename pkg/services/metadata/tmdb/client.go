@@ -131,6 +131,14 @@ type TVTranslationData struct {
 }
 
 func (c *Client) doRequest(endpoint string, params url.Values) (*http.Response, error) {
+	// TMDB v3 API keys (32 hex chars) are rejected as Bearer tokens and must be
+	// sent as the api_key query parameter. v4 access tokens (JWT) use the
+	// Authorization: Bearer header.
+	useQueryKey := isV3APIKey(c.apiKey)
+	if useQueryKey {
+		params = cloneValues(params)
+		params.Set("api_key", c.apiKey)
+	}
 	reqURL := fmt.Sprintf("%s?%s", endpoint, params.Encode())
 
 	req, err := http.NewRequest("GET", reqURL, nil)
@@ -138,10 +146,32 @@ func (c *Client) doRequest(endpoint string, params url.Values) (*http.Response, 
 		return nil, err
 	}
 
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	if !useQueryKey {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
 	req.Header.Set("accept", "application/json")
 
 	return c.client.Do(req)
+}
+
+func isV3APIKey(key string) bool {
+	if len(key) != 32 {
+		return false
+	}
+	for _, r := range key {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+func cloneValues(v url.Values) url.Values {
+	out := make(url.Values, len(v))
+	for k, vals := range v {
+		out[k] = append([]string(nil), vals...)
+	}
+	return out
 }
 
 func (c *Client) Find(externalID, source string) (*FindResponse, error) {
