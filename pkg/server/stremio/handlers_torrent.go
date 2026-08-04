@@ -3,9 +3,11 @@ package stremio
 import (
 	"context"
 	"fmt"
+	"mime"
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -109,9 +111,19 @@ func (s *Server) serveTorrent(w http.ResponseWriter, r *http.Request, sess *sess
 
 	logger.Info("Serving torrent stream", "session", sess.ID, "file", res.Name, "size", stat.Size(), "progress", res.Progress)
 
-	// Count bytes actually transferred. A multi-megabyte successful read is
-	// strong evidence the torrent is healthy: report it to Cerberus and mark
-	// the slot committed for the /next cursor.
+	// Set an explicit Content-Type from the file extension before
+	// ServeContent runs. On minimal containers Go's mime table does not
+	// know ".mkv", so ServeContent falls back to sniffing the first bytes
+	// and mislabels Matroska (EBML) files as "video/webm" — which many
+	// players refuse for H.265/REMUX content. Resolve the extension here
+	// with a fallback map for common video containers, else let
+	// ServeContent detect.
+	if ctype := contentTypeForFile(res.Name); ctype != "" {
+		w.Header().Set("Content-Type", ctype)
+	}
+
+	// Count bytes so that a successful read is strong evidence the torrent
+	// is healthy: report it to Cerberus and mark the slot committed.
 	crw := &countingResponseWriter{ResponseWriter: w}
 	http.ServeContent(crw, r, res.Name, stat.ModTime(), f)
 
@@ -139,6 +151,37 @@ func mergeSessionContext(r *http.Request, sess *session.Session) (context.Contex
 		}
 	}(ctx.Done(), sess.Done())
 	return ctx, cancel
+}
+
+// contentTypeForFile returns the media type for a video file, preferring an
+// explicit map so that Matroska files are never mislabeled as webm, then
+// falling back to Go's mime table by extension.
+func contentTypeForFile(name string) string {
+	ext := strings.ToLower(filepath.Ext(name))
+	switch ext {
+	case ".mkv":
+		return "video/x-matroska"
+	case ".mp4", ".m4v":
+		return "video/mp4"
+	case ".webm":
+		return "video/webm"
+	case ".ts":
+		return "video/mp2t"
+	case ".avi":
+		return "video/x-msvideo"
+	case ".mov":
+		return "video/quicktime"
+	case ".mpg", ".mpeg":
+		return "video/mpeg"
+	case ".flv":
+		return "video/x-flv"
+	case ".wmv":
+		return "video/x-ms-wmv"
+	}
+	if ctype := mime.TypeByExtension(ext); ctype != "" {
+		return ctype
+	}
+	return ""
 }
 
 // countingResponseWriter wraps http.ResponseWriter to track bytes written.

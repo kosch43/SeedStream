@@ -52,7 +52,7 @@ func (s *Service) Filter(releases []*release.Release) []Candidate {
 	candidates = deduplicateReleases(candidates)
 
 	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].Score > candidates[j].Score
+		return moreDesirable(&candidates[i], &candidates[j])
 	})
 
 	return candidates
@@ -77,8 +77,25 @@ func (s *Service) SortCandidates(candidates []Candidate) {
 		candidates[i].QuerySource = querySource
 	}
 	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].Score > candidates[j].Score
+		return moreDesirable(&candidates[i], &candidates[j])
 	})
+}
+
+// moreDesirable reports whether a should sort before b: score desc, then
+// seeders desc as a tiebreaker. Seeders only ever break score ties, so
+// quality-based ordering (size, age, grabs) is never overridden.
+func moreDesirable(a, b *Candidate) bool {
+	if a.Score != b.Score {
+		return a.Score > b.Score
+	}
+	as, bs := 0, 0
+	if a.Release != nil {
+		as = a.Release.Seeders
+	}
+	if b.Release != nil {
+		bs = b.Release.Seeders
+	}
+	return as > bs
 }
 
 func basicScore(rel *release.Release) int {
