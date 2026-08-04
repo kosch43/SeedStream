@@ -205,6 +205,7 @@ type TorrentInfo struct {
 	UpSpeed      int64   `json:"upspeed"`
 	NumSeeds     int     `json:"num_seeds"`
 	NumLeechs    int     `json:"num_leechs"`
+	PieceSize    int64   `json:"piece_size"`
 }
 
 // Get returns the torrent with the given info hash, or nil if not present.
@@ -265,6 +266,20 @@ func (c *Client) Files(ctx context.Context, hash string) ([]FileInfo, error) {
 		}
 	}
 	return list, nil
+}
+
+// PieceStates returns the download state of every piece of a torrent, in
+// piece order. States: 0 = not downloaded, 1 = downloading, 2 = downloaded.
+func (c *Client) PieceStates(ctx context.Context, hash string) ([]int, error) {
+	body, err := c.do(ctx, http.MethodGet, "/api/v2/torrents/pieceStates?hash="+url.QueryEscape(strings.ToLower(hash)), nil)
+	if err != nil {
+		return nil, err
+	}
+	var states []int
+	if err := json.Unmarshal(body, &states); err != nil {
+		return nil, fmt.Errorf("qbittorrent pieceStates decode: %w", err)
+	}
+	return states, nil
 }
 
 // Delete removes torrents, optionally deleting their downloaded files. Used by

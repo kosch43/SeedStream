@@ -11,13 +11,13 @@ How it works:
 By the end you'll have:
 - **qBittorrent** — torrent client, traffic routed through Gluetun
 - **SeedStream** — the streaming addon that ties search → download → stream together
-- **Disk watchdog** — pauses torrents if the disk fills up
+- **Disk watchdog** — stops torrents if the disk fills up
 
 ---
 
 ## Prerequisites
 
-- The stack from the [VPS Setup Guide](../../../MarshmellowXD/docker-compose-template/guides/vps-setup.md) and [Template Deployment Guide](../../../MarshmellowXD/docker-compose-template/guides/template-deployment.md), running
+- The stack from the [VPS Setup Guide](https://github.com/MarshmellowXD/docker-compose-template/blob/main/guides/vps-setup.md) and [Template Deployment Guide](https://github.com/MarshmellowXD/docker-compose-template/blob/main/guides/template-deployment.md), running
 - **Gluetun** (VPN) running — qBittorrent shares its network namespace, so your IP never leaks
 - **Prowlarr** running (you'll point SeedStream at its Torznab API)
 - **AIOStreams** set up (this is where SeedStream gets wired in)
@@ -53,18 +53,38 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "1.0"
     profiles:
       - arr
       - all
 ```
 
-Then add it to your root `compose.yaml` `include:` list and deploy:
+Because qBittorrent shares Gluetun's network, the WebUI has to be exposed through Traefik on the bridge network. Add these labels to the **gluetun** service (not qbittorrent — it has no DNS name of its own):
 
-```bash
-docker compose up -d qbittorrent
+```yaml
+labels:
+  - "traefik.enable=true"
+  - "traefik.http.routers.qbittorrent.rule=Host(`${QBIT_HOSTNAME?}`)"
+  - "traefik.http.routers.qbittorrent.entrypoints=websecure"
+  - "traefik.http.routers.qbittorrent.tls.certresolver=letsencrypt"
+  - "traefik.http.routers.qbittorrent.middlewares=tinyauth@docker"
+  - "traefik.http.services.qbittorrent.loadbalancer.server.port=8080"
 ```
 
-> The WebUI is **not** exposed publicly — you reach it from inside Gluetun's network only. Don't add Traefik labels to this service.
+Then:
+
+1. Add `- apps/qbittorrent/compose.yaml` to your root `compose.yaml` `include:` list
+2. Add `QBIT_HOSTNAME=qbit.YOURDOMAIN` to your root `.env`
+3. Add `qbit.YOURDOMAIN` to `apps/cloudflare-ddns/compose.yaml` `DOMAINS`
+4. Deploy: `docker compose up -d qbittorrent gluetun`
+
+> The services declare profiles `arr` and `all`, so they're picked up by the template's default `COMPOSE_PROFILES=all`. If you run a slimmer profile set, add `arr` to it.
+
+You'll reach the WebUI at `https://qbit.YOURDOMAIN` (behind your SSO) once the VPN is connected.
 
 ---
 
@@ -121,19 +141,13 @@ docker compose up -d seedstream
 
 Add `SEEDSTREAM_HOSTNAME=seedstream.YOURDOMAIN` to your root `.env`, plus the subdomain to `apps/cloudflare-ddns/compose.yaml` `DOMAINS`.
 
+> The runtime image is a bare `alpine:latest` — it ships BusyBox, so `wget` exists but **`curl` does not**. Keep that in mind when running the health/sidecar commands in later steps.
+
 ---
 
 ## Step 3: Configure qBittorrent
 
-Log into the WebUI through the VPN namespace (replace `8080` with Gluetun's HTTP proxy port if you changed it):
-
-```bash
-docker exec gluetun sh -c "wget -qO- http://127.0.0.1:8080" >/dev/null && echo reachable
-```
-
-Or open it from your machine through an SSH tunnel: `ssh -L 8080:127.0.0.1:8080 ubuntu@YOURSERVER` then browse `http://127.0.0.1:8080`.
-
-Log in (default `admin` / `adminadmin` — change it) and set:
+Open `https://qbit.YOURDOMAIN` in your browser (behind your SSO). Log in (default `admin` / `adminadmin` — change it right away) and set:
 
 **Tools → Options → Downloads:**
 
@@ -145,7 +159,7 @@ Log in (default `admin` / `adminadmin` — change it) and set:
 
 - **Download in sequential order:** on
 - **Download first and last pieces first:** on
-- **When ratio reaches:** `2` → **Stop** and remove the torrent and its files (your VPS disk is precious — don't hoard)
+- **When ratio reaches:** `2` → **Stop and remove the torrent and its files** (your VPS disk is precious — don't hoard)
 
 > These two toggles are the whole trick: the file's start is ready almost immediately, and SeedStream can stream the tail without waiting for the whole file.
 
@@ -188,9 +202,8 @@ https://seedstream.YOURDOMAIN/<token>/manifest.json
 ## Step 5: Wire It Into AIOStreams
 
 1. Open `https://aiostreams.YOURDOMAIN`
-2. Go to **Addons** → add a new **hybrid addon**
-3. Paste the SeedStream manifest URL from Step 4
-4. Save
+2. Go to **Addons** → add the **SeedStream preset** (per the [README](../README.md)) and paste the manifest URL from Step 4
+3. Save
 
 Now when you search something in Stremio, SeedStream's releases appear alongside your debrid results — pick the SeedStream one and playback starts within seconds while the torrent downloads.
 
@@ -198,23 +211,50 @@ Now when you search something in Stremio, SeedStream's releases appear alongside
 
 ## Step 6: Disk Watchdog (recommended)
 
-Torrents downloading can still fill the disk before the ratio limit kicks in. Install a simple watchdog that pauses all torrents at 85% usage:
+Torrents downloading can still fill the disk before the ratio limit kicks in. Install a simple watchdog that stops all torrents at 85% usage:
 
 Create `/opt/scripts/disk-guard.sh`:
 
 ```bash
 #!/bin/bash
-USED=$(df / | awk 'NR==2 {print $5}' | tr -d '%')
-[ "$USED" -lt 85 ] && exit 0
-QBIT_SID=$(curl -sS -i -X POST -d 'username=admin&password=YOURPASSWORD' \
-  http://127.0.0.1:8080/api/v2/auth/login | grep -oP 'QBT_SID_[0-9]+=[^;]+')
-curl -sS -b "$QBIT_SID" -X POST \
-  -d 'hashes=all&paused=true' http://127.0.0.1:8080/api/v2/torrents/pause
-curl -sS -d "Disk ${USED}% full — torrents paused." \
-  http://127.0.0.1:8080/critical >/dev/null   # ntfy alert
+set -uo pipefail
+
+LOGFILE="/opt/docker/data/disk-guard.log"
+exec >> "$LOGFILE" 2>&1
+
+QBIT_HOST="127.0.0.1"        # qBittorrent only exists inside gluetun's namespace
+QBIT_PORT=8080
+QBIT_USER="admin"            # your qBittorrent WebUI credentials (Step 3)
+QBIT_PASS="YOURPASSWORD"
+STOP_THRESHOLD=85
+NTFY_TOPIC="critical"
+TARGET="/opt/docker/data/media"   # the disk that holds torrents
+
+pct=$(df -P "$TARGET" | awk 'NR==2 {gsub(/%/,"",$5); print $5}')
+echo "[disk-guard] $(date '+%F %T') used=${pct}% limit=${STOP_THRESHOLD}%"
+
+[ "$pct" -ge "$STOP_THRESHOLD" ] || exit 0
+
+SID=$(docker exec gluetun sh -c \
+  "wget -S -O - --post-data='username=${QBIT_USER}&password=${QBIT_PASS}' \
+   'http://${QBIT_HOST}:${QBIT_PORT}/api/v2/auth/login'" 2>&1 \
+  | grep -oP 'QBT_SID_[0-9]+=[^;]+' | head -1)
+
+if [ -z "$SID" ]; then
+  echo "[disk-guard] ERROR: qBittorrent login failed (no SID)"
+  exit 1
+fi
+
+docker exec gluetun sh -c "wget -q -O - --post-data='hashes=all' \
+  --header='Cookie: SID=$SID' \
+  'http://${QBIT_HOST}:${QBIT_PORT}/api/v2/torrents/stop'"
+echo "[disk-guard] stopped all torrents (${pct}%)"
+
+docker exec ntfy wget -q -O - --post-data="Disk guard: disk usage ${pct}%. Stopped all qBittorrent downloads." \
+  "http://localhost/${NTFY_TOPIC}" && echo "[disk-guard] ntfy notified"
 ```
 
-> Run this script from inside the Gluetun namespace, or wrap it with `docker exec gluetun ...` so it can reach qBittorrent's WebUI. The ntfy alert goes to the `critical` topic (with `*` in the URL it's publicly readable, so you can point it at a separate ntfy topic that's behind auth if you prefer).
+> qBittorrent isn't reachable on the host — it lives inside Gluetun's network namespace, so every call goes through `docker exec gluetun`. Likewise the ntfy alert runs via `docker exec ntfy` (its port is **not** 8080 — that's qBittorrent's). Set `QBIT_PASS` to the WebUI password from Step 3 and make the script executable: `chmod +x /opt/scripts/disk-guard.sh`.
 
 Create a systemd timer to run it every 5 minutes:
 
@@ -259,13 +299,19 @@ sudo systemctl enable --now disk-guard.timer
 2. Playback should start within a few seconds — **even though the file is still downloading**
 3. Check it's really seeding:
    ```bash
-   docker exec gluetun sh -c "wget -qO- http://127.0.0.1:8080/api/v2/torrents/info" | jq '.[].state'
+   cd /opt/docker && docker exec gluetun sh -c "wget -qO- http://127.0.0.1:8080/api/v2/torrents/info" | jq '.[].state'
    ```
    You should see `stalledUP` / `uploading` after the movie finishes
-4. Confirm your torrent traffic is behind the VPN:
+4. Confirm your torrent traffic is behind the VPN (Gluetun has `wget`, not `curl`):
    ```bash
-   docker exec gluetun curl -sS https://api.ipify.org
+   docker exec gluetun sh -c "wget -qO- https://api.ipify.org"
    ```
+   This should return **your VPN IP**, not your VPS's public IP.
+5. Check the watchdog when it fires:
+   ```bash
+   journalctl -u disk-guard.service -e
+   ```
+   and look in `/opt/docker/data/disk-guard.log`.
 
 ---
 
