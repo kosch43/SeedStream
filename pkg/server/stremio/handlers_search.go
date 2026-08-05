@@ -1044,6 +1044,44 @@ func (s *Server) filterBlockedTorrents(streamLabel string, releases []*release.R
 	return filtered
 }
 
+// filterLowSeeders drops torrent releases whose tracker-reported seeder count is
+// below the configured minimum, so a swarm too thin to stream is never offered.
+//
+// It is deliberately conservative in two ways. The filter is off unless a
+// minimum is configured, and it only ever judges releases whose indexer actually
+// published a seeder count: a missing "seeders" attribute reads as 0 in the raw
+// value, so filtering on that would silently wipe out every result from an
+// indexer that does not report swarm health. It also refuses to remove every
+// candidate — if nothing clears the bar, the unfiltered list is returned so the
+// viewer still gets the best available option rather than an empty stream list.
+func (s *Server) filterLowSeeders(streamLabel string, releases []*release.Release) []*release.Release {
+	minSeeders := s.config.EffectiveMinSeeders()
+	if minSeeders <= 0 || len(releases) == 0 {
+		return releases
+	}
+	filtered := make([]*release.Release, 0, len(releases))
+	removed := 0
+	for _, rel := range releases {
+		if rel != nil && rel.IsTorrent() && rel.SeedersKnown && rel.Seeders < minSeeders {
+			removed++
+			continue
+		}
+		filtered = append(filtered, rel)
+	}
+	if removed == 0 {
+		return releases
+	}
+	if len(filtered) == 0 {
+		logger.Info("Seeder filter would remove every result, keeping the unfiltered list",
+			"stream", streamLabel, "min_seeders", minSeeders, "candidates", len(releases))
+		return releases
+	}
+	logger.Debug("Seeder filter",
+		"stream", streamLabel, "min_seeders", minSeeders,
+		"removed", removed, "remaining", len(filtered))
+	return filtered
+}
+
 // releaseInfoHash returns a release's lowercased BitTorrent info hash, deriving
 // it from the magnet URI when the indexer didn't supply one directly.
 func releaseInfoHash(rel *release.Release) string {
@@ -1148,6 +1186,7 @@ func (s *Server) buildRawSearchResult(ctx context.Context, contentType, id strin
 	}
 	indexerReleases = dedupeCombinedSearchResults(streamLabel, stream, indexerReleases, executedRequests)
 	indexerReleases = s.filterBlockedTorrents(streamLabel, indexerReleases, params.ContentIDs)
+	indexerReleases = s.filterLowSeeders(streamLabel, indexerReleases)
 	logger.Debug("Playback candidate build finished",
 		"stream", streamLabel,
 		"type", contentType,

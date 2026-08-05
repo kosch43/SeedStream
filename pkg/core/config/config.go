@@ -265,6 +265,15 @@ func (c *Config) EffectiveFailoverFastMode() bool {
 	return c.FailoverFastMode
 }
 
+// EffectiveMinSeeders returns the configured minimum seeder count, or 0 when
+// the filter is disabled.
+func (c *Config) EffectiveMinSeeders() int {
+	if c == nil || c.MinSeeders < 0 {
+		return 0
+	}
+	return c.MinSeeders
+}
+
 // DefaultPostCapUploadMbps is the assumed post-cap throttle speed when a monthly
 // upload cap is configured without an explicit throttle speed.
 const DefaultPostCapUploadMbps = 10.0
@@ -500,6 +509,13 @@ type Config struct {
 	CerberusBaseURL string `json:"cerberus_base_url,omitempty"`
 	// CerberusAPIKey is the optional bearer token for the central Cerberus server.
 	CerberusAPIKey string `json:"cerberus_api_key,omitempty"`
+
+	// MinSeeders drops torrent releases whose tracker-reported seeder count is
+	// below this before they are offered for playback, so a swarm too thin to
+	// stream is never picked. Only applied to releases whose indexer actually
+	// publishes a seeder count — a tracker that omits it is never filtered.
+	// 0 (the default) disables the filter; dead swarms are still sorted last.
+	MinSeeders int `json:"min_seeders,omitempty"`
 
 	// MonthlyUploadCapGB is the seedbox's monthly upload allowance in gigabytes
 	// (decimal, matching how providers quote "2 TB" as 2000 GB). When > 0 the

@@ -52,6 +52,11 @@ type Release struct {
 	Magnet   string // magnet: URI when the indexer provides one
 	InfoHash string // BitTorrent v1 info hash (lowercased)
 	Seeders  int    // current seeders reported by the indexer
+	// SeedersKnown reports whether the indexer actually published a seeder
+	// count. Without it, Seeders == 0 is ambiguous: it could mean a dead swarm
+	// or an indexer that simply does not report swarm health. Only act on a zero
+	// seeder count when this is true.
+	SeedersKnown bool
 	Peers    int    // current leechers/peers reported by the indexer
 
 	// Uniqueness plumbing for event-based statistics.
