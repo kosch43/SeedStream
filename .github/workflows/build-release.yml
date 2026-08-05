@@ -41,18 +41,15 @@ jobs:
         with:
           driver: docker-container
 
+      # GITHUB_TOKEN is injected automatically and the `packages: write`
+      # permission above lets it push to this repository's GHCR namespace, so
+      # publishing needs no secret to be configured by hand.
       - name: Log in to the Container registry
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.MY_RELEASE_PLEASE_TOKEN }}
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v4
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -105,7 +102,6 @@ jobs:
         with:
           images: |
             ghcr.io/${{ env.REPO }}
-            ${{ env.REPO }}
           tags: |
             type=ref,event=tag
             type=ref,event=branch
@@ -136,21 +132,6 @@ jobs:
       - name: Upload Release Assets
         if: github.event_name == 'release'
         env:
-          GH_TOKEN: ${{ secrets.MY_RELEASE_PLEASE_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release upload ${{ github.ref_name }} release_assets/*
-
-      - name: GitHub Releases to Discord
-        if: github.event_name == 'release'
-        uses: SethCohen/github-releases-to-discord@v1.20.0
-        with:
-          webhook_url: ${{ secrets.DISCORD_WEBHOOK }}
-          release_name: ${{ github.event.release.name }}
-          release_body: ${{ github.event.release.body }}
-          release_html_url: ${{ github.event.release.html_url }}
-          color: "2105893"
-          username: "Release Changelog"
-          avatar_url: "https://cdn.discordapp.com/icons/1470288400157380710/6f397b4a2e9561dc7ad43526588cfd67.png"
-          content: "||@everyone||"
-          footer_title: "Changelog"
-          reduce_headings: true
