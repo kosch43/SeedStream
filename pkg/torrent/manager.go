@@ -174,6 +174,23 @@ func (m *Manager) Resume(ctx context.Context, clientName, hash string) error {
 	return c.Resume(ctx, hash)
 }
 
+// SeedingUploadTotals returns each configured client's current session upload
+// counter (qBittorrent up_info_data), keyed by client name. Used by the upload
+// guard to fold BitTorrent seeding into the monthly total. Unreachable clients
+// are skipped rather than reported as an error.
+func (m *Manager) SeedingUploadTotals(ctx context.Context) map[string]int64 {
+	out := make(map[string]int64, len(m.clients))
+	for _, e := range m.clients {
+		info, err := e.client.TransferInfo(ctx)
+		if err != nil || info == nil {
+			logger.Debug("upload guard: transfer info query failed", "client", e.cfg.Name, "err", err)
+			continue
+		}
+		out[e.cfg.Name] = info.UpInfoData
+	}
+	return out
+}
+
 // Ping checks each configured client; returns a map of name -> error (nil = ok).
 func (m *Manager) Ping(ctx context.Context) map[string]error {
 	out := make(map[string]error, len(m.clients))

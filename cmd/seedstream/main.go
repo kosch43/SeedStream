@@ -21,6 +21,7 @@ import (
 	"seedstream/pkg/server/stremio"
 	"seedstream/pkg/server/web"
 	"seedstream/pkg/services/cerberus"
+	"seedstream/pkg/services/uploadguard"
 	"seedstream/pkg/session"
 	"seedstream/pkg/torrent"
 
@@ -88,6 +89,11 @@ func main() {
 	if err != nil {
 		initialization.WaitForInputAndExit(fmt.Errorf("failed to get state manager: %v", err))
 	}
+
+	// Monthly upload guard: one meter shared by the stream server (which records
+	// its own HTTP egress and gates heavy titles) and the watchdog (which folds
+	// in BitTorrent seeding). A process singleton so both see the same total.
+	uploadMeter := uploadguard.New(stateMgr, nil)
 
 	{
 		var stateAdmin struct {
@@ -205,13 +211,14 @@ func main() {
 		StreamManager:  streamManager,
 		Version:        Version,
 		CerberusClient: cerberusClient,
+		UploadMeter:    uploadMeter,
 	})
 	if err != nil {
 		initialization.WaitForInputAndExit(fmt.Errorf("failed to initialize Stremio server: %v", err))
 	}
 
 	torrentMgr := torrent.NewManager(comp.Config.TorrentClients)
-	watchdog := torrent.NewWatchdog(torrentMgr, cerberusClient, comp.Indexer, comp.Config)
+	watchdog := torrent.NewWatchdog(torrentMgr, cerberusClient, comp.Indexer, comp.Config, uploadMeter)
 	if watchdog != nil {
 		go watchdog.Start(context.Background(), torrent.WatchdogConfig{})
 		logger.Info("Cerberus torrent watchdog enabled")

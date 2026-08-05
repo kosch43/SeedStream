@@ -317,6 +317,31 @@ func (c *Client) Properties(ctx context.Context, hash string) (*TorrentPropertie
 	return &props, nil
 }
 
+// TransferInfo is a subset of /transfer/info — the client's global transfer
+// counters. UpInfoData/DlInfoData are the bytes transferred in the current
+// qBittorrent session, so they reset to 0 whenever qBittorrent restarts;
+// callers that want a running total must accumulate positive deltas.
+type TransferInfo struct {
+	UpInfoData  int64 `json:"up_info_data"`
+	DlInfoData  int64 `json:"dl_info_data"`
+	UpInfoSpeed int64 `json:"up_info_speed"`
+	DlInfoSpeed int64 `json:"dl_info_speed"`
+}
+
+// TransferInfo returns the client's global transfer counters, used by the
+// upload guard to track how much has been seeded this billing period.
+func (c *Client) TransferInfo(ctx context.Context) (*TransferInfo, error) {
+	body, err := c.do(ctx, http.MethodGet, "/api/v2/transfer/info", nil)
+	if err != nil {
+		return nil, err
+	}
+	var info TransferInfo
+	if err := json.Unmarshal(body, &info); err != nil {
+		return nil, fmt.Errorf("qbittorrent transfer info decode: %w", err)
+	}
+	return &info, nil
+}
+
 // SetFilePriority sets the download priority of one file within a torrent.
 // Priority 7 (maximum) makes qBittorrent fetch that file's pieces first, which
 // is how a specific episode of a season pack gets pulled ahead of the rest.

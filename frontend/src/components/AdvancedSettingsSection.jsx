@@ -17,6 +17,7 @@ const CARD_FIELDS = {
   playback: ['playback_startup_timeout_seconds', 'failover_fast_mode', 'session_ttl_minutes', 'session_post_playback_ttl_minutes'],
   metadata: ['tmdb_api_key', 'tvdb_api_key'],
   cerberus: ['cerberus_base_url', 'cerberus_api_key'],
+  uploadGuard: ['monthly_upload_cap_gb', 'post_cap_upload_mbps', 'upload_cap_reset_day'],
 }
 
 function pickInitialValues(values = {}) {
@@ -41,6 +42,9 @@ function pickInitialValues(values = {}) {
     tvdb_api_key: values.tvdb_api_key ?? '',
     cerberus_base_url: values.cerberus_base_url ?? '',
     cerberus_api_key: values.cerberus_api_key ?? '',
+    monthly_upload_cap_gb: Number(values.monthly_upload_cap_gb ?? 0) || 0,
+    post_cap_upload_mbps: Number(values.post_cap_upload_mbps ?? 10) || 10,
+    upload_cap_reset_day: Number(values.upload_cap_reset_day ?? 1) || 1,
   }
 }
 
@@ -450,6 +454,60 @@ export const AdvancedSettingsSection = forwardRef(function AdvancedSettingsSecti
                     <FormControl><div className="w-full xl:max-w-3xl"><PasswordInput className={fieldClassName('cerberus_api_key', 'h-9 w-full font-mono text-xs')} {...field} value={field.value || ''} /></div></FormControl>
                   </div>
                   <FormDescription className="mt-3">Optional bearer token sent with every request to the central server.</FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )} />
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0 flex-1 max-w-[34rem] space-y-0.5">
+                <CardTitle>Monthly upload guard</CardTitle>
+                <CardDescription>
+                  Many seedboxes throttle upload speed after a monthly traffic allowance is used up. Enter your allowance
+                  and the watchdog tracks how much has been uploaded this month (BitTorrent seeding plus streaming). Once the
+                  cap is reached, SeedStream serves only titles whose bitrate fits the throttled speed — with a larger
+                  pre-buffer — and holds heavier titles with a disclaimer until the allowance resets. The total is an
+                  estimate; it cannot read your provider's meter. Set the cap to 0 to disable.
+                </CardDescription>
+              </div>
+              <div className="shrink-0">{renderSaveButton('uploadGuard')}</div>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="rounded-md border border-border/60">
+              <FormField control={control} name="monthly_upload_cap_gb" render={({ field }) => (
+                <FormItem className="rounded-none border-0 p-3">
+                  <div className={stackedFieldRowClass}>
+                    <FormLabel className={cn(labelClass, 'sm:flex-1')}>Monthly upload allowance (GB)</FormLabel>
+                    <FormControl><Input type="number" min={0} step="any" className={fieldClassName('monthly_upload_cap_gb', `h-9 ${controlMediumClass}`)} {...field} value={field.value ?? ''} onChange={e => { const v = e.target.value; field.onChange(v === '' ? 0 : Number(v) || 0) }} /></FormControl>
+                  </div>
+                  <FormDescription className="mt-3">Your seedbox's monthly upload cap in gigabytes (decimal — a 2 TB cap is 2000). 0 disables the guard entirely.</FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )} />
+              <FormField control={control} name="post_cap_upload_mbps" render={({ field }) => (
+                <FormItem className="relative rounded-none border-0 p-3">
+                  <div className="absolute left-3 right-3 top-0 border-t border-border/60" />
+                  <div className={stackedFieldRowClass}>
+                    <FormLabel className={cn(labelClass, 'sm:flex-1')}>Throttled upload speed (Mbps)</FormLabel>
+                    <FormControl><Input type="number" min={0} step="any" className={fieldClassName('post_cap_upload_mbps', `h-9 ${controlMediumClass}`)} {...field} value={field.value ?? ''} onChange={e => { const v = e.target.value; field.onChange(v === '' ? 0 : Number(v) || 0) }} /></FormControl>
+                  </div>
+                  <FormDescription className="mt-3">The upload speed your provider throttles to after the cap is hit (e.g. 10). Titles needing more than this are held until reset. Default 10.</FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )} />
+              <FormField control={control} name="upload_cap_reset_day" render={({ field }) => (
+                <FormItem className="relative rounded-none border-0 p-3">
+                  <div className="absolute left-3 right-3 top-0 border-t border-border/60" />
+                  <div className={stackedFieldRowClass}>
+                    <FormLabel className={cn(labelClass, 'sm:flex-1')}>Allowance reset day</FormLabel>
+                    <FormControl><Input type="number" min={1} max={28} className={fieldClassName('upload_cap_reset_day', `h-9 ${controlMediumClass}`)} {...field} value={field.value ?? ''} onChange={e => { const v = e.target.value; field.onChange(v === '' ? 1 : Math.min(28, Math.max(1, Number(v) || 1))) }} /></FormControl>
+                  </div>
+                  <FormDescription className="mt-3">Day of the month (1–28) your provider's traffic counter resets. The monthly total zeroes on this day.</FormDescription>
                   <FormMessage />
                 </FormItem>
               )} />

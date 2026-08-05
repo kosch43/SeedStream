@@ -15,6 +15,7 @@ import (
 	"seedstream/pkg/core/logger"
 	"seedstream/pkg/indexer"
 	"seedstream/pkg/services/cerberus"
+	"seedstream/pkg/services/uploadguard"
 )
 
 const (
@@ -39,17 +40,20 @@ type Watchdog struct {
 	cerberus *cerberus.Client
 	indexer  indexer.Indexer
 	cfg      *config.Config
-	checking atomic.Bool // guards against concurrent check runs
+	meter    *uploadguard.Meter // monthly upload meter; nil disables metering
+	checking atomic.Bool        // guards against concurrent check runs
 }
 
 // NewWatchdog creates a Watchdog. Returns nil when the torrent manager has no
 // configured clients, or when cerberus/indexer are nil (watchdog would be a
-// no-op). cfg is used to look up per-tracker H&R rules at check time.
-func NewWatchdog(m *Manager, cer *cerberus.Client, idx indexer.Indexer, cfg *config.Config) *Watchdog {
+// no-op). cfg is used to look up per-tracker H&R rules at check time. meter, if
+// non-nil, is updated each check with the seedbox's BitTorrent upload so the
+// monthly upload guard stays current.
+func NewWatchdog(m *Manager, cer *cerberus.Client, idx indexer.Indexer, cfg *config.Config, meter *uploadguard.Meter) *Watchdog {
 	if m == nil || !m.Enabled() || cer == nil || idx == nil {
 		return nil
 	}
-	return &Watchdog{manager: m, cerberus: cer, indexer: idx, cfg: cfg}
+	return &Watchdog{manager: m, cerberus: cer, indexer: idx, cfg: cfg, meter: meter}
 }
 
 // hnrRulesFor returns the H&R rules configured for the named indexer, or nil
@@ -120,6 +124,8 @@ func (w *Watchdog) Start(ctx context.Context, cfg WatchdogConfig) {
 }
 
 func (w *Watchdog) check(ctx context.Context, stallThreshold time.Duration) {
+	w.syncUploadMeter(ctx)
+
 	entries, err := w.manager.ListAll(ctx)
 	if err != nil {
 		logger.Warn("Cerberus watchdog: failed to list torrents", "err", err)
@@ -156,6 +162,27 @@ func (w *Watchdog) check(ctx context.Context, stallThreshold time.Duration) {
 			"progress", e.Progress,
 			"imdb_id", rec.ImdbID, "tmdb_id", rec.TmdbID)
 		w.handleStalled(ctx, e, rec)
+	}
+}
+
+// syncUploadMeter folds the seedbox's BitTorrent upload into the monthly upload
+// guard and logs when the cap has been reached. No-op when metering is off or
+// the guard is disabled in config.
+func (w *Watchdog) syncUploadMeter(ctx context.Context) {
+	if w.meter == nil || !w.cfg.UploadGuardEnabled() {
+		return
+	}
+	w.meter.SetLimits(w.cfg.MonthlyUploadCapBytes(), w.cfg.EffectiveUploadCapResetDay())
+	w.meter.RecordSeedingTotals(w.manager.SeedingUploadTotals(ctx))
+
+	used, capBytes := w.meter.Used(), w.meter.Cap()
+	if w.meter.Throttled() {
+		logger.Warn("Upload guard: monthly upload allowance reached — heavy titles are held until reset",
+			"used_gb", float64(used)/1e9, "cap_gb", float64(capBytes)/1e9,
+			"post_cap_mbps", w.cfg.EffectivePostCapUploadMbps(), "reset_day", w.cfg.EffectiveUploadCapResetDay())
+	} else {
+		logger.Debug("Upload guard: monthly upload usage",
+			"used_gb", float64(used)/1e9, "cap_gb", float64(capBytes)/1e9)
 	}
 }
 
