@@ -126,6 +126,28 @@ func (i *Item) GetAttribute(name string) string {
 	return ""
 }
 
+// HasNumericAttribute reports whether the tracker actually supplied this
+// attribute with a numeric value. A missing "seeders" attribute and a reported
+// "seeders=0" both read as 0 through GetAttribute, but they mean very different
+// things: the first is an indexer that does not publish swarm health, the second
+// is a torrent nobody is seeding. Only the latter is safe to act on.
+func (i *Item) HasNumericAttribute(name string) bool {
+	for _, attr := range i.Attributes {
+		if attr.Name != name {
+			continue
+		}
+		v := strings.TrimSpace(attr.Value)
+		if v == "" {
+			return false
+		}
+		if _, err := strconv.Atoi(v); err != nil {
+			return false
+		}
+		return true
+	}
+	return false
+}
+
 // IsTorrent reports whether this item came from a Torznab tracker. The check
 // mirrors the protocol detection in ToRelease so the two are always in sync.
 func (i *Item) IsTorrent() bool {
@@ -164,6 +186,7 @@ func (i *Item) ToRelease() *release.Release {
 	magnet := i.GetAttribute("magneturl")
 	infoHash := strings.ToLower(strings.TrimSpace(i.GetAttribute("infohash")))
 	seeders := atoiOrZero(i.GetAttribute("seeders"))
+	seedersKnown := i.HasNumericAttribute("seeders")
 	peers := atoiOrZero(i.GetAttribute("peers"))
 	if peers == 0 {
 		peers = atoiOrZero(i.GetAttribute("leechers"))
@@ -198,6 +221,7 @@ func (i *Item) ToRelease() *release.Release {
 		Magnet:             magnet,
 		InfoHash:           infoHash,
 		Seeders:            seeders,
+		SeedersKnown:       seedersKnown,
 		Peers:              peers,
 		IndexersInSearch:   i.IndexersInSearch,
 		IndexersWithResult: i.IndexersWithResult,

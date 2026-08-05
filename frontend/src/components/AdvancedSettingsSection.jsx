@@ -14,7 +14,7 @@ import { cn } from "@/lib/utils"
 const CARD_FIELDS = {
   admin: ['log_level', 'keep_log_files'],
   memory: ['memory_limit_mb'],
-  playback: ['playback_startup_timeout_seconds', 'failover_fast_mode', 'session_ttl_minutes', 'session_post_playback_ttl_minutes'],
+  playback: ['playback_startup_timeout_seconds', 'min_seeders', 'failover_fast_mode', 'session_ttl_minutes', 'session_post_playback_ttl_minutes'],
   metadata: ['tmdb_api_key', 'tvdb_api_key'],
   cerberus: ['cerberus_base_url', 'cerberus_api_key'],
   uploadGuard: ['monthly_upload_cap_gb', 'post_cap_upload_mbps', 'upload_cap_reset_day'],
@@ -34,6 +34,7 @@ function pickInitialValues(values = {}) {
     log_level: values.log_level ?? 'INFO',
     keep_log_files: Number(values.keep_log_files ?? 9) || 9,
     memory_limit_mb: Number(values.memory_limit_mb ?? 512),
+    min_seeders: Number(values.min_seeders ?? 0) || 0,
     playback_startup_timeout_seconds: Number.isFinite(parsedPlaybackStartupTimeout) ? parsedPlaybackStartupTimeout : 5,
     session_ttl_minutes: Number.isFinite(parsedSessionTtl) ? parsedSessionTtl : 30,
     session_post_playback_ttl_minutes: Number.isFinite(parsedSessionPostPlaybackTtl) ? parsedSessionPostPlaybackTtl : 240,
@@ -258,6 +259,17 @@ export const AdvancedSettingsSection = forwardRef(function AdvancedSettingsSecti
                         <FormControl><Input type="number" min={1} max={60} className={fieldClassName('playback_startup_timeout_seconds', `h-9 ${controlMediumClass}`)} {...field} value={field.value ?? ''} onChange={e => { const v = e.target.value; const next = Number(v); field.onChange(v === '' ? 5 : Math.min(60, Math.max(1, Number.isNaN(next) ? 5 : next))) }} /></FormControl>
                       </div>
                       <FormDescription className="mt-3">How long SeedStream waits for the initial playback probe/open before failing over to the next release. Higher values reduce false startup timeouts but delay failover.</FormDescription>
+                      <FormMessage />
+                    </FormItem>
+                  )} />
+                  <FormField control={control} name="min_seeders" render={({ field }) => (
+                    <FormItem className="relative rounded-none border-0 p-3">
+                      <div className="absolute left-3 right-3 top-0 border-t border-border/60" />
+                      <div className={stackedFieldRowClass}>
+                        <FormLabel className={cn(labelClass, 'sm:flex-1')}>Minimum seeders</FormLabel>
+                        <FormControl><Input type="number" min={0} className={fieldClassName('min_seeders', `h-9 ${controlMediumClass}`)} {...field} value={field.value ?? ''} onChange={e => { const v = e.target.value; field.onChange(v === '' ? 0 : Math.max(0, Number(v) || 0)) }} /></FormControl>
+                      </div>
+                      <FormDescription className="mt-3">Hide torrents with fewer seeders than this, so a swarm too thin to stream is never picked. Only applies to trackers that report a seeder count, and is ignored if it would leave no results at all. 0 disables the filter — torrents with a reported zero seeders are still sorted last either way.</FormDescription>
                       <FormMessage />
                     </FormItem>
                   )} />

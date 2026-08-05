@@ -81,10 +81,22 @@ func (s *Service) SortCandidates(candidates []Candidate) {
 	})
 }
 
-// moreDesirable reports whether a should sort before b: score desc, then
-// seeders desc as a tiebreaker. Seeders only ever break score ties, so
-// quality-based ordering (size, age, grabs) is never overridden.
+// moreDesirable reports whether a should sort before b.
+//
+// Ordering is: anything that can actually be downloaded first, then score desc,
+// then seeders desc as a tiebreaker.
+//
+// The dead-swarm rule exists because score alone put unplayable torrents at the
+// top of the list. basicScore rewards size and recency, and its age term is a
+// near-unique number, so exact score ties are rare and the seeder tiebreaker
+// almost never fired — which let a freshly-posted 4K remux with zero seeders
+// outrank a well-seeded 1080p and stall on playback. Sinking confirmed-dead
+// torrents fixes that without disturbing quality ordering among the rest.
 func moreDesirable(a, b *Candidate) bool {
+	aDead, bDead := isDeadSwarm(a.Release), isDeadSwarm(b.Release)
+	if aDead != bDead {
+		return bDead // a is playable and b is not, so a comes first
+	}
 	if a.Score != b.Score {
 		return a.Score > b.Score
 	}
@@ -96,6 +108,14 @@ func moreDesirable(a, b *Candidate) bool {
 		bs = b.Release.Seeders
 	}
 	return as > bs
+}
+
+// isDeadSwarm reports whether a torrent is known to have nobody seeding it.
+// It is deliberately conservative: a release whose indexer did not publish a
+// seeder count is never treated as dead, because a missing attribute and a
+// genuine zero are indistinguishable in the raw value.
+func isDeadSwarm(rel *release.Release) bool {
+	return rel != nil && rel.IsTorrent() && rel.SeedersKnown && rel.Seeders <= 0
 }
 
 func basicScore(rel *release.Release) int {
