@@ -241,6 +241,43 @@ func (c *Client) PruneOldEntries(maxAgeDays int) int64 {
 	return n
 }
 
+// KnownTorrentsForContent returns torrents already registered for this exact
+// content, newest first, with locally blocked hashes removed.
+//
+// SeedStream registers every torrent it hands to qBittorrent, so this is the
+// memory of what the seedbox has already downloaded. Replaying a title can use
+// it to go straight back to that torrent instead of fetching a fresh one.
+// Entries are matched on season, episode and at least one content ID, so a
+// result is always the same title that was asked for.
+func (c *Client) KnownTorrentsForContent(ids ContentIDs) []TorrentRecord {
+	if c == nil {
+		return nil
+	}
+	entries := c.store.GetRegisteredTorrentsForContent(ids.ImdbID, ids.TmdbID, ids.TvdbID, ids.Season, ids.Episode)
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make([]TorrentRecord, 0, len(entries))
+	for _, e := range entries {
+		if c.store.IsInfoHashBlocked(e.InfoHash) {
+			continue
+		}
+		out = append(out, TorrentRecord{
+			InfoHash:     e.InfoHash,
+			ImdbID:       e.ImdbID,
+			TmdbID:       e.TmdbID,
+			TvdbID:       e.TvdbID,
+			Season:       e.Season,
+			Episode:      e.Episode,
+			Magnet:       e.Magnet,
+			ReleaseTitle: e.ReleaseTitle,
+			IndexerName:  e.IndexerName,
+			AddedAt:      e.AddedAt,
+		})
+	}
+	return out
+}
+
 // GetContentByHash looks up what content an info_hash was registered for.
 // Returns nil if the hash has not been seen before.
 func (c *Client) GetContentByHash(infoHash string) *TorrentRecord {

@@ -199,6 +199,44 @@ func (m *Manager) SeedingUploadTotals(ctx context.Context) map[string]int64 {
 	return out
 }
 
+// TorrentPresence describes a torrent that is currently present in one of the
+// configured clients.
+type TorrentPresence struct {
+	Hash       string
+	ClientName string
+	Progress   float64
+	State      string
+}
+
+// Complete reports whether the torrent has finished downloading, meaning
+// playback can start immediately with no buffering wait.
+func (p *TorrentPresence) Complete() bool { return p != nil && p.Progress >= 0.999 }
+
+// FindTorrent locates a torrent by info hash across every configured client and
+// reports whether it is still there. This is how SeedStream confirms that a
+// torrent it remembers downloading is genuinely available before replaying from
+// it — the data may have been deleted on the seedbox since.
+// Returns nil when no client holds the torrent.
+func (m *Manager) FindTorrent(ctx context.Context, hash string) *TorrentPresence {
+	hash = strings.ToLower(strings.TrimSpace(hash))
+	if m == nil || hash == "" {
+		return nil
+	}
+	for _, e := range m.clients {
+		info, err := e.client.Get(ctx, hash)
+		if err != nil || info == nil {
+			continue
+		}
+		return &TorrentPresence{
+			Hash:       info.Hash,
+			ClientName: e.cfg.Name,
+			Progress:   info.Progress,
+			State:      info.State,
+		}
+	}
+	return nil
+}
+
 // Ping checks each configured client; returns a map of name -> error (nil = ok).
 func (m *Manager) Ping(ctx context.Context) map[string]error {
 	out := make(map[string]error, len(m.clients))

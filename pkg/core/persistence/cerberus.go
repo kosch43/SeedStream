@@ -166,6 +166,49 @@ func (m *StateManager) PruneOldRegistryEntries(maxAgeMs int64) (int64, error) {
 	return n, err
 }
 
+// GetRegisteredTorrentsForContent returns every registry entry recorded for one
+// piece of content, newest first. It is the reverse of GetTorrentByHash and is
+// used to replay a title from a torrent the seedbox already downloaded instead
+// of fetching a fresh one.
+//
+// Season and episode must match exactly, and at least one supplied content ID
+// must match, so an entry can never be returned for a different title. Blocked
+// hashes are not filtered here — callers apply the blocklist.
+func (m *StateManager) GetRegisteredTorrentsForContent(imdbID, tmdbID, tvdbID string, season, episode int) []TorrentEntry {
+	if m == nil || m.db == nil {
+		return nil
+	}
+	if imdbID == "" && tmdbID == "" && tvdbID == "" {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	rows, err := m.db.Query(`SELECT info_hash, imdb_id, tmdb_id, tvdb_id, season, episode,
+		magnet, release_title, indexer_name, added_at
+		FROM cerberus_torrent_registry
+		WHERE season = ? AND episode = ?
+		  AND ( (? <> '' AND imdb_id = ?) OR (? <> '' AND tmdb_id = ?) OR (? <> '' AND tvdb_id = ?) )
+		ORDER BY added_at DESC`,
+		season, episode,
+		imdbID, imdbID, tmdbID, tmdbID, tvdbID, tvdbID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []TorrentEntry
+	for rows.Next() {
+		var e TorrentEntry
+		var addedAtMs int64
+		if err := rows.Scan(&e.InfoHash, &e.ImdbID, &e.TmdbID, &e.TvdbID, &e.Season, &e.Episode,
+			&e.Magnet, &e.ReleaseTitle, &e.IndexerName, &addedAtMs); err != nil {
+			continue
+		}
+		e.AddedAt = time.UnixMilli(addedAtMs)
+		out = append(out, e)
+	}
+	return out
+}
+
 // GetTorrentByHash looks up the registry entry for the given info_hash.
 // Returns nil if not found.
 func (m *StateManager) GetTorrentByHash(infoHash string) *TorrentEntry {

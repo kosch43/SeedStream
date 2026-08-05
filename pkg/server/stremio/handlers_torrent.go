@@ -94,21 +94,33 @@ func (s *Server) serveTorrent(w http.ResponseWriter, r *http.Request, sess *sess
 	prepCtx, prepCancel := mergeSessionContext(r, sess)
 	defer prepCancel()
 
-	res, err := s.torrentManager.PrepareForPlayback(prepCtx, sess.Release, season, episode, bufferBytes, prepareTimeout, nil)
+	// Replay from a torrent the seedbox already downloaded for this exact
+	// content when the selected release is not itself already present, so a
+	// second viewing starts immediately instead of downloading a fresh copy.
+	playRelease := s.resolvePlayRelease(prepCtx, sess.Release, infoHash, cerberusIDs, season, episode)
+	playHash := infoHash
+	if playRelease != sess.Release {
+		playHash = playRelease.InfoHash
+	}
+
+	res, err := s.torrentManager.PrepareForPlayback(prepCtx, playRelease, season, episode, bufferBytes, prepareTimeout, nil)
 	if err != nil {
-		logger.Warn("Torrent prepare failed", "session", sess.ID, "title", sess.Release.Title, "err", err)
+		logger.Warn("Torrent prepare failed", "session", sess.ID, "title", playRelease.Title, "err", err)
 		return fmt.Errorf("torrent still preparing: %w", err)
 	}
 
-	// Register the torrent with Cerberus so the watchdog can correlate
-	// stalled hashes back to their content IDs for re-search.
-	if s.cerberusClient != nil && infoHash != "" && sess.ContentIDs != nil {
-		magnet := sess.Release.Magnet
+	// Register the torrent with Cerberus so the watchdog can correlate stalled
+	// hashes back to their content IDs, and so a later viewing of this title can
+	// find the torrent again instead of downloading a fresh copy. Records the
+	// torrent actually played, which may be a remembered one rather than the
+	// release the viewer picked.
+	if s.cerberusClient != nil && playHash != "" && sess.ContentIDs != nil {
+		magnet := playRelease.Magnet
 		if magnet == "" {
-			magnet = sess.Release.Link
+			magnet = playRelease.Link
 		}
-		if err := s.cerberusClient.RegisterTorrent(infoHash, cerberusIDs, magnet, sess.Release.Title, sess.Release.Indexer); err != nil {
-			logger.Warn("Cerberus: failed to register torrent", "hash", infoHash, "err", err)
+		if err := s.cerberusClient.RegisterTorrent(playHash, cerberusIDs, magnet, playRelease.Title, playRelease.Indexer); err != nil {
+			logger.Warn("Cerberus: failed to register torrent", "hash", playHash, "err", err)
 		}
 	}
 
@@ -164,8 +176,8 @@ func (s *Server) serveTorrent(w http.ResponseWriter, r *http.Request, sess *sess
 	const minHealthyBytes = 512 * 1024
 	if crw.written >= minHealthyBytes {
 		s.markSessionServedSuccessfully(sess.ID, sess)
-		if s.cerberusClient != nil && infoHash != "" {
-			s.cerberusClient.ReportHealthy(infoHash, cerberusIDs)
+		if s.cerberusClient != nil && playHash != "" {
+			s.cerberusClient.ReportHealthy(playHash, cerberusIDs)
 		}
 	}
 	return nil
