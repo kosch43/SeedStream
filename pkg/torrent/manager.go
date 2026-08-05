@@ -385,11 +385,35 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 
 	deadline := time.Now().Add(timeout)
 	prioritySet := false
+	// Track why the loop is still waiting so a timeout reports the real reason
+	// instead of blaming buffering for what is actually a client failure.
+	var lastClientErr error
+	clientErrs := 0
+	lastProgress := -1.0
 	for {
 		files, err := c.Files(ctx, info.Hash)
+		if err != nil {
+			// The download client itself is failing (auth, network, wrong host).
+			// Waiting cannot fix that, and spinning here for the whole timeout is
+			// what pushes a play request past an upstream proxy's limit. Give it a
+			// couple of retries for a transient blip, then surface the real error.
+			lastClientErr = err
+			clientErrs++
+			if clientErrs >= 3 {
+				return nil, fmt.Errorf("torrent client unreachable while preparing playback: %w", err)
+			}
+		} else if len(files) > 0 {
+			clientErrs = 0
+			if pickVideoFile(files, season, episode) == nil {
+				// The torrent's file list is known and contains no playable video.
+				// No amount of waiting will add one.
+				return nil, fmt.Errorf("torrent contains no playable video file (%d files)", len(files))
+			}
+		}
 		if err == nil && len(files) > 0 {
 			f := pickVideoFile(files, season, episode)
 			if f != nil {
+				lastProgress = f.Progress
 				// On a multi-file torrent (e.g. a season pack), pull the file
 				// being played ahead of the rest so its head buffers first.
 				// Priority 7 (maximum) only reorders downloads; it never
@@ -418,7 +442,14 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 			}
 		}
 		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("torrent still buffering after %s", timeout)
+			if lastClientErr != nil {
+				return nil, fmt.Errorf("torrent client error while preparing playback after %s: %w", timeout, lastClientErr)
+			}
+			if lastProgress < 0 {
+				return nil, fmt.Errorf("torrent metadata not available after %s (no file list from client)", timeout)
+			}
+			return nil, fmt.Errorf("torrent still buffering after %s (file %.1f%% downloaded, need %d bytes of head)",
+				timeout, lastProgress*100, bufferBytes)
 		}
 		select {
 		case <-ctx.Done():

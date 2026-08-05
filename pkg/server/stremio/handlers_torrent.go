@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"seedstream/pkg/auth"
 	"seedstream/pkg/core/logger"
@@ -22,7 +23,10 @@ import (
 // serves the video file with HTTP range support. No response bytes are
 // written until preparation succeeds, so the caller can fail over to the
 // next slot when an error is returned.
-func (s *Server) serveTorrent(w http.ResponseWriter, r *http.Request, sess *session.Session, _ *auth.Stream) error {
+// prepareTimeout bounds how long this attempt may wait for the torrent's head
+// to buffer. It is the time left in the overall /play budget, so a chain of
+// fallback attempts cannot collectively overrun an upstream proxy's limit.
+func (s *Server) serveTorrent(w http.ResponseWriter, r *http.Request, sess *session.Session, _ *auth.Stream, prepareTimeout time.Duration) error {
 	if s.torrentManager == nil || !s.torrentManager.Enabled() {
 		logger.Warn("Torrent play requested but no torrent client configured", "session", sess.ID)
 		return fmt.Errorf("no torrent client configured — add a qBittorrent client in Settings → Torrent Clients")
@@ -61,6 +65,20 @@ func (s *Server) serveTorrent(w http.ResponseWriter, r *http.Request, sess *sess
 		episode = sess.ContentIDs.Episode
 	}
 
+	// Refuse to serve a release that is not the content that was asked for.
+	// Search-time title validation is skipped whenever TMDB could not supply an
+	// expected title, which lets unrelated releases reach a slot; without this
+	// check the player receives a stream that does not match its request and
+	// simply fails to start. Returning an error here hands the request to the
+	// failover path, which tries the next slot instead — and does so before the
+	// expensive prepare/buffer wait rather than after it.
+	if err := releaseMatchesRequest(sess.Release, season, episode); err != nil {
+		logger.Warn("Rejecting mismatched release before playback",
+			"session", sess.ID, "requested_season", season, "requested_episode", episode,
+			"release", sess.Release.Title, "reason", err)
+		return fmt.Errorf("release does not match the requested content: %w", err)
+	}
+
 	// Monthly upload guard: once the seedbox's allowance is spent the provider
 	// throttles upload, so hold titles too heavy to stream within that throttle
 	// (returning the disclaimer to the viewer) and give the rest a bigger head
@@ -76,7 +94,7 @@ func (s *Server) serveTorrent(w http.ResponseWriter, r *http.Request, sess *sess
 	prepCtx, prepCancel := mergeSessionContext(r, sess)
 	defer prepCancel()
 
-	res, err := s.torrentManager.PrepareForPlayback(prepCtx, sess.Release, season, episode, bufferBytes, 0, nil)
+	res, err := s.torrentManager.PrepareForPlayback(prepCtx, sess.Release, season, episode, bufferBytes, prepareTimeout, nil)
 	if err != nil {
 		logger.Warn("Torrent prepare failed", "session", sess.ID, "title", sess.Release.Title, "err", err)
 		return fmt.Errorf("torrent still preparing: %w", err)
