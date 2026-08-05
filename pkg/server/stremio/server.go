@@ -87,7 +87,10 @@ func NewServer(opts *ServerOptions) (*Server, error) {
 		uniqueIndexerHits: make(map[string]int64),
 	}
 	if opts.Config != nil {
-		s.torrentManager = torrent.NewManager(opts.Config.TorrentClients)
+		mgr := torrent.NewManager(opts.Config.TorrentClients)
+		mgr.BufferBytes = opts.Config.EffectiveTorrentBufferBytes()
+		mgr.PrepareTimeout = opts.Config.EffectiveTorrentPrepareTimeout()
+		s.torrentManager = mgr
 	}
 	s.cerberusClient = opts.CerberusClient
 
@@ -190,7 +193,10 @@ func (s *Server) Reload(opts *ServerOptions) {
 	s.config = opts.Config
 	s.baseURL = opts.BaseURL
 	if opts.Config != nil {
-		s.torrentManager = torrent.NewManager(opts.Config.TorrentClients)
+		mgr := torrent.NewManager(opts.Config.TorrentClients)
+		mgr.BufferBytes = opts.Config.EffectiveTorrentBufferBytes()
+		mgr.PrepareTimeout = opts.Config.EffectiveTorrentPrepareTimeout()
+		s.torrentManager = mgr
 	}
 	s.indexer = opts.Indexer
 	s.triageService = opts.TriageService

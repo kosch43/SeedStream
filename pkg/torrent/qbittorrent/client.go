@@ -96,14 +96,14 @@ func (c *Client) login(ctx context.Context) (string, error) {
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		return "", fmt.Errorf("qbittorrent login failed: HTTP %d", resp.StatusCode)
 	}
 	if strings.Contains(strings.ToLower(string(body)), "fails") {
 		return "", fmt.Errorf("qbittorrent login failed (check credentials / WebUI host whitelist)")
 	}
 	for _, ck := range resp.Cookies() {
-		if ck.Name == "SID" {
+		if ck.Name == "SID" || strings.HasPrefix(ck.Name, "QBT_SID_") {
 			c.cookie = ck.Name + "=" + ck.Value
 			c.cookieSet = time.Now()
 			return c.cookie, nil
@@ -206,6 +206,7 @@ type TorrentInfo struct {
 	UpSpeed      int64   `json:"upspeed"`
 	NumSeeds     int     `json:"num_seeds"`
 	NumLeechs    int     `json:"num_leechs"`
+	PieceSize    int64   `json:"piece_size"`
 }
 
 // Get returns the torrent with the given info hash, or nil if not present.

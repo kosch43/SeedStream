@@ -41,6 +41,11 @@ var videoExts = map[string]struct{}{
 type Manager struct {
 	clients []*clientEntry
 
+	// BufferBytes / PrepareTimeout are the defaults used by PrepareForPlayback
+	// when the caller doesn't pass explicit values. Overridable via config.
+	BufferBytes    int64
+	PrepareTimeout time.Duration
+
 	aggMu      sync.Mutex
 	aggCached  AggregateStats
 	aggExpires time.Time
@@ -54,7 +59,10 @@ type clientEntry struct {
 // NewManager builds a Manager from config. Disabled or qBittorrent-less entries
 // are skipped. Returns a Manager that reports Enabled()==false when none apply.
 func NewManager(clients []config.TorrentClientConfig) *Manager {
-	m := &Manager{}
+	m := &Manager{
+		BufferBytes:    DefaultBufferBytes,
+		PrepareTimeout: DefaultPrepareTimeout,
+	}
 	for _, c := range clients {
 		if !c.IsEnabled() {
 			continue
@@ -321,10 +329,10 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 		return nil, fmt.Errorf("torrent release has no magnet, link, or infohash")
 	}
 	if bufferBytes <= 0 {
-		bufferBytes = DefaultBufferBytes
+		bufferBytes = m.BufferBytes
 	}
 	if timeout <= 0 {
-		timeout = DefaultPrepareTimeout
+		timeout = m.PrepareTimeout
 	}
 
 	// Resolve which qBittorrent client to use: prefer the stream-level override
