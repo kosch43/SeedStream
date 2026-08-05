@@ -28,6 +28,12 @@ const streamSlotPrefix = "stream:"
 // HTTP request from stalling through the whole candidate list.
 const maxPlayFallbackAttempts = 3
 
+// minPrepareBudget is the least time worth handing to another fallback attempt.
+// Below this a further attempt cannot realistically add or buffer a torrent, so
+// the request fails with a useful error instead of stalling until the client or
+// an upstream proxy times out.
+const minPrepareBudget = 5 * time.Second
+
 func (s *Server) buildStreamsForKey(ctx context.Context, key StreamSlotKey, stream *auth.Stream, baseURL string) ([]Stream, *playlistResult, error) {
 	list, err := s.bootstrapPlaylistForPlay(ctx, key, stream)
 	if err != nil {
@@ -700,10 +706,27 @@ func (s *Server) handlePlay(w http.ResponseWriter, r *http.Request, streamConfig
 		return
 	}
 
+	// Bound the whole /play request rather than each attempt. Each prepare can
+	// wait the full torrent prepare timeout, so N sequential fallbacks used to
+	// cost N * timeout — which overruns the ~100s ceiling of common reverse
+	// proxies (Cloudflare answers 504/524) long before failover finishes, so the
+	// viewer sees a proxy error instead of the next slot. The budget is shared:
+	// every attempt gets whatever time is left.
+	playDeadline := time.Now().Add(s.config.EffectiveTorrentPrepareTimeout())
+
 	var lastErr error
 	for attempt := 0; ; attempt++ {
+		remaining := time.Until(playDeadline)
+		if remaining < minPrepareBudget {
+			logger.Warn("Play: prepare budget exhausted, not trying further fallbacks",
+				"session", sessionID, "attempts", attempt)
+			if lastErr == nil {
+				lastErr = fmt.Errorf("no slot became playable within %s", s.config.EffectiveTorrentPrepareTimeout())
+			}
+			break
+		}
 		s.sessionManager.BeginPlaybackStartup(sessionID)
-		lastErr = s.serveTorrent(w, r, sess, streamConfig)
+		lastErr = s.serveTorrent(w, r, sess, streamConfig, remaining)
 		s.sessionManager.EndPlaybackStartup(sessionID)
 		if lastErr == nil {
 			return

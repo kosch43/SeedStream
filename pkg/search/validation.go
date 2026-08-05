@@ -308,6 +308,16 @@ func ValidateSearchResultsWithStatsForQueries(releases []*release.Release, conte
 	stats.TitleValidationApplied = enableTitleValidation && len(expectations) > 0
 	stats.YearValidationApplied = enableYearValidation && anyExpectationHasYear(expectations)
 
+	// Title validation was asked for but no expected title could be derived —
+	// usually because the TMDB lookup failed. Every result then passes the title
+	// check unfiltered, which is how completely unrelated releases reach a
+	// playlist. Say so loudly: this used to fail silently and the only visible
+	// symptom was the wrong film starting to play.
+	if enableTitleValidation && len(expectations) == 0 {
+		logger.Warn("Search title validation skipped: no expected title available (check the TMDB API key) — unrelated releases cannot be filtered out",
+			"content_type", contentType, "queries", len(validationQueries))
+	}
+
 	var out []*release.Release
 	for _, rel := range releases {
 		if rel == nil {
