@@ -114,13 +114,22 @@ func (s *Server) serveTorrent(w http.ResponseWriter, r *http.Request, sess *sess
 	// find the torrent again instead of downloading a fresh copy. Records the
 	// torrent actually played, which may be a remembered one rather than the
 	// release the viewer picked.
-	if s.cerberusClient != nil && playHash != "" && sess.ContentIDs != nil {
+	// Prefer the hash qBittorrent confirmed for the torrent actually being
+	// played. The release's own hash is often absent — Torznab results that only
+	// carry an .torrent link have none — and gating registration on it left the
+	// registry empty, which silently disabled both the watchdog and replay of
+	// already-downloaded torrents.
+	registerHash := res.Hash
+	if registerHash == "" {
+		registerHash = playHash
+	}
+	if s.cerberusClient != nil && registerHash != "" && sess.ContentIDs != nil {
 		magnet := playRelease.Magnet
 		if magnet == "" {
 			magnet = playRelease.Link
 		}
-		if err := s.cerberusClient.RegisterTorrent(playHash, cerberusIDs, magnet, playRelease.Title, playRelease.Indexer); err != nil {
-			logger.Warn("Cerberus: failed to register torrent", "hash", playHash, "err", err)
+		if err := s.cerberusClient.RegisterTorrent(registerHash, cerberusIDs, magnet, playRelease.Title, playRelease.Indexer); err != nil {
+			logger.Warn("Cerberus: failed to register torrent", "hash", registerHash, "err", err)
 		}
 	}
 
@@ -176,8 +185,8 @@ func (s *Server) serveTorrent(w http.ResponseWriter, r *http.Request, sess *sess
 	const minHealthyBytes = 512 * 1024
 	if crw.written >= minHealthyBytes {
 		s.markSessionServedSuccessfully(sess.ID, sess)
-		if s.cerberusClient != nil && playHash != "" {
-			s.cerberusClient.ReportHealthy(playHash, cerberusIDs)
+		if s.cerberusClient != nil && registerHash != "" {
+			s.cerberusClient.ReportHealthy(registerHash, cerberusIDs)
 		}
 	}
 	return nil

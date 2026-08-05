@@ -411,11 +411,17 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 		if addURL == "" {
 			return nil, fmt.Errorf("torrent not present and no add URL available")
 		}
+		// Snapshot the category before adding. When the release carries no info
+		// hash this is the only reliable way to tell which torrent is ours: the
+		// one that appeared after the add. Picking the newest torrent in the
+		// category instead would hand back whatever another concurrent request
+		// happened to add a moment earlier — a different title entirely.
+		before := m.categoryHashes(ctx, c)
 		if err := c.Add(ctx, qbittorrent.AddOptions{URL: addURL, Sequential: true}); err != nil {
 			return nil, fmt.Errorf("add torrent: %w", err)
 		}
 		var err error
-		info, err = m.resolveAdded(ctx, c, hash)
+		info, err = m.resolveAdded(ctx, c, hash, before, rel.Title)
 		if err != nil {
 			return nil, err
 		}
@@ -497,23 +503,57 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 	}
 }
 
-// resolveAdded finds the torrent just added. Prefers the known hash; otherwise
-// takes the most recently added torrent in the category.
-func (m *Manager) resolveAdded(ctx context.Context, c *qbittorrent.Client, hash string) (*qbittorrent.TorrentInfo, error) {
+// categoryHashes returns the set of info hashes currently in this client's
+// category, used to tell which torrent an Add actually created.
+func (m *Manager) categoryHashes(ctx context.Context, c *qbittorrent.Client) map[string]bool {
+	out := map[string]bool{}
+	list, err := c.ListCategory(ctx)
+	if err != nil {
+		return out
+	}
+	for _, t := range list {
+		if h := strings.ToLower(strings.TrimSpace(t.Hash)); h != "" {
+			out[h] = true
+		}
+	}
+	return out
+}
+
+// resolveAdded identifies the torrent that the preceding Add created.
+//
+// The known info hash is authoritative when the release carried one. Without it
+// the torrent is identified as the one that was not in the category before the
+// add; if several appeared at once (concurrent playback requests each adding
+// their own), they are disambiguated by matching the torrent name against the
+// release title.
+//
+// It deliberately never falls back to "the newest torrent in the category".
+// That guess ignores which torrent was actually requested, so a concurrent add
+// by another request would be picked up and served instead — the session, the
+// stream list and the release would all be correct while the bytes came from an
+// unrelated title.
+func (m *Manager) resolveAdded(ctx context.Context, c *qbittorrent.Client, hash string, before map[string]bool, releaseTitle string) (*qbittorrent.TorrentInfo, error) {
 	for i := 0; i < 12; i++ {
 		if hash != "" {
 			if info, err := c.Get(ctx, hash); err == nil && info != nil {
 				return info, nil
 			}
-		} else {
-			if list, err := c.ListCategory(ctx); err == nil && len(list) > 0 {
-				newest := &list[0]
-				for j := range list {
-					if list[j].AddedOn > newest.AddedOn {
-						newest = &list[j]
-					}
+		} else if list, err := c.ListCategory(ctx); err == nil {
+			var appeared []qbittorrent.TorrentInfo
+			for _, t := range list {
+				if !before[strings.ToLower(strings.TrimSpace(t.Hash))] {
+					appeared = append(appeared, t)
 				}
-				return newest, nil
+			}
+			switch {
+			case len(appeared) == 1:
+				return &appeared[0], nil
+			case len(appeared) > 1:
+				if best := bestTitleMatch(appeared, releaseTitle); best != nil {
+					return best, nil
+				}
+				logger.Warn("torrent prepare: several torrents appeared at once and none matches the release title",
+					"release", releaseTitle, "candidates", len(appeared))
 			}
 		}
 		select {
@@ -522,7 +562,38 @@ func (m *Manager) resolveAdded(ctx context.Context, c *qbittorrent.Client, hash 
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
-	return nil, fmt.Errorf("could not resolve torrent after add")
+	return nil, fmt.Errorf("could not identify the torrent added for %q", releaseTitle)
+}
+
+// bestTitleMatch picks the torrent whose name best matches the release title,
+// requiring a majority of the title's words to be present so an unrelated
+// torrent is never accepted. Returns nil when nothing matches well enough.
+func bestTitleMatch(candidates []qbittorrent.TorrentInfo, releaseTitle string) *qbittorrent.TorrentInfo {
+	want := release.NormalizeTitleWordsForMatch(releaseTitle)
+	if len(want) == 0 {
+		return nil
+	}
+	wantSet := make(map[string]bool, len(want))
+	for _, w := range want {
+		wantSet[w] = true
+	}
+	var best *qbittorrent.TorrentInfo
+	bestHits := 0
+	for i := range candidates {
+		hits := 0
+		for _, w := range release.NormalizeTitleWordsForMatch(candidates[i].Name) {
+			if wantSet[w] {
+				hits++
+			}
+		}
+		if hits > bestHits {
+			best, bestHits = &candidates[i], hits
+		}
+	}
+	if best == nil || bestHits*2 <= len(wantSet) {
+		return nil // too weak a match to trust
+	}
+	return best
 }
 
 var seasonEpisodeRe = regexp.MustCompile(`(?i)s(\d{1,2})[ ._-]*e(\d{1,3})`)
