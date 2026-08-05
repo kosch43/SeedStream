@@ -126,6 +126,15 @@ func (w *Watchdog) check(ctx context.Context, stallThreshold time.Duration) {
 		return
 	}
 	for _, e := range entries {
+		// A paused/stopped torrent is not seeding and not downloading. On a
+		// completed torrent that is an active H&R risk on a private tracker; on
+		// an incomplete one it just stops making progress. Either way SeedStream
+		// added it to keep seeding, so resume it. This runs regardless of
+		// progress and before the stall checks below.
+		if isPausedState(e.State) {
+			w.handlePaused(ctx, e)
+			continue
+		}
 		if e.Progress >= 0.999 {
 			// Completed torrents normally need no action. But error/missingFiles
 			// states on a finished download warrant an H&R warning log.
@@ -186,6 +195,17 @@ func (w *Watchdog) checkCompletedError(ctx context.Context, e TorrentHealthEntry
 	}
 }
 
+// isPausedState reports whether a qBittorrent state means the torrent is
+// paused/stopped and therefore neither seeding nor downloading. qBittorrent 5.0
+// renamed the "paused*" states to "stopped*"; both spellings are covered.
+func isPausedState(state string) bool {
+	switch state {
+	case "pausedUP", "pausedDL", "stoppedUP", "stoppedDL":
+		return true
+	}
+	return false
+}
+
 func isStalled(e TorrentHealthEntry, threshold time.Duration) bool {
 	if e.Progress >= 0.999 {
 		return false // complete, not stalled
@@ -198,6 +218,10 @@ func isStalled(e TorrentHealthEntry, threshold time.Duration) bool {
 	case "missingFiles", "error":
 		// Only act on these after the torrent has had a chance to start.
 		return hasActivityData && time.Since(e.AddedAt) > threshold
+	case "metaDL":
+		// Magnet stuck fetching metadata — no peers are supplying the .torrent.
+		// last_activity stays 0 here, so gate on time since it was added.
+		return time.Since(e.AddedAt) > threshold
 	case "stalledDL":
 		return hasActivityData && time.Since(e.LastActivity) > threshold
 	case "downloading":
@@ -205,6 +229,24 @@ func isStalled(e TorrentHealthEntry, threshold time.Duration) bool {
 		return hasActivityData && time.Since(e.LastActivity) > threshold*2
 	}
 	return false
+}
+
+// handlePaused resumes a paused/stopped torrent so it seeds (or resumes
+// downloading). Best-effort and idempotent — resuming an already-running
+// torrent is harmless. It never deletes data, so it is always ratio-safe.
+func (w *Watchdog) handlePaused(ctx context.Context, e TorrentHealthEntry) {
+	rec := w.cerberus.GetContentByHash(e.Hash)
+	indexerName := ""
+	if rec != nil {
+		indexerName = rec.IndexerName
+	}
+	complete := e.Progress >= 0.999
+	logger.Warn("Cerberus watchdog: torrent paused — resuming to keep it seeding",
+		"hash", e.Hash, "name", e.Name, "state", e.State,
+		"progress", e.Progress, "complete", complete, "indexer", indexerName)
+	if err := w.manager.Resume(ctx, e.ClientName, e.Hash); err != nil {
+		logger.Warn("Cerberus watchdog: failed to resume paused torrent", "hash", e.Hash, "err", err)
+	}
 }
 
 func (w *Watchdog) handleStalled(ctx context.Context, stalled TorrentHealthEntry, rec *cerberus.TorrentRecord) {

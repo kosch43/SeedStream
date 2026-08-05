@@ -163,6 +163,17 @@ func (m *Manager) Replace(ctx context.Context, clientName, oldHash, newURL strin
 	return c.Add(ctx, qbittorrent.AddOptions{URL: newURL, Sequential: true})
 }
 
+// Resume starts a paused/stopped torrent on the named client. Used by the
+// watchdog to get a completed-but-paused torrent seeding again (H&R safety) or
+// to un-pause a download that was paused mid-flight.
+func (m *Manager) Resume(ctx context.Context, clientName, hash string) error {
+	c := m.clientByName(clientName)
+	if c == nil {
+		return fmt.Errorf("torrent client %q not found", clientName)
+	}
+	return c.Resume(ctx, hash)
+}
+
 // Ping checks each configured client; returns a map of name -> error (nil = ok).
 func (m *Manager) Ping(ctx context.Context) map[string]error {
 	out := make(map[string]error, len(m.clients))
@@ -238,12 +249,18 @@ func (m *Manager) clientByName(name string) *qbittorrent.Client {
 // SeekableFileReader that waits for each requested byte range to be on disk
 // before reading, so that seeking forward into un-downloaded regions blocks
 // instead of returning zeros or a 416 error.
+//
+// Only a torrent qBittorrent reports as fully complete (progress == 1) gets a
+// bare *os.File with no checking. A file that merely looked "nearly done" at
+// prepare time (progress 0.999) is still wrapped, because 0.1% of a 30 GB file
+// is ~30 MB that may not be on disk — the availability checker is cheap when
+// the file is in fact complete (it latches after one confirming call).
 func (m *Manager) OpenForPlayback(res *PrepareResult) (io.ReadSeekCloser, error) {
 	f, err := os.Open(res.AbsPath)
 	if err != nil {
 		return nil, err
 	}
-	if res.Progress >= 0.999 || res.Hash == "" {
+	if res.Progress >= 1 || res.Hash == "" {
 		return f, nil
 	}
 	c := m.clientByName(res.ClientName)
@@ -251,7 +268,8 @@ func (m *Manager) OpenForPlayback(res *PrepareResult) (io.ReadSeekCloser, error)
 		// Client not found (override path) — fall back to plain file.
 		return f, nil
 	}
-	return newSeekableFileReader(f, c, res.Hash, res.FileIndex, res.Size), nil
+	avail := newFileAvailability(c, res.Hash, res.FileIndex, res.Size)
+	return newSeekableFileReader(f, avail, res.Size), nil
 }
 
 // PrepareResult describes a torrent file ready (or buffering) for playback.
@@ -341,11 +359,24 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 	}
 
 	deadline := time.Now().Add(timeout)
+	prioritySet := false
 	for {
 		files, err := c.Files(ctx, info.Hash)
 		if err == nil && len(files) > 0 {
 			f := pickVideoFile(files, season, episode)
 			if f != nil {
+				// On a multi-file torrent (e.g. a season pack), pull the file
+				// being played ahead of the rest so its head buffers first.
+				// Priority 7 (maximum) only reorders downloads; it never
+				// disables the other files, so the torrent still completes and
+				// private-tracker seeding obligations stay intact. Best-effort:
+				// a failure here just falls back to sequential order.
+				if !prioritySet && len(files) > 1 {
+					prioritySet = true
+					if err := c.SetFilePriority(ctx, info.Hash, f.Index, 7); err != nil {
+						logger.Debug("torrent prepare: set file priority failed", "hash", info.Hash, "file", f.Index, "err", err)
+					}
+				}
 				done := int64(f.Progress * float64(f.Size))
 				if f.Progress >= 0.999 || done >= bufferBytes {
 					abs := absFilePath(remotePath, c.SavePath(), info, f.Name)

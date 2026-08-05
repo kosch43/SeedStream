@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -246,6 +247,10 @@ type FileInfo struct {
 	Size     int64   `json:"size"`
 	Progress float64 `json:"progress"`
 	Priority int     `json:"priority"`
+	// PieceRange is [firstPiece, lastPiece] — the torrent-global indices of the
+	// pieces this file spans. Present on qBittorrent >= 4.4; empty on older
+	// versions, in which case callers must fall back to Progress.
+	PieceRange []int `json:"piece_range"`
 }
 
 // Files lists the files within a torrent.
@@ -265,6 +270,81 @@ func (c *Client) Files(ctx context.Context, hash string) ([]FileInfo, error) {
 		}
 	}
 	return list, nil
+}
+
+// Piece states as reported by /torrents/pieceStates.
+const (
+	PieceNotDownloaded = 0
+	PieceDownloading   = 1
+	PieceDownloaded    = 2
+)
+
+// PieceStates returns the per-piece download state for the whole torrent:
+// one entry per piece, PieceNotDownloaded/PieceDownloading/PieceDownloaded.
+// This is the only qBittorrent API that says WHERE downloaded bytes are, as
+// opposed to how many of them there are.
+func (c *Client) PieceStates(ctx context.Context, hash string) ([]int, error) {
+	body, err := c.do(ctx, http.MethodGet, "/api/v2/torrents/pieceStates?hash="+url.QueryEscape(strings.ToLower(hash)), nil)
+	if err != nil {
+		return nil, err
+	}
+	var states []int
+	if err := json.Unmarshal(body, &states); err != nil {
+		return nil, fmt.Errorf("qbittorrent pieceStates decode: %w", err)
+	}
+	return states, nil
+}
+
+// TorrentProperties is a subset of /torrents/properties.
+type TorrentProperties struct {
+	PieceSize   int64 `json:"piece_size"`
+	PiecesNum   int   `json:"pieces_num"`
+	TotalSize   int64 `json:"total_size"`
+	SeedingTime int64 `json:"seeding_time"`
+}
+
+// Properties returns torrent-level metadata, notably the piece size needed to
+// map byte offsets onto piece indices.
+func (c *Client) Properties(ctx context.Context, hash string) (*TorrentProperties, error) {
+	body, err := c.do(ctx, http.MethodGet, "/api/v2/torrents/properties?hash="+url.QueryEscape(strings.ToLower(hash)), nil)
+	if err != nil {
+		return nil, err
+	}
+	var props TorrentProperties
+	if err := json.Unmarshal(body, &props); err != nil {
+		return nil, fmt.Errorf("qbittorrent properties decode: %w", err)
+	}
+	return &props, nil
+}
+
+// SetFilePriority sets the download priority of one file within a torrent.
+// Priority 7 (maximum) makes qBittorrent fetch that file's pieces first, which
+// is how a specific episode of a season pack gets pulled ahead of the rest.
+// It never disables other files — everything still downloads, so the torrent
+// completes and private-tracker seeding obligations stay intact.
+func (c *Client) SetFilePriority(ctx context.Context, hash string, fileIndex, priority int) error {
+	form := url.Values{}
+	form.Set("hash", strings.ToLower(hash))
+	form.Set("id", strconv.Itoa(fileIndex))
+	form.Set("priority", strconv.Itoa(priority))
+	_, err := c.do(ctx, http.MethodPost, "/api/v2/torrents/filePrio", form)
+	return err
+}
+
+// Resume starts a paused/stopped torrent. qBittorrent 5.0 renamed the endpoint
+// from /torrents/resume to /torrents/start, so try the new name first and fall
+// back to the old one when the server predates the rename.
+func (c *Client) Resume(ctx context.Context, hash string) error {
+	if strings.TrimSpace(hash) == "" {
+		return nil
+	}
+	form := url.Values{}
+	form.Set("hashes", strings.ToLower(hash))
+	_, err := c.do(ctx, http.MethodPost, "/api/v2/torrents/start", form)
+	if err != nil && strings.Contains(err.Error(), "HTTP 404") {
+		_, err = c.do(ctx, http.MethodPost, "/api/v2/torrents/resume", form)
+	}
+	return err
 }
 
 // Delete removes torrents, optionally deleting their downloaded files. Used by

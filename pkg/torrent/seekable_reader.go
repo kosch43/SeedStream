@@ -6,40 +6,36 @@ import (
 	"io"
 	"os"
 	"time"
-
-	"seedstream/pkg/core/logger"
-	"seedstream/pkg/torrent/qbittorrent"
 )
 
-const (
-	seekPollInterval = 2 * time.Second
-	seekWaitTimeout  = 5 * time.Minute
-)
+const seekPollInterval = 2 * time.Second
+
+// seekWaitTimeout bounds how long a Read blocks waiting for missing torrent
+// data before failing. A var (not const) only so tests can shorten it.
+var seekWaitTimeout = 5 * time.Minute
 
 // SeekableFileReader wraps an *os.File belonging to an in-progress torrent.
-// Before every Read it verifies — via qBittorrent's /torrents/files API —
-// that the bytes at the current position are already on disk, blocking until
-// they are or until seekWaitTimeout elapses.
+// Before every Read it verifies — through a fileAvailability checker — that
+// the bytes at the current position are actually on disk, blocking until they
+// are or until seekWaitTimeout elapses.
 //
-// This makes forward seeks safe: instead of getting zeros from a
-// pre-allocated-but-not-yet-written region, the player simply stalls for a
-// moment while the sequential download catches up.
+// With piece-level data from qBittorrent the check is exact: a forward seek
+// into a region no peer has delivered yet stalls until the pieces arrive,
+// instead of serving zeros from an unwritten region. The checker also caches
+// its answers, so steady-state playback costs at most one qBittorrent round
+// trip per cache window rather than one per 32 KiB read.
 type SeekableFileReader struct {
-	f         *os.File
-	client    *qbittorrent.Client
-	hash      string
-	fileIndex int
-	fileSize  int64
-	pos       int64
+	f        *os.File
+	avail    *fileAvailability
+	fileSize int64
+	pos      int64
 }
 
-func newSeekableFileReader(f *os.File, client *qbittorrent.Client, hash string, fileIndex int, fileSize int64) *SeekableFileReader {
+func newSeekableFileReader(f *os.File, avail *fileAvailability, fileSize int64) *SeekableFileReader {
 	return &SeekableFileReader{
-		f:         f,
-		client:    client,
-		hash:      hash,
-		fileIndex: fileIndex,
-		fileSize:  fileSize,
+		f:        f,
+		avail:    avail,
+		fileSize: fileSize,
 	}
 }
 
@@ -84,50 +80,24 @@ func (r *SeekableFileReader) Seek(offset int64, whence int) (int64, error) {
 // Close closes the underlying file.
 func (r *SeekableFileReader) Close() error { return r.f.Close() }
 
-// waitForBytes polls qBittorrent until at least (startByte + length) bytes of
-// this file have been downloaded. Returns an error only on timeout or context
-// cancellation — a fully-downloaded file returns immediately.
+// waitForBytes polls the availability checker until bytes
+// [startByte, startByte+length) of the file are on disk. Returns an error
+// only on timeout — an available region returns immediately, usually from
+// the checker's cache without any network I/O.
 func (r *SeekableFileReader) waitForBytes(startByte, length int64) error {
-	needed := startByte + length
-	if needed >= r.fileSize {
-		needed = r.fileSize
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), seekWaitTimeout)
 	defer cancel()
 
 	for {
-		files, err := r.client.Files(ctx, r.hash)
-		if err == nil {
-			for _, f := range files {
-				if f.Index == r.fileIndex {
-					downloaded := int64(f.Progress * float64(f.Size))
-					if f.Progress >= 0.999 || downloaded >= needed {
-						return nil
-					}
-					logger.Debug("SeekableFileReader: waiting for torrent bytes",
-						"hash", r.hash[:min(8, len(r.hash))],
-						"needed", needed,
-						"downloaded", downloaded,
-					)
-					break
-				}
-			}
+		if r.avail.BytesAvailable(ctx, startByte, length) {
+			return nil
 		}
-
 		select {
 		case <-ctx.Done():
 			return fmt.Errorf("timeout waiting for torrent data at offset %d", startByte)
 		case <-time.After(seekPollInterval):
 		}
 	}
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 // Ensure *SeekableFileReader satisfies io.ReadSeekCloser.
