@@ -241,6 +241,8 @@ type MovieDetails struct {
 	ReleaseDate      string `json:"release_date"`
 	OriginalTitle    string `json:"original_title"`
 	OriginalLanguage string `json:"original_language"`
+	// Runtime is the movie's length in minutes (0 when TMDB has no value).
+	Runtime int `json:"runtime"`
 }
 
 type TVDetails struct {
@@ -251,6 +253,8 @@ type TVDetails struct {
 	FirstAirDate     string         `json:"first_air_date"`
 	NumberOfSeasons  int            `json:"number_of_seasons"`
 	Seasons          []TVSeasonInfo `json:"seasons"`
+	// EpisodeRunTime lists typical episode lengths in minutes (may be empty).
+	EpisodeRunTime []int `json:"episode_run_time"`
 }
 
 type TVSeasonInfo struct {

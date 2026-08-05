@@ -95,7 +95,7 @@ func newTestWatchdog(t *testing.T, qbitURL string) *Watchdog {
 		t.Fatalf("state manager: %v", err)
 	}
 	cer := cerberus.New(store)
-	wd := NewWatchdog(mgr, cer, stubIndexer{}, &config.Config{})
+	wd := NewWatchdog(mgr, cer, stubIndexer{}, &config.Config{}, nil)
 	if wd == nil {
 		t.Fatal("watchdog is nil")
 	}

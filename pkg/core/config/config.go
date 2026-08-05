@@ -245,6 +245,42 @@ func (c *Config) EffectiveFailoverFastMode() bool {
 	return c.FailoverFastMode
 }
 
+// DefaultPostCapUploadMbps is the assumed post-cap throttle speed when a monthly
+// upload cap is configured without an explicit throttle speed.
+const DefaultPostCapUploadMbps = 10.0
+
+// UploadGuardEnabled reports whether the monthly-upload guard is active.
+func (c *Config) UploadGuardEnabled() bool {
+	return c != nil && c.MonthlyUploadCapGB > 0
+}
+
+// MonthlyUploadCapBytes converts the configured cap (decimal GB) to bytes.
+// Returns 0 when the guard is disabled.
+func (c *Config) MonthlyUploadCapBytes() int64 {
+	if !c.UploadGuardEnabled() {
+		return 0
+	}
+	return int64(c.MonthlyUploadCapGB * 1e9)
+}
+
+// EffectivePostCapUploadMbps returns the post-cap throttle speed, defaulting to
+// DefaultPostCapUploadMbps when unset or invalid.
+func (c *Config) EffectivePostCapUploadMbps() float64 {
+	if c == nil || c.PostCapUploadMbps <= 0 {
+		return DefaultPostCapUploadMbps
+	}
+	return c.PostCapUploadMbps
+}
+
+// EffectiveUploadCapResetDay returns the day of month the allowance resets,
+// clamped to 1..28 (so it exists in every month) with a default of 1.
+func (c *Config) EffectiveUploadCapResetDay() int {
+	if c == nil || c.UploadCapResetDay < 1 || c.UploadCapResetDay > 28 {
+		return 1
+	}
+	return c.UploadCapResetDay
+}
+
 func normalizeSessionTTLMinutes(ttl int) int {
 	if ttl < MinSessionTTLMinutes || ttl > MaxSessionTTLMinutes {
 		return DefaultSessionTTLMinutes
@@ -438,6 +474,22 @@ type Config struct {
 	CerberusBaseURL string `json:"cerberus_base_url,omitempty"`
 	// CerberusAPIKey is the optional bearer token for the central Cerberus server.
 	CerberusAPIKey string `json:"cerberus_api_key,omitempty"`
+
+	// MonthlyUploadCapGB is the seedbox's monthly upload allowance in gigabytes
+	// (decimal, matching how providers quote "2 TB" as 2000 GB). When > 0 the
+	// upload guard is active: the watchdog tracks how much has been uploaded this
+	// billing period (BitTorrent seeding plus SeedStream's own stream egress) and,
+	// once the cap is reached, SeedStream serves only titles whose bitrate fits the
+	// post-cap throttle and holds heavier titles with a disclaimer until reset.
+	// 0 disables the feature entirely.
+	MonthlyUploadCapGB float64 `json:"monthly_upload_cap_gb,omitempty"`
+	// PostCapUploadMbps is the upload speed the provider throttles the seedbox to
+	// after the monthly cap is hit (e.g. 10). It is the ceiling SeedStream uses to
+	// decide which titles can stream without buffering. Default 10 when a cap is set.
+	PostCapUploadMbps float64 `json:"post_cap_upload_mbps,omitempty"`
+	// UploadCapResetDay is the day of the month (1..28) the upload allowance
+	// resets. Default 1.
+	UploadCapResetDay int `json:"upload_cap_reset_day,omitempty"`
 
 	LoadedPath string `json:"-"`
 

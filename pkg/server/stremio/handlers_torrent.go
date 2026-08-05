@@ -59,12 +59,22 @@ func (s *Server) serveTorrent(w http.ResponseWriter, r *http.Request, sess *sess
 		episode = sess.ContentIDs.Episode
 	}
 
+	// Monthly upload guard: once the seedbox's allowance is spent the provider
+	// throttles upload, so hold titles too heavy to stream within that throttle
+	// (returning the disclaimer to the viewer) and give the rest a bigger head
+	// buffer. A no-op when the guard is off or the allowance is not yet reached.
+	bufferBytes, holdErr := s.applyUploadGuard(sess)
+	if holdErr != nil {
+		logger.Info("Torrent play held by upload guard", "session", sess.ID, "title", sess.Release.Title, "reason", holdErr)
+		return holdErr
+	}
+
 	// Cancel preparation when either the request ends or the session is
 	// closed (e.g. user closed it from the dashboard).
 	prepCtx, prepCancel := mergeSessionContext(r, sess)
 	defer prepCancel()
 
-	res, err := s.torrentManager.PrepareForPlayback(prepCtx, sess.Release, season, episode, 0, 0, nil)
+	res, err := s.torrentManager.PrepareForPlayback(prepCtx, sess.Release, season, episode, bufferBytes, 0, nil)
 	if err != nil {
 		logger.Warn("Torrent prepare failed", "session", sess.ID, "title", sess.Release.Title, "err", err)
 		return fmt.Errorf("torrent still preparing: %w", err)
@@ -116,6 +126,11 @@ func (s *Server) serveTorrent(w http.ResponseWriter, r *http.Request, sess *sess
 	http.ServeContent(crw, r, res.Name, stat.ModTime(), f)
 
 	sess.AddBytesRead(crw.written)
+	// Fold this stream's egress into the monthly upload guard so streaming, not
+	// just BitTorrent seeding, counts toward the allowance.
+	if s.uploadMeter != nil {
+		s.uploadMeter.AddStreamBytes(crw.written)
+	}
 	const minHealthyBytes = 512 * 1024
 	if crw.written >= minHealthyBytes {
 		s.markSessionServedSuccessfully(sess.ID, sess)

@@ -22,6 +22,9 @@ const ADVANCED_TAB_FIELDS = [
   'session_ttl_minutes',
   'session_post_playback_ttl_minutes',
   'memory_limit_mb',
+  'monthly_upload_cap_gb',
+  'post_cap_upload_mbps',
+  'upload_cap_reset_day',
   'cerberus_base_url',
   'cerberus_api_key',
   'tmdb_api_key',
@@ -268,6 +271,12 @@ export function useSettingsState({
       trimmedFullData.session_ttl_minutes = Math.min(1440, Math.max(1, Number.isNaN(sessionTtl) ? 30 : sessionTtl))
       const postPlaybackTtl = Number(trimmedFullData.session_post_playback_ttl_minutes)
       trimmedFullData.session_post_playback_ttl_minutes = Math.min(1440, Math.max(1, Number.isNaN(postPlaybackTtl) ? 240 : postPlaybackTtl))
+      const monthlyUploadCap = Number(trimmedFullData.monthly_upload_cap_gb)
+      trimmedFullData.monthly_upload_cap_gb = Math.max(0, Number.isNaN(monthlyUploadCap) ? 0 : monthlyUploadCap)
+      const postCapMbps = Number(trimmedFullData.post_cap_upload_mbps)
+      trimmedFullData.post_cap_upload_mbps = Math.max(0, Number.isNaN(postCapMbps) ? 0 : postCapMbps)
+      const resetDay = Number(trimmedFullData.upload_cap_reset_day)
+      trimmedFullData.upload_cap_reset_day = Math.min(28, Math.max(1, Number.isNaN(resetDay) ? 1 : resetDay))
       if (trimmedFullData.failover_fast_mode == null) {
         trimmedFullData.failover_fast_mode = true
       } else {
