@@ -251,7 +251,10 @@ func isStalled(e TorrentHealthEntry, threshold time.Duration) bool {
 		return time.Since(e.AddedAt) > threshold
 	case "stalledDL":
 		return hasActivityData && time.Since(e.LastActivity) > threshold
-	case "downloading":
+	case "downloading", "forcedDL":
+		// forcedDL is "downloading" with queueing bypassed — force-started
+		// torrents can stall exactly like normal ones, and omitting the state
+		// meant the watchdog never looked at them at all.
 		// Allow double the threshold for active-but-slow downloads.
 		return hasActivityData && time.Since(e.LastActivity) > threshold*2
 	}
