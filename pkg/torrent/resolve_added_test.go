@@ -264,3 +264,66 @@ func TestResolveAddedPrefersOurNameOverAConcurrentAdd(t *testing.T) {
 		t.Fatalf("served a concurrently added title: got %q, want %q", got.Name, ours.Name)
 	}
 }
+
+// TestResolveAddedMatchesSingleFileTorrentName is the regression test for the
+// file-extension mismatch. qBittorrent names a single-file torrent after the
+// file, extension included, while the indexer's release title has none — so the
+// normalised forms differed by a trailing "mkv" and never compared equal. With
+// no info hash and nothing newly appeared, every replay of an already-downloaded
+// episode failed. Single-file torrents are the common case for TV.
+func TestResolveAddedMatchesSingleFileTorrentName(t *testing.T) {
+	ours := qbittorrent.TorrentInfo{
+		Hash:     "dddddddddddddddddddddddddddddddddddddddd",
+		Name:     "Rick and Morty (2013) S07E03 Air Force Wong (1080p HMAX Webrip x265 10bit AC3 5.1 - Goki)[TAoE].mkv",
+		AddedOn:  10,
+		Progress: 1,
+	}
+	releaseTitle := "Rick and Morty (2013) S07E03 Air Force Wong (1080p HMAX Webrip x265 10bit AC3 5 1 - Goki)[TAoE]"
+
+	q := &categoryQBit{list: []qbittorrent.TorrentInfo{ours}}
+	mgr, c := categoryManager(t, q)
+	before := map[string]bool{ours.Hash: true} // already present, so the add is a no-op
+
+	got, err := mgr.resolveAdded(context.Background(), c, "", before, releaseTitle)
+	if err != nil {
+		t.Fatalf("a single-file torrent must resolve despite its extension: %v", err)
+	}
+	if got.Hash != ours.Hash {
+		t.Fatalf("resolved %q, want %q", got.Name, ours.Name)
+	}
+}
+
+// TestStripVideoExtLeavesOtherSuffixes: only real video extensions come off, so
+// a release whose title ends in something dot-separated is untouched.
+func TestStripVideoExtLeavesOtherSuffixes(t *testing.T) {
+	cases := map[string]string{
+		"Show.S01E01.1080p.mkv": "Show.S01E01.1080p",
+		"Show.S01E01.1080p.mp4": "Show.S01E01.1080p",
+		"Show.S01E01.1080p":     "Show.S01E01.1080p",
+		"Movie.2020.2160p.x265": "Movie.2020.2160p.x265",
+		"Some.Folder.Name":      "Some.Folder.Name",
+	}
+	for in, want := range cases {
+		if got := stripVideoExt(in); got != want {
+			t.Errorf("stripVideoExt(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestExtensionStrippingDoesNotWeakenTheSiblingGuard: the match stays exact, so
+// a neighbouring episode is still refused even with extensions in play.
+func TestExtensionStrippingDoesNotWeakenTheSiblingGuard(t *testing.T) {
+	sibling := qbittorrent.TorrentInfo{
+		Hash: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee1",
+		Name: "Rick and Morty (2013) S07E02 Air Force Wong (1080p).mkv", Progress: 1,
+	}
+	q := &categoryQBit{list: []qbittorrent.TorrentInfo{sibling}}
+	mgr, c := categoryManager(t, q)
+	before := map[string]bool{sibling.Hash: true}
+
+	got, err := mgr.resolveAdded(context.Background(), c, "", before,
+		"Rick and Morty (2013) S07E03 Air Force Wong (1080p)")
+	if err == nil {
+		t.Fatalf("must still refuse a different episode, got %q", got.Name)
+	}
+}
