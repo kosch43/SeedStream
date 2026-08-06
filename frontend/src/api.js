@@ -32,7 +32,11 @@ export async function apiFetch(path, options = {}) {
     if (res.status === 401) {
       notifyUnauthorized({ path, status: res.status })
     }
-    const err = new Error((data && (data.error || data.message)) || res.statusText)
+    // statusText is unusable as a fallback: HTTP/2 removed reason phrases, so it
+    // is always empty behind a proxy that speaks it. Fall back to the code.
+    const err = new Error(
+      (data && (data.error || data.message)) || res.statusText || `HTTP ${res.status}`
+    )
     if (data && data.errors) err.fieldErrors = data.errors
     err.status = res.status
     throw err
