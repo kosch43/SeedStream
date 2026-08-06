@@ -1,6 +1,7 @@
 package triage
 
 import (
+	"math"
 	"sort"
 	"time"
 
@@ -34,7 +35,7 @@ func (s *Service) Filter(releases []*release.Release) []Candidate {
 		}
 		parsed := parser.ParseReleaseTitle(rel.Title)
 		group := parsed.ResolutionGroup()
-		score := basicScore(rel)
+		score := ScoreRelease(rel)
 
 		querySource := rel.QuerySource
 		if querySource == "" {
@@ -66,7 +67,7 @@ func (s *Service) SortCandidates(candidates []Candidate) {
 		}
 		parsed := parser.ParseReleaseTitle(rel.Title)
 		group := parsed.ResolutionGroup()
-		score := basicScore(rel)
+		score := ScoreRelease(rel)
 		querySource := rel.QuerySource
 		if querySource == "" {
 			querySource = "id"
@@ -116,6 +117,39 @@ func moreDesirable(a, b *Candidate) bool {
 // genuine zero are indistinguishable in the raw value.
 func isDeadSwarm(rel *release.Release) bool {
 	return rel != nil && rel.IsTorrent() && rel.SeedersKnown && rel.Seeders <= 0
+}
+
+// Swarm health is worth roughly one to four size tiers, so a well-seeded
+// release can outrank a marginally larger one that would stall, without letting
+// seeder count override quality outright.
+const (
+	seederScoreWeight = 500.0
+	maxSeederScore    = 4000
+)
+
+// seederScore rewards a healthy swarm on a logarithmic curve, because the
+// difference between one seeder and ten decides whether a stream plays at all
+// while the difference between five hundred and six hundred is irrelevant.
+//
+// Only a count the tracker actually published is scored: an indexer that omits
+// the seeders attribute reports zero indistinguishably from a dead swarm, and
+// penalising it would push every release from that tracker to the bottom.
+func seederScore(rel *release.Release) int {
+	if rel == nil || !rel.IsTorrent() || !rel.SeedersKnown || rel.Seeders <= 0 {
+		return 0
+	}
+	s := int(seederScoreWeight * math.Log2(1+float64(rel.Seeders)))
+	if s > maxSeederScore {
+		s = maxSeederScore
+	}
+	return s
+}
+
+// ScoreRelease is the full desirability score: quality first, then swarm health.
+// Exported so the watchdog ranks replacement torrents the same way the stream
+// list does, rather than by seeder count alone.
+func ScoreRelease(rel *release.Release) int {
+	return basicScore(rel) + seederScore(rel)
 }
 
 func basicScore(rel *release.Release) int {

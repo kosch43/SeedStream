@@ -14,6 +14,7 @@ import (
 	"seedstream/pkg/core/config"
 	"seedstream/pkg/core/logger"
 	"seedstream/pkg/indexer"
+	"seedstream/pkg/search/triage"
 	"seedstream/pkg/services/cerberus"
 	"seedstream/pkg/services/uploadguard"
 )
@@ -450,12 +451,19 @@ func (w *Watchdog) findReplacement(rec *cerberus.TorrentRecord, blocked map[stri
 		return ""
 	}
 
+	// A replacement is ranked exactly as the stream list ranks releases: quality
+	// first, with swarm health folded into the same score. Ordering by seeder
+	// count alone would happily swap a stalled remux for a tiny well-seeded rip.
 	type candidate struct {
 		url     string
+		score   int
 		seeders int
+		dead    bool
 	}
+	minSeeders := w.minSeeders()
 	var candidates []candidate
-	for _, item := range resp.Channel.Items {
+	for i := range resp.Channel.Items {
+		item := &resp.Channel.Items[i]
 		if !item.IsTorrent() {
 			continue
 		}
@@ -467,17 +475,39 @@ func (w *Watchdog) findReplacement(rec *cerberus.TorrentRecord, blocked map[stri
 		if magnet == "" {
 			magnet = item.Link
 		}
-		if magnet != "" {
-			seeders, _ := strconv.Atoi(item.GetAttribute("seeders"))
-			candidates = append(candidates, candidate{url: magnet, seeders: seeders})
+		if magnet == "" {
+			continue
 		}
+		rel := item.ToRelease()
+		if rel == nil {
+			continue
+		}
+		// Never replace a stalled torrent with one too thinly seeded to finish,
+		// which would just stall again on the next check.
+		if minSeeders > 0 && rel.SeedersKnown && rel.Seeders < minSeeders {
+			continue
+		}
+		candidates = append(candidates, candidate{
+			url:     magnet,
+			score:   triage.ScoreRelease(rel),
+			seeders: rel.Seeders,
+			dead:    rel.SeedersKnown && rel.Seeders <= 0,
+		})
 	}
 	if len(candidates) == 0 {
 		return ""
 	}
 	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].dead != candidates[j].dead {
+			return candidates[j].dead // anything playable before a dead swarm
+		}
+		if candidates[i].score != candidates[j].score {
+			return candidates[i].score > candidates[j].score
+		}
 		return candidates[i].seeders > candidates[j].seeders
 	})
+	logger.Debug("Cerberus watchdog: replacement chosen",
+		"candidates", len(candidates), "score", candidates[0].score, "seeders", candidates[0].seeders)
 	return candidates[0].url
 }
 
