@@ -214,6 +214,13 @@ type TorrentInfo struct {
 	NumSeeds     int     `json:"num_seeds"`
 	NumLeechs    int     `json:"num_leechs"`
 	PieceSize    int64   `json:"piece_size"`
+	// SequentialDL and FirstLastPiecePrio report the streaming flags. They are
+	// only honoured on the torrent that an add actually created: adding a
+	// magnet qBittorrent already holds is a no-op, so the flags in that request
+	// are discarded and the torrent keeps downloading rarest-first. Reading
+	// them back is the only way to find out.
+	SequentialDL       bool `json:"seq_dl"`
+	FirstLastPiecePrio bool `json:"f_l_piece_prio"`
 }
 
 // Get returns the torrent with the given info hash, or nil if not present.
@@ -362,6 +369,46 @@ func (c *Client) SetFilePriority(ctx context.Context, hash string, fileIndex, pr
 	form.Set("priority", strconv.Itoa(priority))
 	_, err := c.do(ctx, http.MethodPost, "/api/v2/torrents/filePrio", form)
 	return err
+}
+
+// EnsureStreamingOrder turns on sequential download and first/last-piece
+// priority for a torrent that is missing either.
+//
+// Setting them at add time is not enough. Adding a magnet qBittorrent already
+// holds succeeds and changes nothing — the flags in that request are thrown
+// away — so any torrent that reached the client by another route (an earlier
+// build, another tool, the user's own hand) downloads rarest-first. Its bytes
+// then land scattered across the file, and a scattered file cannot be streamed
+// however much of it is downloaded: at 84% the continuous run from the start
+// can still be a few pieces long.
+//
+// Both endpoints are toggles, so the current state has to be read first;
+// calling them unconditionally would switch the flags off on a torrent that
+// already had them right.
+func (c *Client) EnsureStreamingOrder(ctx context.Context, info *TorrentInfo) error {
+	if info == nil || strings.TrimSpace(info.Hash) == "" {
+		return nil
+	}
+	form := url.Values{}
+	form.Set("hashes", strings.ToLower(info.Hash))
+	var firstErr error
+	if !info.SequentialDL {
+		if _, err := c.do(ctx, http.MethodPost, "/api/v2/torrents/toggleSequentialDownload", form); err != nil {
+			firstErr = err
+		} else {
+			info.SequentialDL = true
+		}
+	}
+	if !info.FirstLastPiecePrio {
+		if _, err := c.do(ctx, http.MethodPost, "/api/v2/torrents/toggleFirstLastPiecePrio", form); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+		} else {
+			info.FirstLastPiecePrio = true
+		}
+	}
+	return firstErr
 }
 
 // Resume starts a paused/stopped torrent. qBittorrent 5.0 renamed the endpoint
