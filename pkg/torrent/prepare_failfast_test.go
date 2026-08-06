@@ -62,7 +62,7 @@ func TestPrepareFailsFastOnClientError(t *testing.T) {
 	}})
 
 	start := time.Now()
-	_, err := mgr.PrepareForPlayback(context.Background(), prepareTestRelease(), 1, 1, 0, 30*time.Second, nil)
+	_, err := mgr.PrepareForPlayback(context.Background(), prepareTestRelease(), 1, 1, 0, PlaybackProfile{}, 30*time.Second, nil)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -89,7 +89,7 @@ func TestPrepareFailsFastWhenNoVideoFile(t *testing.T) {
 	}})
 
 	start := time.Now()
-	_, err := mgr.PrepareForPlayback(context.Background(), prepareTestRelease(), 1, 1, 0, 30*time.Second, nil)
+	_, err := mgr.PrepareForPlayback(context.Background(), prepareTestRelease(), 1, 1, 0, PlaybackProfile{}, 30*time.Second, nil)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -115,7 +115,7 @@ func TestPrepareReturnsImmediatelyOnCompleteFile(t *testing.T) {
 	}})
 
 	start := time.Now()
-	res, err := mgr.PrepareForPlayback(context.Background(), prepareTestRelease(), 1, 1, 0, 30*time.Second, nil)
+	res, err := mgr.PrepareForPlayback(context.Background(), prepareTestRelease(), 1, 1, 0, PlaybackProfile{}, 30*time.Second, nil)
 	elapsed := time.Since(start)
 
 	if err != nil {

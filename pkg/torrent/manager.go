@@ -475,7 +475,12 @@ type PrepareResult struct {
 //
 // clientOverride, if non-nil, is used instead of the global client list. This
 // lets each stream route to its own seedbox qBittorrent.
-func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, season, episode int, bufferBytes int64, timeout time.Duration, clientOverride *config.TorrentClientConfig) (*PrepareResult, error) {
+// profile, when valid, lets the head requirement be revised while waiting. It
+// is computed before the torrent exists, so the opening figure rests on a
+// bitrate prior; the real download rate only becomes knowable once peers are
+// connected, and it ramps — 4 MB/s at t+4s, 112 MB/s at t+20s on a measured
+// run. Deciding once at t=0 locks in the answer from the slowest moment.
+func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, season, episode int, bufferBytes int64, profile PlaybackProfile, timeout time.Duration, clientOverride *config.TorrentClientConfig) (*PrepareResult, error) {
 	if rel == nil || !rel.IsTorrent() {
 		return nil, fmt.Errorf("release is not a torrent")
 	}
@@ -582,8 +587,11 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 	fragmentedHead := false
 	fastFinish := false
 	// The head actually required, once the file size is known and the ceiling
-	// has been applied. Kept out here so a timeout reports the real target.
+	// has been applied. Kept out here so it survives across polls — it is
+	// revised downward as the real download rate appears — and so a timeout
+	// reports the target that was actually in force.
 	needHead := bufferBytes
+	warnedRevised := false
 	// Swarm health: a freshly added torrent needs a moment to find peers, so the
 	// live seeder count is only judged after a grace period, and only when the
 	// download has also failed to advance — a small but fast swarm is fine.
@@ -641,7 +649,8 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 				if avail == nil && f.Size > 0 {
 					avail = newFileAvailability(c, info.Hash, f.Index, f.Size)
 				}
-				needHead = requiredHeadBytes(bufferBytes, f.Size)
+				needHead = m.reviseHead(ctx, c, info.Hash, needHead,
+					requiredHeadBytes(bufferBytes, f.Size), profile, &warnedRevised)
 				headReady := false
 				if avail != nil {
 					headReady = avail.BytesAvailable(ctx, 0, needHead)
@@ -763,6 +772,44 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 		case <-time.After(1500 * time.Millisecond):
 		}
 	}
+}
+
+// reviseHead re-decides how much head to require, now that the torrent's real
+// download rate can be observed.
+//
+// The opening figure was set before the torrent existed, from bitrate alone,
+// which cannot tell a seedbox pulling 557 MB/s from a swarm trickling in at 2.
+// Both were asked for the same forty-five seconds of video, and on the fast one
+// that is several hundred megabytes of waiting for a stream that could have
+// started on forty.
+//
+// Shrinks only, never grows. Growing would move the goalposts mid-wait: a
+// momentary dip in the rate would extend a wait already in progress, and the
+// caller has a fixed budget to spend. ceiling is the requirement as first
+// computed, which nothing may exceed.
+func (m *Manager) reviseHead(ctx context.Context, c *qbittorrent.Client, hash string, current, ceiling int64, profile PlaybackProfile, warned *bool) int64 {
+	if current <= 0 || current > ceiling {
+		current = ceiling
+	}
+	if !profile.Valid() || current <= MinHeadBytes {
+		return current
+	}
+	info, err := c.Get(ctx, hash)
+	if err != nil || info == nil || info.DlSpeed <= 0 {
+		return current // no rate to go on; the opening figure stands
+	}
+	want := HeadBytesFor(profile, info.DlSpeed)
+	if want >= current {
+		return current
+	}
+	if !*warned {
+		*warned = true
+		logger.Info("Playback: the download is fast enough to need less of a head than first estimated",
+			"hash", shortHash(hash), "dl_bytes_per_sec", info.DlSpeed,
+			"playback_bytes_per_sec", int64(profile.BytesPerSecond()),
+			"head_was", current, "head_now", want)
+	}
+	return want
 }
 
 // nearingCompletion reports whether the whole torrent will be on disk within

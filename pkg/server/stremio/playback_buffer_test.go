@@ -33,7 +33,7 @@ func TestRemuxGetsAMuchLargerBuffer(t *testing.T) {
 		t.Fatalf("a 60 GB remux must get more than the %d byte default, got %d",
 			torrent.DefaultBufferBytes, got)
 	}
-	if got < 150_000_000 || got > maxPrebufferBytes {
+	if got < 150_000_000 || got > torrent.MaxHeadBytes {
 		t.Fatalf("buffer %d is not a sensible cushion for a remux", got)
 	}
 }
@@ -51,8 +51,8 @@ func TestOrdinary1080pStartsSooner(t *testing.T) {
 		t.Fatalf("an ordinary 1080p release should need less than the %d byte default, got %d",
 			torrent.DefaultBufferBytes, got)
 	}
-	if got < minPrebufferBytes {
-		t.Fatalf("buffer %d is below the floor %d", got, minPrebufferBytes)
+	if got < torrent.MinHeadBytes {
+		t.Fatalf("buffer %d is below the floor %d", got, torrent.MinHeadBytes)
 	}
 }
 
@@ -77,8 +77,8 @@ func TestBufferScalesMonotonicallyWithSize(t *testing.T) {
 			t.Fatalf("a %d byte release got a %d byte head, less than the %d byte head of a smaller release",
 				size, got, prev)
 		}
-		if got > maxPrebufferBytes {
-			t.Fatalf("size %d: buffer %d exceeds the cap %d", size, got, maxPrebufferBytes)
+		if got > torrent.MaxHeadBytes {
+			t.Fatalf("size %d: buffer %d exceeds the cap %d", size, got, torrent.MaxHeadBytes)
 		}
 		prev = got
 	}
@@ -88,8 +88,8 @@ func TestBufferScalesMonotonicallyWithSize(t *testing.T) {
 func TestBufferIsCapped(t *testing.T) {
 	s := bufferServer()
 	got := s.playbackBufferBytes(bufferSession(400_000_000_000), 0)
-	if got > maxPrebufferBytes {
-		t.Fatalf("buffer %d exceeds the cap %d", got, maxPrebufferBytes)
+	if got > torrent.MaxHeadBytes {
+		t.Fatalf("buffer %d exceeds the cap %d", got, torrent.MaxHeadBytes)
 	}
 }
 
