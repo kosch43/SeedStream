@@ -80,7 +80,8 @@ func (a *fileAvailability) initLocked(ctx context.Context) {
 
 	files, err := a.client.Files(ctx, a.hash)
 	if err != nil {
-		logger.Debug("piece availability: files query failed, using progress fallback", "hash", shortHash(a.hash), "err", err)
+		logger.Info("Playback: piece tracking unavailable (file list query failed) — an incomplete torrent will wait until it completes",
+			"hash", shortHash(a.hash), "err", err)
 		return
 	}
 	var pieceRange []int
@@ -91,12 +92,14 @@ func (a *fileAvailability) initLocked(ctx context.Context) {
 		}
 	}
 	if len(pieceRange) < 2 || pieceRange[0] < 0 || pieceRange[1] < pieceRange[0] {
-		logger.Debug("piece availability: no piece_range from server (qBittorrent < 4.4?), using progress fallback", "hash", shortHash(a.hash))
+		logger.Info("Playback: piece tracking unavailable (client reports no piece_range; qBittorrent below 4.4) — an incomplete torrent will wait until it completes",
+			"hash", shortHash(a.hash))
 		return
 	}
 	props, err := a.client.Properties(ctx, a.hash)
 	if err != nil || props == nil || props.PieceSize <= 0 {
-		logger.Debug("piece availability: properties query failed, using progress fallback", "hash", shortHash(a.hash), "err", err)
+		logger.Info("Playback: piece tracking unavailable (properties query failed) — an incomplete torrent will wait until it completes",
+			"hash", shortHash(a.hash), "err", err)
 		return
 	}
 	a.pieceSize = props.PieceSize
@@ -108,7 +111,10 @@ func (a *fileAvailability) initLocked(ctx context.Context) {
 	// one piece and the range check must widen.
 	piecesIfAligned := int((a.fileSize + a.pieceSize - 1) / a.pieceSize)
 	a.aligned = (a.lastPiece - a.firstPiece + 1) == piecesIfAligned
-	logger.Debug("piece availability: exact piece tracking enabled",
+	// Logged at info because which mode a stream is in decides whether an
+	// in-progress torrent can be served at all, and the two are otherwise
+	// indistinguishable from the outside until playback misbehaves.
+	logger.Info("Playback: exact piece tracking enabled",
 		"hash", shortHash(a.hash), "piece_size", a.pieceSize,
 		"first_piece", a.firstPiece, "last_piece", a.lastPiece, "aligned", a.aligned)
 }
@@ -195,7 +201,7 @@ func (a *fileAvailability) piecesAvailableLocked(ctx context.Context, offset, en
 		// Server returned a bitmap that does not cover the file's pieces —
 		// inconsistent metadata. Degrade permanently to the progress fallback
 		// rather than deadlocking on a bitmap that can never satisfy the check.
-		logger.Warn("piece availability: pieceStates shorter than piece_range, degrading to progress fallback",
+		logger.Warn("Playback: exact piece tracking LOST mid-stream (client returned a bitmap shorter than the file's piece range) — this torrent will now wait until it completes",
 			"hash", shortHash(a.hash), "states", len(states), "last_piece", a.lastPiece)
 		a.pieceMode = false
 		return a.estimateAvailableLocked(ctx, end)
@@ -256,7 +262,7 @@ func (a *fileAvailability) estimateAvailableLocked(ctx context.Context, end int6
 		// wait, which is visible and recoverable.
 		if !a.warnedNoPieces {
 			a.warnedNoPieces = true
-			logger.Warn("piece-level data unavailable, so an incomplete torrent cannot be served safely; playback will wait until it completes",
+			logger.Warn("Playback: waiting for this torrent to complete, because without piece data there is no way to tell which bytes are actually on disk",
 				"hash", shortHash(a.hash), "progress", f.Progress)
 		}
 		return false
