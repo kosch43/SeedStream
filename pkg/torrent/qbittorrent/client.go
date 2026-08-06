@@ -373,6 +373,44 @@ func (c *Client) Resume(ctx context.Context, hash string) error {
 	return err
 }
 
+// Tracker announce states reported by /torrents/trackers.
+const (
+	TrackerDisabled     = 0 // DHT/PeX/LSD pseudo-entries
+	TrackerNotContacted = 1
+	TrackerWorking      = 2
+	TrackerUpdating     = 3
+	TrackerNotWorking   = 4
+)
+
+// TrackerInfo is a subset of /torrents/trackers.
+type TrackerInfo struct {
+	URL    string `json:"url"`
+	Status int    `json:"status"`
+	Msg    string `json:"msg"`
+}
+
+// Trackers returns the announce state of every tracker on a torrent.
+//
+// This is the only way to tell whether the tracker is actually receiving our
+// announces. Seeding time and ratio are counted locally by qBittorrent, so a
+// torrent whose announces have been failing will still accumulate both while
+// the tracker records nothing — which is exactly the situation in which trusting
+// local counters would breach a hit-and-run obligation.
+func (c *Client) Trackers(ctx context.Context, hash string) ([]TrackerInfo, error) {
+	if strings.TrimSpace(hash) == "" {
+		return nil, nil
+	}
+	body, err := c.do(ctx, http.MethodGet, "/api/v2/torrents/trackers?hash="+url.QueryEscape(strings.ToLower(hash)), nil)
+	if err != nil {
+		return nil, err
+	}
+	var list []TrackerInfo
+	if err := json.Unmarshal(body, &list); err != nil {
+		return nil, fmt.Errorf("qbittorrent trackers decode: %w", err)
+	}
+	return list, nil
+}
+
 // NoShareLimit disables a qBittorrent share limit, meaning the torrent is never
 // stopped automatically on that criterion.
 const NoShareLimit = -1

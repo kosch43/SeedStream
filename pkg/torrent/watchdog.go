@@ -43,6 +43,9 @@ type Watchdog struct {
 	cfg      *config.Config
 	meter    *uploadguard.Meter // monthly upload meter; nil disables metering
 	checking atomic.Bool        // guards against concurrent check runs
+	// lastRetentionReview paces the dry-run obligation report; obligations are
+	// measured in days so there is nothing to gain from reporting every tick.
+	lastRetentionReview time.Time
 }
 
 // NewWatchdog creates a Watchdog. Returns nil when the torrent manager has no
@@ -124,6 +127,63 @@ func (w *Watchdog) Start(ctx context.Context, cfg WatchdogConfig) {
 	}
 }
 
+// allowCleanupFor reports whether the operator has explicitly opted this tracker
+// in to cleanup consideration. Absent means no.
+func (w *Watchdog) allowCleanupFor(indexerName string) bool {
+	if w.cfg == nil || indexerName == "" {
+		return false
+	}
+	for _, idx := range w.cfg.Indexers {
+		if strings.EqualFold(idx.Name, indexerName) {
+			return idx.HnRAllowCleanup != nil && *idx.HnRAllowCleanup
+		}
+	}
+	return false
+}
+
+// reviewRetention reports which completed torrents have provably discharged
+// their tracker obligations. It is a dry run and deletes nothing — there is no
+// removal path anywhere in SeedStream. Its purpose is to let an operator compare
+// these verdicts against what their trackers actually show, so that a future
+// cleanup feature can be judged on evidence rather than on trust in local
+// counters.
+func (w *Watchdog) reviewRetention(ctx context.Context, entries []TorrentHealthEntry) {
+	margin := w.cfg.EffectiveHnRSafetyMarginPercent()
+	eligible, reviewed := 0, 0
+	for _, e := range entries {
+		if e.Progress < 0.999 {
+			continue
+		}
+		rec := w.cerberus.GetContentByHash(e.Hash)
+		if rec == nil {
+			continue
+		}
+		if !w.allowCleanupFor(rec.IndexerName) {
+			continue // never even evaluate a tracker that was not opted in
+		}
+		reviewed++
+		v := w.manager.EvaluateRetention(ctx, e, rec.IndexerName,
+			w.hnrRulesFor(rec.IndexerName), true, margin)
+		if v.Eligible {
+			eligible++
+			logger.Info("Cerberus retention review (DRY RUN — nothing is deleted): obligations appear met",
+				"name", v.Name, "hash", shortHash(v.Hash), "indexer", v.IndexerName,
+				"seeded_hours", v.SeedingHours, "required_hours", v.RequiredHours,
+				"ratio", v.Ratio, "required_ratio", v.RequiredRatio,
+				"tracker_answering", v.TrackerWorking, "verdict", v.Reason)
+		} else {
+			logger.Debug("Cerberus retention review (DRY RUN): still owed",
+				"name", v.Name, "hash", shortHash(v.Hash), "indexer", v.IndexerName,
+				"reason", v.Reason)
+		}
+	}
+	if reviewed > 0 {
+		logger.Info("Cerberus retention review complete (DRY RUN — no torrent was removed)",
+			"reviewed", reviewed, "would_be_eligible", eligible,
+			"safety_margin_percent", margin)
+	}
+}
+
 func (w *Watchdog) check(ctx context.Context, stallThreshold time.Duration) {
 	w.syncUploadMeter(ctx)
 
@@ -131,6 +191,12 @@ func (w *Watchdog) check(ctx context.Context, stallThreshold time.Duration) {
 	if err != nil {
 		logger.Warn("Cerberus watchdog: failed to list torrents", "err", err)
 		return
+	}
+
+	// Periodic dry run: report which obligations look discharged, without acting.
+	if time.Since(w.lastRetentionReview) >= retentionReviewInterval {
+		w.lastRetentionReview = time.Now()
+		w.reviewRetention(ctx, entries)
 	}
 	for _, e := range entries {
 		// A paused/stopped torrent is not seeding and not downloading. On a
