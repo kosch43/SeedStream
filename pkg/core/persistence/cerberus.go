@@ -209,6 +209,72 @@ func (m *StateManager) GetRegisteredTorrentsForContent(imdbID, tmdbID, tvdbID st
 	return out
 }
 
+// PruneOldBlocklistEntries removes blocklist entries whose last failure is
+// older than maxAgeMs. Swarms recover: a torrent nobody was seeding last month
+// may be healthy now, and a permanent blocklist steadily shrinks what is
+// available to play. Returns the number of rows deleted.
+func (m *StateManager) PruneOldBlocklistEntries(maxAgeMs int64) (int64, error) {
+	if m == nil || m.db == nil || maxAgeMs <= 0 {
+		return 0, nil
+	}
+	cutoff := time.Now().UnixMilli() - maxAgeMs
+	var n int64
+	err := m.withWriteLock(func(db *sql.DB) error {
+		res, err := db.Exec(`DELETE FROM cerberus_blocklist WHERE last_failure_at < ?`, cutoff)
+		if err != nil {
+			return err
+		}
+		n, _ = res.RowsAffected()
+		return nil
+	})
+	return n, err
+}
+
+// GetBlocklistEntries returns the current blocklist, most recent failure first,
+// so it can be shown rather than only inferred from behaviour.
+func (m *StateManager) GetBlocklistEntries(limit int) []BlocklistEntry {
+	if m == nil || m.db == nil {
+		return nil
+	}
+	if limit <= 0 {
+		limit = 200
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	rows, err := m.db.Query(`SELECT info_hash, imdb_id, tmdb_id, tvdb_id, season, episode,
+		failure_count, last_failure_at, reason
+		FROM cerberus_blocklist ORDER BY last_failure_at DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []BlocklistEntry
+	for rows.Next() {
+		var e BlocklistEntry
+		var lastMs int64
+		if err := rows.Scan(&e.InfoHash, &e.ImdbID, &e.TmdbID, &e.TvdbID, &e.Season, &e.Episode,
+			&e.FailureCount, &lastMs, &e.Reason); err != nil {
+			continue
+		}
+		e.LastFailureAt = time.UnixMilli(lastMs)
+		out = append(out, e)
+	}
+	return out
+}
+
+// BlocklistEntry is one blocklisted torrent.
+type BlocklistEntry struct {
+	InfoHash      string    `json:"info_hash"`
+	ImdbID        string    `json:"imdb_id"`
+	TmdbID        string    `json:"tmdb_id"`
+	TvdbID        string    `json:"tvdb_id"`
+	Season        int       `json:"season"`
+	Episode       int       `json:"episode"`
+	FailureCount  int       `json:"failure_count"`
+	LastFailureAt time.Time `json:"last_failure_at"`
+	Reason        string    `json:"reason"`
+}
+
 // GetTorrentByHash looks up the registry entry for the given info_hash.
 // Returns nil if not found.
 func (m *StateManager) GetTorrentByHash(infoHash string) *TorrentEntry {

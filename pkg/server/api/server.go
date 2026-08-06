@@ -190,6 +190,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/api/trackers/definitions/import", authMiddleware(http.HandlerFunc(s.handleTrackerDefinitionImport)))
 	mux.Handle("/api/trackers/definitions/reload", authMiddleware(http.HandlerFunc(s.handleTrackerDefinitionsReload)))
 	mux.Handle("/api/indexer/caps/refresh", authMiddleware(http.HandlerFunc(s.handleRefreshIndexerCaps)))
+	mux.Handle("/api/cerberus/status", authMiddleware(http.HandlerFunc(s.handleCerberusStatus)))
 	mux.Handle("/api/stats/persisted", authMiddleware(http.HandlerFunc(s.handlePersistedStats)))
 	mux.Handle("/api/stats/history", authMiddleware(http.HandlerFunc(s.handleStatsHistory)))
 	mux.Handle("/api/stats/indexers", authMiddleware(http.HandlerFunc(s.handleIndexerStats)))

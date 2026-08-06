@@ -102,6 +102,9 @@ func (w *Watchdog) Start(ctx context.Context, cfg WatchdogConfig) {
 	if n := w.cerberus.PruneOldEntries(90); n > 0 {
 		logger.Info("Cerberus watchdog: pruned old registry entries at startup", "count", n)
 	}
+	// Expire stale blocklist entries so a swarm that has since recovered is not
+	// shut out forever.
+	w.cerberus.PruneBlocklist(w.cfg.EffectiveCerberusBlocklistDays())
 
 	logger.Info("Cerberus watchdog started", "check_interval", interval, "stall_threshold", threshold)
 	ticker := time.NewTicker(interval)
@@ -139,6 +142,48 @@ func (w *Watchdog) allowCleanupFor(indexerName string) bool {
 		}
 	}
 	return false
+}
+
+// reviewHnRRisk warns about obligations heading toward a breach while there is
+// still time to act. Seed time on its own cannot say whether a torrent is in
+// trouble; measuring it against the tracker's deadline can.
+func (w *Watchdog) reviewHnRRisk(entries []TorrentHealthEntry) {
+	now := time.Now()
+	for _, e := range entries {
+		rec := w.cerberus.GetContentByHash(e.Hash)
+		if rec == nil {
+			continue
+		}
+		st := EvaluateHnR(e, rec.IndexerName, w.hnrRulesFor(rec.IndexerName),
+			w.hnrWindowDaysFor(rec.IndexerName), now)
+		switch st.Risk {
+		case HnRRiskCritical:
+			logger.Warn("Cerberus H&R: ACT NOW — obligation about to be breached",
+				"name", st.Name, "hash", shortHash(st.Hash), "indexer", st.IndexerName,
+				"detail", st.Detail, "hours_remaining", st.HoursRemaining)
+		case HnRRiskWarning:
+			logger.Warn("Cerberus H&R: obligation at risk",
+				"name", st.Name, "hash", shortHash(st.Hash), "indexer", st.IndexerName,
+				"detail", st.Detail, "hours_remaining", st.HoursRemaining)
+		case HnRRiskWatch:
+			logger.Info("Cerberus H&R: past half the tracker's window",
+				"name", st.Name, "hash", shortHash(st.Hash), "indexer", st.IndexerName,
+				"detail", st.Detail)
+		}
+	}
+}
+
+// hnrWindowDaysFor returns the tracker's deadline in days, 0 when unknown.
+func (w *Watchdog) hnrWindowDaysFor(indexerName string) float64 {
+	if w.cfg == nil || indexerName == "" {
+		return 0
+	}
+	for _, idx := range w.cfg.Indexers {
+		if strings.EqualFold(idx.Name, indexerName) {
+			return idx.HnRWindowDays
+		}
+	}
+	return 0
 }
 
 // reviewRetention reports which completed torrents have provably discharged
@@ -192,6 +237,10 @@ func (w *Watchdog) check(ctx context.Context, stallThreshold time.Duration) {
 		logger.Warn("Cerberus watchdog: failed to list torrents", "err", err)
 		return
 	}
+
+	// Obligations heading toward a breach are worth knowing about promptly, so
+	// this runs every check rather than on the slower retention cadence.
+	w.reviewHnRRisk(entries)
 
 	// Periodic dry run: report which obligations look discharged, without acting.
 	if time.Since(w.lastRetentionReview) >= retentionReviewInterval {
