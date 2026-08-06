@@ -41,16 +41,52 @@ func newSeekableFileReader(f *os.File, avail *fileAvailability, fileSize int64) 
 
 // Read waits until the bytes at the current position are downloaded, then
 // delegates to the underlying file.
+//
+// A short file on disk is never reported as EOF. qBittorrent writes pieces as
+// they arrive, so until the final piece lands the file is physically smaller
+// than the torrent says it will be. A read past that point returns io.EOF from
+// the OS even though the bytes are still coming, and http.ServeContent has
+// already promised the full length in Content-Length — so returning EOF ends the
+// response early and the player treats a seek near the end as the end of the
+// video. Only the logical size decides when the stream is over.
 func (r *SeekableFileReader) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
-	if err := r.waitForBytes(r.pos, int64(len(p))); err != nil {
-		return 0, err
+	if r.fileSize > 0 && r.pos >= r.fileSize {
+		return 0, io.EOF // genuine end of the stream
 	}
-	n, err := r.f.Read(p)
-	r.pos += int64(n)
-	return n, err
+	deadline := time.Now().Add(seekWaitTimeout)
+	for {
+		if err := r.waitForBytes(r.pos, int64(len(p))); err != nil {
+			return 0, err
+		}
+		n, err := r.f.Read(p)
+		if n > 0 {
+			r.pos += int64(n)
+			if err == io.EOF && r.pos < r.fileSize {
+				err = nil // more is coming; do not end the response here
+			}
+			return n, err
+		}
+		if err != nil && err != io.EOF {
+			return 0, err
+		}
+		// Zero bytes at a position the torrent says exists: the tail has not
+		// been written to disk yet. Wait for it rather than truncating.
+		if r.fileSize > 0 && r.pos >= r.fileSize {
+			return 0, io.EOF
+		}
+		if time.Now().After(deadline) {
+			return 0, fmt.Errorf("timeout waiting for torrent data at offset %d of %d", r.pos, r.fileSize)
+		}
+		// Re-seek: a failed read can leave the descriptor's offset unchanged,
+		// and the file may have grown since.
+		if _, serr := r.f.Seek(r.pos, io.SeekStart); serr != nil {
+			return 0, serr
+		}
+		time.Sleep(seekPollInterval)
+	}
 }
 
 // Seek delegates to the underlying file and keeps pos in sync.
