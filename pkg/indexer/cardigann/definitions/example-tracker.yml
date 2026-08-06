@@ -1,0 +1,97 @@
+---
+# Reference definition. This documents the format SeedStream's tracker engine
+# reads; it is not a working tracker.
+#
+# SeedStream reads the same YAML format Jackett and Prowlarr use, so their
+# published definition files work unmodified. Drop them into the definitions
+# directory shown in Settings -> Trackers and they appear in the tracker picker.
+#
+# Every value in double braces is substituted at request time:
+#   {{ .Config.<name> }}   a credential the user entered (see settings below)
+#   {{ .Keywords }}        the search terms
+#   {{ .Query.<name> }}    season, ep, imdbid and similar
+#   {{ range .Categories }}...{{ end }}   repeats per selected category
+id: example-tracker
+name: Example Tracker
+description: Reference definition showing the supported format
+language: en-US
+type: private
+encoding: UTF-8
+
+# The site address. The first link is the default; an operator can override it
+# per tracker in Settings when a tracker changes domain.
+links:
+  - https://example-tracker.invalid/
+
+# Which of the tracker's own category numbers map onto the standard categories
+# SeedStream searches by. Movies is 2000 and TV is 5000 in Newznab terms.
+caps:
+  categorymappings:
+    - {id: "1", cat: Movies, desc: "Movies"}
+    - {id: "2", cat: TV, desc: "TV"}
+  modes:
+    search: [q]
+    tv-search: [q, season, ep]
+    movie-search: [q]
+
+# One field per credential the user must supply. The tracker picker renders
+# these automatically, masking anything that looks like a secret.
+settings:
+  - name: username
+    type: text
+    label: Username
+  - name: password
+    type: password
+    label: Password
+  # A pasted session cookie is always accepted as an alternative to logging in,
+  # which is how trackers that challenge logins with a captcha are supported.
+  - name: cookie
+    type: password
+    label: Session cookie (optional, replaces login)
+
+login:
+  path: login.php
+  method: form
+  form: form#login
+  inputs:
+    username: "{{ .Config.username }}"
+    password: "{{ .Config.password }}"
+  error:
+    - selector: span.error
+  test:
+    path: index.php
+    selector: a[href*="logout"]
+
+search:
+  paths:
+    - path: browse.php
+  inputs:
+    # $raw is appended to the query string verbatim, which is how repeated
+    # parameters such as cat[]=1&cat[]=2 are expressed.
+    $raw: "{{ range .Categories }}cat[]={{.}}&{{end}}"
+    search: "{{ .Keywords }}"
+  # The repeating element that holds one release.
+  rows:
+    selector: table.torrents > tbody > tr
+  # Where each value lives inside a row. Only title plus one of download,
+  # magnet or infohash are required; the rest improve ranking.
+  fields:
+    title:
+      selector: a[href*="details.php?id="]
+    details:
+      selector: a[href*="details.php?id="]
+      attribute: href
+    download:
+      selector: a[href*="download.php"]
+      attribute: href
+    size:
+      selector: td:nth-child(5)
+    seeders:
+      selector: td:nth-child(6)
+    leechers:
+      selector: td:nth-child(7)
+    date:
+      selector: td:nth-child(4)
+      filters:
+        - name: dateparse
+          args: "2006-01-02 15:04:05"
