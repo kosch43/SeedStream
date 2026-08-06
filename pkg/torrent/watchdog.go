@@ -154,6 +154,12 @@ func (w *Watchdog) check(ctx context.Context, stallThreshold time.Duration) {
 		if !isStalled(e, stallThreshold) && !underSeeded {
 			continue
 		}
+		// Already superseded on an earlier check. Nothing is ever deleted, so the
+		// old torrent stays in the client; without this it would be re-diagnosed
+		// and replaced again on every tick, adding a duplicate each time.
+		if w.cerberus.IsBlocked(e.Hash) {
+			continue
+		}
 		rec := w.cerberus.GetContentByHash(e.Hash)
 		if rec == nil {
 			// Torrent was not added by Cerberus-aware code; skip.
@@ -394,23 +400,15 @@ func (w *Watchdog) handleStalled(ctx context.Context, stalled TorrentHealthEntry
 		return
 	}
 
+	// Adds the alternative alongside the stalled torrent; nothing is removed, so
+	// a failure here leaves the original exactly as it was and needs no recovery.
 	if err := w.manager.Replace(ctx, stalled.ClientName, stalled.Hash, newURL); err != nil {
-		logger.Error("Cerberus watchdog: replace failed, attempting to restore original torrent",
+		logger.Error("Cerberus watchdog: could not add replacement, original torrent left untouched",
 			"hash", stalled.Hash, "name", stalled.Name, "err", err)
-		// Delete may have already succeeded before Add failed. Restore the original
-		// torrent so it isn't silently lost from qBittorrent (Progress==0 so no data risk).
-		if rec.Magnet != "" {
-			if rerr := w.manager.AddTorrent(ctx, stalled.ClientName, rec.Magnet); rerr != nil {
-				logger.Error("Cerberus watchdog: could not restore original torrent after failed replace",
-					"hash", stalled.Hash, "err", rerr)
-			} else {
-				logger.Info("Cerberus watchdog: restored original torrent after failed replace", "hash", stalled.Hash)
-			}
-		}
 		return
 	}
 
-	logger.Info("Cerberus watchdog: replaced zero-progress stalled torrent",
+	logger.Info("Cerberus watchdog: added a healthier alternative for a zero-progress stalled torrent (nothing deleted)",
 		"old_hash", stalled.Hash, "name", stalled.Name,
 		"imdb_id", rec.ImdbID, "tmdb_id", rec.TmdbID)
 
@@ -420,6 +418,8 @@ func (w *Watchdog) handleStalled(ctx context.Context, stalled TorrentHealthEntry
 		if err := w.cerberus.RegisterTorrent(newHash, ids, newURL, rec.ReleaseTitle, rec.IndexerName); err != nil {
 			logger.Warn("Cerberus watchdog: failed to register replacement hash", "hash", newHash, "err", err)
 		}
+		// Keep qBittorrent from ending this one's seeding on its own either.
+		w.manager.ProtectSeeding(ctx, stalled.ClientName, newHash)
 	} else {
 		// HTTP .torrent URLs have no extractable hash — the replacement won't be
 		// tracked by Cerberus and a future stall on it will be ignored.

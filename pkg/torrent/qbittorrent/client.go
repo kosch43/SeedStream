@@ -373,6 +373,33 @@ func (c *Client) Resume(ctx context.Context, hash string) error {
 	return err
 }
 
+// NoShareLimit disables a qBittorrent share limit, meaning the torrent is never
+// stopped automatically on that criterion.
+const NoShareLimit = -1
+
+// SetShareLimits sets when qBittorrent may stop seeding a torrent by itself.
+//
+// qBittorrent applies global ratio and seeding-time limits that pause or even
+// delete a torrent once reached. On a private tracker that can cut seeding short
+// of a hit-and-run obligation without SeedStream ever being involved, so torrents
+// SeedStream adds have their limits pinned rather than inheriting the global
+// defaults. Pass NoShareLimit to mean "never stop for this reason".
+//
+// ratioLimit is an upload/download ratio; seedingTimeMinutes and
+// inactiveSeedingTimeMinutes are in minutes.
+func (c *Client) SetShareLimits(ctx context.Context, hash string, ratioLimit float64, seedingTimeMinutes, inactiveSeedingTimeMinutes int) error {
+	if strings.TrimSpace(hash) == "" {
+		return nil
+	}
+	form := url.Values{}
+	form.Set("hashes", strings.ToLower(hash))
+	form.Set("ratioLimit", strconv.FormatFloat(ratioLimit, 'f', -1, 64))
+	form.Set("seedingTimeLimit", strconv.Itoa(seedingTimeMinutes))
+	form.Set("inactiveSeedingTimeLimit", strconv.Itoa(inactiveSeedingTimeMinutes))
+	_, err := c.do(ctx, http.MethodPost, "/api/v2/torrents/setShareLimits", form)
+	return err
+}
+
 // Delete removes torrents, optionally deleting their downloaded files. Used by
 // ratio-safe cache eviction; callers must respect seed-time before deleting.
 func (c *Client) Delete(ctx context.Context, hashes []string, deleteFiles bool) error {

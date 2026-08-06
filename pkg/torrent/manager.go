@@ -165,24 +165,48 @@ func (m *Manager) AddTorrent(ctx context.Context, clientName, addURL string) err
 	return fmt.Errorf("torrent client %q not found", clientName)
 }
 
-// Replace removes a zero-progress stalled torrent (without deleting files)
-// and adds a replacement magnet/URL to the same client. Callers must verify
-// Progress == 0 before calling to avoid private-tracker H&R violations.
+// Replace adds a healthier alternative alongside a stalled torrent. It does not
+// remove the stalled one.
+//
+// Nothing is deleted, ever. Even a torrent showing zero progress may have been
+// announced to a private tracker, and removing it is the one action that cannot
+// be undone if the tracker's accounting disagrees with qBittorrent's. Leaving it
+// in place costs an idle entry; removing it can cost a hit-and-run. The caller
+// marks the old torrent as handled so it is not repeatedly replaced.
 func (m *Manager) Replace(ctx context.Context, clientName, oldHash, newURL string) error {
-	var c *qbittorrent.Client
-	for _, e := range m.clients {
-		if e.cfg.Name == clientName {
-			c = e.client
-			break
-		}
-	}
+	c := m.clientByName(clientName)
 	if c == nil {
 		return fmt.Errorf("torrent client %q not found", clientName)
 	}
-	if err := c.Delete(ctx, []string{oldHash}, false); err != nil {
-		return fmt.Errorf("delete stalled torrent: %w", err)
+	if err := c.Add(ctx, qbittorrent.AddOptions{URL: newURL, Sequential: true}); err != nil {
+		return fmt.Errorf("add replacement torrent: %w", err)
 	}
-	return c.Add(ctx, qbittorrent.AddOptions{URL: newURL, Sequential: true})
+	logger.Info("Torrent replacement added alongside the stalled one (nothing deleted)",
+		"client", clientName, "stalled_hash", oldHash)
+	return nil
+}
+
+// ProtectSeeding pins a torrent's share limits so qBittorrent never stops
+// seeding it on its own. SeedStream's model is that a seedbox keeps seeding
+// indefinitely for ratio and hit-and-run compliance, which the client's global
+// ratio and seed-time limits would otherwise override.
+//
+// Best-effort: a failure is logged and ignored, since it must never block
+// playback, and older clients may not accept every parameter.
+func (m *Manager) ProtectSeeding(ctx context.Context, clientName, hash string) {
+	c := m.clientByName(clientName)
+	if c == nil {
+		return
+	}
+	err := c.SetShareLimits(ctx, hash,
+		qbittorrent.NoShareLimit, qbittorrent.NoShareLimit, qbittorrent.NoShareLimit)
+	if err != nil {
+		logger.Debug("could not pin share limits; qBittorrent's global limits still apply",
+			"client", clientName, "hash", shortHash(hash), "err", err)
+		return
+	}
+	logger.Debug("share limits pinned: qBittorrent will not stop seeding this torrent",
+		"client", clientName, "hash", shortHash(hash))
 }
 
 // Resume starts a paused/stopped torrent on the named client. Used by the
@@ -438,6 +462,14 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 		info, err = m.resolveAdded(ctx, c, hash, before, rel.Title)
 		if err != nil {
 			return nil, err
+		}
+		// Stop qBittorrent's global ratio and seed-time limits from ending this
+		// torrent's seeding on their own, which on a private tracker could cut a
+		// hit-and-run obligation short. Best-effort; never blocks playback.
+		if serr := c.SetShareLimits(ctx, info.Hash,
+			qbittorrent.NoShareLimit, qbittorrent.NoShareLimit, qbittorrent.NoShareLimit); serr != nil {
+			logger.Debug("could not pin share limits on the added torrent",
+				"hash", shortHash(info.Hash), "err", serr)
 		}
 	}
 
