@@ -228,6 +228,91 @@ func (a *fileAvailability) piecesAvailableLocked(ctx context.Context, offset, en
 	return ok
 }
 
+// completedAvailability is a checker for a file already fully on disk. It
+// answers every question from the latch without a single request, which is what
+// lets a finished torrent be wrapped for position tracking at no cost.
+func completedAvailability(fileSize int64) *fileAvailability {
+	return &fileAvailability{fileSize: fileSize, complete: true, initDone: true}
+}
+
+// ContiguousEnd returns the end of the unbroken run of downloaded data that
+// begins at offset — the point playback would reach before running out of file.
+//
+// This is the number the viewer's experience actually depends on. Overall
+// progress can climb steadily while the run in front of the playhead does not
+// move at all, and the difference between those two is the difference between a
+// stream that plays and one that stops mid-scene.
+//
+// Returns offset itself when the byte at offset is not on disk, and fileSize
+// when the file is complete. Without a piece bitmap nothing can be measured, so
+// it returns offset — an unknown runway, never an optimistic one.
+func (a *fileAvailability) ContiguousEnd(ctx context.Context, offset int64) int64 {
+	if offset < 0 {
+		offset = 0
+	}
+	if a.fileSize > 0 && offset >= a.fileSize {
+		return a.fileSize
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.complete {
+		return a.fileSize
+	}
+	a.initLocked(ctx)
+	if !a.pieceMode {
+		return offset
+	}
+	a.refreshStatesLocked(ctx)
+	if len(a.states) <= a.lastPiece {
+		return offset
+	}
+
+	first := a.firstPiece + int(offset/a.pieceSize)
+	if first > a.lastPiece {
+		return a.fileSize
+	}
+	p := first
+	for p <= a.lastPiece && a.states[p] == qbittorrent.PieceDownloaded {
+		p++
+	}
+	if p == first {
+		return offset // the playhead is sitting on a piece that has not arrived
+	}
+	end := int64(p-a.firstPiece) * a.pieceSize
+	if !a.aligned {
+		// The file starts mid-piece by an unknown amount, so the last piece of
+		// the run may only be partly this file's. Drop it rather than report a
+		// runway that is not there.
+		end -= a.pieceSize
+	}
+	if end > a.fileSize {
+		end = a.fileSize
+	}
+	if end < offset {
+		end = offset
+	}
+	return end
+}
+
+// refreshStatesLocked re-reads the piece bitmap, no more often than the cache
+// window. Caller must hold a.mu.
+func (a *fileAvailability) refreshStatesLocked(ctx context.Context) {
+	if a.states != nil && time.Since(a.lastFetch) < availabilityCacheTTL {
+		return
+	}
+	states, err := a.client.PieceStates(ctx, a.hash)
+	a.lastFetch = time.Now()
+	if err != nil {
+		logger.Debug("piece availability: refresh failed", "hash", shortHash(a.hash), "err", err)
+		return
+	}
+	if len(states) > a.lastPiece {
+		a.states = states
+	}
+}
+
 // latchCompleteLocked marks the checker permanently satisfied once every piece
 // of the file is downloaded, so a finished file costs zero further API calls.
 // Caller must hold a.mu.

@@ -85,7 +85,7 @@ func TestReadUsesVerifiedOffset(t *testing.T) {
 	}
 	defer fh.Close()
 
-	r := newSeekableFileReader(fh, completeAvail(size), size)
+	r := newSeekableFileReader(fh, completeAvail(size), size, nil)
 	const target = 4096
 	if _, err := r.Seek(target, io.SeekStart); err != nil {
 		t.Fatalf("seek: %v", err)

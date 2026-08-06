@@ -388,26 +388,30 @@ func (m *Manager) clientByName(name string) *qbittorrent.Client {
 // before reading, so that seeking forward into un-downloaded regions blocks
 // instead of returning zeros or a 416 error.
 //
-// Only a torrent qBittorrent reports as fully complete (progress == 1) gets a
-// bare *os.File with no checking. A file that merely looked "nearly done" at
-// prepare time (progress 0.999) is still wrapped, because 0.1% of a 30 GB file
-// is ~30 MB that may not be on disk — the availability checker is cheap when
-// the file is in fact complete (it latches after one confirming call).
-func (m *Manager) OpenForPlayback(res *PrepareResult) (io.ReadSeekCloser, error) {
+// A file that merely looked "nearly done" at prepare time (progress 0.999) is
+// still checked, because 0.1% of a 30 GB file is ~30 MB that may not be on disk
+// — the availability checker is cheap when the file is in fact complete (it
+// latches after one confirming call).
+//
+// ph, when non-nil, receives the position of every byte served, so the rest of
+// SeedStream can see where in the title the viewer is. A completed torrent is
+// wrapped too, with a checker that answers from its latch and never touches the
+// network: position tracking should not depend on whether the download happened
+// to finish.
+func (m *Manager) OpenForPlayback(res *PrepareResult, ph *Playhead) (io.ReadSeekCloser, error) {
 	f, err := os.Open(res.AbsPath)
 	if err != nil {
 		return nil, err
 	}
-	if res.Progress >= 1 || res.Hash == "" {
-		return f, nil
+	var avail *fileAvailability
+	if c := m.clientByName(res.ClientName); res.Progress < 1 && res.Hash != "" && c != nil {
+		avail = newFileAvailability(c, res.Hash, res.FileIndex, res.Size)
+	} else {
+		// Complete, or no client to ask: every byte is on disk, or nothing can
+		// be proven about which are. Either way there is nothing to wait for.
+		avail = completedAvailability(res.Size)
 	}
-	c := m.clientByName(res.ClientName)
-	if c == nil {
-		// Client not found (override path) — fall back to plain file.
-		return f, nil
-	}
-	avail := newFileAvailability(c, res.Hash, res.FileIndex, res.Size)
-	return newSeekableFileReader(f, avail, res.Size), nil
+	return newSeekableFileReader(f, avail, res.Size, ph), nil
 }
 
 // PrepareResult describes a torrent file ready (or buffering) for playback.

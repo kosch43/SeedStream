@@ -14,7 +14,7 @@ import (
 // completeAvail builds a fileAvailability that reports everything downloaded,
 // standing in for a finished torrent without needing a qBittorrent server.
 func completeAvail(fileSize int64) *fileAvailability {
-	return &fileAvailability{fileSize: fileSize, complete: true, initDone: true}
+	return completedAvailability(fileSize)
 }
 
 // serveRange runs a Range request through http.ServeContent exactly as the
@@ -54,7 +54,7 @@ func TestTailSeekOnCompleteFile(t *testing.T) {
 	}
 	defer fh.Close()
 
-	r := newSeekableFileReader(fh, completeAvail(fileSize), fileSize)
+	r := newSeekableFileReader(fh, completeAvail(fileSize), fileSize, nil)
 
 	// Seek to 90% of the way in, the way a player does when you skip near the end.
 	start := int64(fileSize) * 90 / 100
@@ -114,7 +114,7 @@ func TestTailSeekDoesNotTruncateWhenTailNotWritten(t *testing.T) {
 	seekWaitTimeout = 2 * time.Second
 	defer func() { seekWaitTimeout = prev }()
 
-	r := newSeekableFileReader(fh, completeAvail(logicalSize), logicalSize)
+	r := newSeekableFileReader(fh, completeAvail(logicalSize), logicalSize, nil)
 	r.Seek(int64(logicalSize)*90/100, io.SeekStart)
 
 	buf := make([]byte, 32*1024)
@@ -145,7 +145,7 @@ func TestReadReportsGenuineEOFAtLogicalEnd(t *testing.T) {
 	fh, _ := os.Open(path)
 	defer fh.Close()
 
-	r := newSeekableFileReader(fh, completeAvail(fileSize), fileSize)
+	r := newSeekableFileReader(fh, completeAvail(fileSize), fileSize, nil)
 	r.Seek(0, io.SeekEnd)
 
 	if _, err := r.Read(make([]byte, 4096)); err != io.EOF {
