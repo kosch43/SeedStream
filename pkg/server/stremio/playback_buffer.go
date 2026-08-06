@@ -1,6 +1,8 @@
 package stremio
 
 import (
+	"time"
+
 	"seedstream/pkg/core/logger"
 	"seedstream/pkg/session"
 	"seedstream/pkg/torrent"
@@ -41,6 +43,49 @@ func prebufferSecondsFor(bitrateMbps float64) int64 {
 	default: // 4K remux
 		return 45
 	}
+}
+
+// headFillRate is the download rate a play request is budgeted against when
+// deciding how long to allow for buffering. Deliberately well below what a
+// seedbox achieves: the budget should be generous enough that a healthy
+// download is not cut off, and being wrong in that direction costs a wait,
+// while being wrong in the other costs a second copy of the film.
+const headFillRate = 8 * 1024 * 1024 // bytes per second
+
+// maxPrepareBudget caps the whole thing. A play request is an HTTP request, and
+// reverse proxies in front of SeedStream commonly cut one off between one and
+// two minutes; stretching past that produces a proxy error instead of a
+// stream. The cap keeps the automatic extension within reach of the retry,
+// which is what actually rescues a head too large to fill in one request.
+const maxPrepareBudget = 3 * time.Minute
+
+// prepareBudget returns how long a play request may spend getting the stream
+// ready, scaled to the head this particular release needs.
+//
+// A fixed budget was sized when every head was 16 MiB. A 4K remux now asks for
+// several hundred, which at any plausible rate cannot be delivered in the same
+// ninety seconds — so the request expired every time, and the failover it
+// triggered started a second download of the same film alongside the first.
+//
+// The configured timeout is the floor, never the ceiling: an operator who
+// raised it still gets what they asked for.
+func (s *Server) prepareBudget(sess *session.Session, headBytes int64) time.Duration {
+	base := s.config.EffectiveTorrentPrepareTimeout()
+	if headBytes <= 0 {
+		return base
+	}
+	want := base + time.Duration(float64(headBytes)/headFillRate*float64(time.Second))
+	if want > maxPrepareBudget {
+		want = maxPrepareBudget
+	}
+	if want < base {
+		return base
+	}
+	if want > base {
+		logger.Debug("Playback: extending the prepare budget for a large head",
+			"head_bytes", headBytes, "base", base, "budget", want)
+	}
+	return want
 }
 
 // playbackBufferBytes returns how much of the file's head must be downloaded

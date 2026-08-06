@@ -17,6 +17,7 @@ import (
 	"seedstream/pkg/core/logger"
 	"seedstream/pkg/indexer"
 	"seedstream/pkg/session"
+	"seedstream/pkg/torrent"
 )
 
 const defaultStreamID = "default"
@@ -712,7 +713,11 @@ func (s *Server) handlePlay(w http.ResponseWriter, r *http.Request, streamConfig
 	// proxies (Cloudflare answers 504/524) long before failover finishes, so the
 	// viewer sees a proxy error instead of the next slot. The budget is shared:
 	// every attempt gets whatever time is left.
-	playDeadline := time.Now().Add(s.config.EffectiveTorrentPrepareTimeout())
+	// Scaled to the head this release needs: a 4K remux asks for several hundred
+	// megabytes, which no fixed ninety seconds can deliver, and the expiry used
+	// to trigger a failover that started a second copy of the same film.
+	playBudget := s.prepareBudget(sess, s.playbackBufferBytes(sess, s.config.TorrentBufferBytes))
+	playDeadline := time.Now().Add(playBudget)
 
 	var lastErr error
 	for attempt := 0; ; attempt++ {
@@ -721,7 +726,7 @@ func (s *Server) handlePlay(w http.ResponseWriter, r *http.Request, streamConfig
 			logger.Warn("Play: prepare budget exhausted, not trying further fallbacks",
 				"session", sessionID, "attempts", attempt)
 			if lastErr == nil {
-				lastErr = fmt.Errorf("no slot became playable within %s", s.config.EffectiveTorrentPrepareTimeout())
+				lastErr = fmt.Errorf("no slot became playable within %s", playBudget)
 			}
 			break
 		}
@@ -734,6 +739,18 @@ func (s *Server) handlePlay(w http.ResponseWriter, r *http.Request, streamConfig
 		if errors.Is(lastErr, context.Canceled) {
 			logger.Debug("Play canceled by client", "session", sessionID)
 			return
+		}
+
+		// A torrent that is downloading and merely has not finished buffering is
+		// not a failed candidate. Marking the slot failed would send the next
+		// attempt to a different release and start a second copy of the same
+		// film — two 59 GB remuxes competing for the same bandwidth, so the one
+		// the viewer is waiting for gets slower. Return and let the player retry
+		// this slot, which resumes a download already part-finished.
+		if errors.Is(lastErr, torrent.ErrStillBuffering) {
+			logger.Info("Play: still buffering, keeping this release rather than starting another",
+				"session", sessionID, "attempt", attempt+1, "reason", lastErr)
+			break
 		}
 
 		// Preparation failed before any response bytes were written: mark the

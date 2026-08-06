@@ -118,6 +118,10 @@ func normalizeTitleForMatchBase(s string) string {
 	s = repairMojibakeUTF8(s)
 	s = strings.ToLower(s)
 	s = stripDiacritics(s)
+	// Spell the plus out before punctuation is stripped, so canonicalization
+	// downstream can still tell HDR10+ from HDR10. Doing it after would be too
+	// late: the "+" is gone by then and the two formats look identical.
+	s = strings.ReplaceAll(s, "hdr10+", "hdr10plus")
 	return NormalizeTitleForFilename(s)
 }
 
@@ -125,6 +129,14 @@ func canonicalizeCommonTitleWord(word string) string {
 	switch word {
 	case "pokmon", "pokamon":
 		return "pokemon"
+	// HDR10+ is written three ways across scene names, indexers and torrent
+	// clients. Punctuation is stripped before this point, so "hdr10+" would
+	// otherwise arrive as bare "hdr10" — which is a genuinely different format —
+	// and the same release would fail to match itself depending on which spelling
+	// each side happened to use. The plus is preserved as "p" rather than
+	// dropped, so plain HDR10 stays distinct.
+	case "hdr10plus":
+		return "hdr10p"
 	default:
 		return word
 	}
