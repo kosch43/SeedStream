@@ -159,3 +159,108 @@ func TestIsStalledForcedDL(t *testing.T) {
 		t.Fatal("an actively downloading forcedDL torrent must not be flagged")
 	}
 }
+
+// TestResolveAddedFindsAlreadyPresentTorrent is the regression test for the
+// replay bug. An indexer that publishes no info hash (TorrentLeech among them)
+// leaves nothing to look a torrent up by, and qBittorrent treats adding one it
+// already holds as a no-op — so nothing appears after the add. Every replay of
+// an already-downloaded title failed permanently, which is the exact opposite of
+// what should be the fastest case.
+func TestResolveAddedFindsAlreadyPresentTorrent(t *testing.T) {
+	ours := qbittorrent.TorrentInfo{
+		Hash: "9999999999999999999999999999999999999999",
+		Name: "Rick.and.Morty.S07E03.1080p.WEB.h264-EDITH", AddedOn: 50, Progress: 1,
+	}
+	q := &categoryQBit{list: []qbittorrent.TorrentInfo{ours}}
+	mgr, c := categoryManager(t, q)
+
+	// It was already there when the add was issued, so nothing "appeared".
+	before := map[string]bool{ours.Hash: true}
+
+	start := time.Now()
+	got, err := mgr.resolveAdded(context.Background(), c, "", before, ours.Name)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("an already-present torrent must resolve, got: %v", err)
+	}
+	if got.Hash != ours.Hash {
+		t.Fatalf("resolved %q, want %q", got.Name, ours.Name)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("took %v — an already-present torrent should resolve immediately, not burn retries", elapsed)
+	}
+}
+
+// TestResolveAddedDoesNotMatchSiblingEpisode is the precision guard on that
+// fallback. It searches the whole category, and a neighbouring episode differs
+// by a single token, so a majority-overlap match would happily return the wrong
+// episode of the right show.
+func TestResolveAddedDoesNotMatchSiblingEpisode(t *testing.T) {
+	sibling := qbittorrent.TorrentInfo{
+		Hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1",
+		Name: "Rick.and.Morty.S07E02.1080p.WEB.h264-EDITH", AddedOn: 10, Progress: 1,
+	}
+	q := &categoryQBit{list: []qbittorrent.TorrentInfo{sibling}}
+	mgr, c := categoryManager(t, q)
+	before := map[string]bool{sibling.Hash: true}
+
+	got, err := mgr.resolveAdded(context.Background(), c, "",
+		before, "Rick.and.Morty.S07E03.1080p.WEB.h264-EDITH")
+	if err == nil {
+		t.Fatalf("must not resolve a different episode, but returned %q", got.Name)
+	}
+}
+
+// TestResolveAddedPrefersCompleteDuplicate: if the same release is present
+// twice, the finished copy is the useful one.
+func TestResolveAddedPrefersCompleteDuplicate(t *testing.T) {
+	partial := qbittorrent.TorrentInfo{
+		Hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb1",
+		Name: "Show.S01E01.1080p.WEB", AddedOn: 5, Progress: 0.3,
+	}
+	done := qbittorrent.TorrentInfo{
+		Hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2",
+		Name: "Show.S01E01.1080p.WEB", AddedOn: 6, Progress: 1,
+	}
+	q := &categoryQBit{list: []qbittorrent.TorrentInfo{partial, done}}
+	mgr, c := categoryManager(t, q)
+	before := map[string]bool{partial.Hash: true, done.Hash: true}
+
+	got, err := mgr.resolveAdded(context.Background(), c, "", before, "Show.S01E01.1080p.WEB")
+	if err != nil {
+		t.Fatalf("resolveAdded: %v", err)
+	}
+	if got.Hash != done.Hash {
+		t.Fatalf("should prefer the complete copy, got progress %.2f", got.Progress)
+	}
+}
+
+// TestResolveAddedPrefersOurNameOverAConcurrentAdd closes the hole the replay
+// fix exposed. If our torrent was already present the add is a no-op, so the
+// only thing that "appeared" is whatever another request added at that moment —
+// and taking the single appearance blindly would serve their title instead of
+// ours.
+func TestResolveAddedPrefersOurNameOverAConcurrentAdd(t *testing.T) {
+	ours := qbittorrent.TorrentInfo{
+		Hash: "ccccccccccccccccccccccccccccccccccccccc1",
+		Name: "Rick.and.Morty.S07E03.1080p.WEB.h264-EDITH", AddedOn: 10, Progress: 1,
+	}
+	theirs := qbittorrent.TorrentInfo{
+		Hash: "ccccccccccccccccccccccccccccccccccccccc2",
+		Name: "The.Shawshank.Redemption.1994.1080p.BluRay.x265", AddedOn: 999,
+	}
+	q := &categoryQBit{list: []qbittorrent.TorrentInfo{ours, theirs}}
+	mgr, c := categoryManager(t, q)
+
+	// Ours was already there; theirs appeared between the snapshot and the list.
+	before := map[string]bool{ours.Hash: true}
+
+	got, err := mgr.resolveAdded(context.Background(), c, "", before, ours.Name)
+	if err != nil {
+		t.Fatalf("resolveAdded: %v", err)
+	}
+	if got.Hash != ours.Hash {
+		t.Fatalf("served a concurrently added title: got %q, want %q", got.Name, ours.Name)
+	}
+}

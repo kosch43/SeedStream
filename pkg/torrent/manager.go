@@ -617,12 +617,25 @@ func (m *Manager) resolveAdded(ctx context.Context, c *qbittorrent.Client, hash 
 				return info, nil
 			}
 		} else if list, err := c.ListCategory(ctx); err == nil {
+			// An exact name match is the strongest evidence available and is
+			// checked first, because it holds whether the add created the
+			// torrent or qBittorrent no-opped because it already had it. That
+			// second case is a replay of anything previously downloaded, and
+			// with no info hash from the indexer there is nothing else to
+			// identify it by.
+			if existing := exactTitleMatch(list, releaseTitle); existing != nil {
+				return existing, nil
+			}
 			var appeared []qbittorrent.TorrentInfo
 			for _, t := range list {
 				if !before[strings.ToLower(strings.TrimSpace(t.Hash))] {
 					appeared = append(appeared, t)
 				}
 			}
+			// Falling back to what appeared covers a torrent qBittorrent named
+			// differently from the indexer's release title. One appearing is
+			// only ours if nothing else was added at the same time, so a title
+			// check still applies when several did.
 			switch {
 			case len(appeared) == 1:
 				return &appeared[0], nil
@@ -641,6 +654,34 @@ func (m *Manager) resolveAdded(ctx context.Context, c *qbittorrent.Client, hash 
 		}
 	}
 	return nil, fmt.Errorf("could not identify the torrent added for %q", releaseTitle)
+}
+
+// exactTitleMatch finds a torrent that is the same release as releaseTitle,
+// comparing normalised forms so punctuation and separators do not matter.
+//
+// Deliberately exact rather than the fuzzy overlap used elsewhere. This searches
+// the whole category rather than a handful of torrents that just appeared, and
+// sibling episodes of a show differ by a single token — "S05E01" against
+// "S05E02" shares seven words of eight, which sails past a majority-overlap
+// test. Requiring the whole normalised name to agree is what keeps a replay of
+// one episode from resolving to another.
+//
+// Prefers the most complete copy if the same release somehow appears twice.
+func exactTitleMatch(list []qbittorrent.TorrentInfo, releaseTitle string) *qbittorrent.TorrentInfo {
+	want := release.NormalizeTitleForDedup(releaseTitle)
+	if want == "" {
+		return nil
+	}
+	var best *qbittorrent.TorrentInfo
+	for i := range list {
+		if release.NormalizeTitleForDedup(list[i].Name) != want {
+			continue
+		}
+		if best == nil || list[i].Progress > best.Progress {
+			best = &list[i]
+		}
+	}
+	return best
 }
 
 // bestTitleMatch picks the torrent whose name best matches the release title,
