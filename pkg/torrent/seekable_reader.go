@@ -61,7 +61,14 @@ func (r *SeekableFileReader) Read(p []byte) (int, error) {
 		if err := r.waitForBytes(r.pos, int64(len(p))); err != nil {
 			return 0, err
 		}
-		n, err := r.f.Read(p)
+		// Positional read. r.f.Read would take the descriptor's own offset,
+		// which is only equal to r.pos while every prior operation has kept the
+		// two in step — and a partial read or a re-seek during recovery can
+		// break that. Reading at an offset a few bytes from the one just
+		// verified lands mid-frame, which the player shows as a jump. ReadAt
+		// neither uses nor moves the descriptor offset, so the bytes returned
+		// are always the bytes that were checked.
+		n, err := r.f.ReadAt(p, r.pos)
 		if n > 0 {
 			r.pos += int64(n)
 			if err == io.EOF && r.pos < r.fileSize {
@@ -79,11 +86,6 @@ func (r *SeekableFileReader) Read(p []byte) (int, error) {
 		}
 		if time.Now().After(deadline) {
 			return 0, fmt.Errorf("timeout waiting for torrent data at offset %d of %d", r.pos, r.fileSize)
-		}
-		// Re-seek: a failed read can leave the descriptor's offset unchanged,
-		// and the file may have grown since.
-		if _, serr := r.f.Seek(r.pos, io.SeekStart); serr != nil {
-			return 0, serr
 		}
 		time.Sleep(seekPollInterval)
 	}

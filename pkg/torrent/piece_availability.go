@@ -22,10 +22,15 @@ const availabilityCacheTTL = 2 * time.Second
 //
 // When the qBittorrent server provides piece-level data (piece_range on
 // /torrents/files, qBittorrent >= 4.4, plus /torrents/pieceStates), the answer
-// is exact: the per-piece bitmap says WHERE downloaded bytes are. Older
-// servers fall back to the historical estimate — per-file progress treated as
-// a contiguous prefix — which sequential download makes approximately right
-// but firstLastPiecePrio makes slightly optimistic near the download frontier.
+// is exact: the per-piece bitmap says WHERE downloaded bytes are.
+//
+// Without it, nothing can be proven. Per-file progress is a count of downloaded
+// bytes, not a description of where they sit, and torrents are added with
+// first/last-piece priority so the file is sparse from the outset. Treating
+// progress as a contiguous prefix is therefore wrong in exactly the region
+// playback reaches after a few minutes, and being wrong is silent: a read into
+// a sparse hole succeeds and yields zeros. Such a server can only serve a file
+// once it is complete.
 type fileAvailability struct {
 	client    *qbittorrent.Client
 	hash      string
@@ -46,8 +51,9 @@ type fileAvailability struct {
 	// pieces and the range check must widen by one to stay safe.
 	aligned bool
 	states  []int
-	// fallback mode (estimate)
-	downloadedEstimate int64
+	// fallback mode: no piece bitmap available. Nothing can be proven about
+	// where downloaded bytes are, so only a completed file is servable.
+	warnedNoPieces bool
 	// shared
 	lastFetch time.Time
 	complete  bool // latched: every piece of the file confirmed downloaded
@@ -223,11 +229,8 @@ func (a *fileAvailability) latchCompleteLocked() {
 // progress as a contiguous prefix. Kept as the fallback for qBittorrent
 // versions without piece_range. Caller must hold a.mu.
 func (a *fileAvailability) estimateAvailableLocked(ctx context.Context, end int64) bool {
-	if a.downloadedEstimate >= end && a.downloadedEstimate > 0 {
-		return true
-	}
 	if time.Since(a.lastFetch) < availabilityCacheTTL {
-		return a.downloadedEstimate >= end
+		return false // nothing has changed that could make an unproven range provable
 	}
 	files, err := a.client.Files(ctx, a.hash)
 	a.lastFetch = time.Now()
@@ -242,10 +245,23 @@ func (a *fileAvailability) estimateAvailableLocked(ctx context.Context, end int6
 			a.complete = true
 			return true
 		}
-		a.downloadedEstimate = int64(f.Progress * float64(f.Size))
-		break
+		// Incomplete, and without a piece bitmap there is no way to know where
+		// the downloaded bytes are. Progress is a count, not a position, and
+		// torrents are added with first/last-piece priority, so the file is
+		// sparse from the start: head and tail present, a hole between them.
+		// Treating progress as a contiguous prefix claims bytes that are not
+		// there, and a read into a sparse hole succeeds and returns zeros, so
+		// the player receives valid-looking nulls instead of video and drifts
+		// out of sync with nothing logged. Refusing to answer makes playback
+		// wait, which is visible and recoverable.
+		if !a.warnedNoPieces {
+			a.warnedNoPieces = true
+			logger.Warn("piece-level data unavailable, so an incomplete torrent cannot be served safely; playback will wait until it completes",
+				"hash", shortHash(a.hash), "progress", f.Progress)
+		}
+		return false
 	}
-	return a.downloadedEstimate >= end
+	return false
 }
 
 func shortHash(h string) string {

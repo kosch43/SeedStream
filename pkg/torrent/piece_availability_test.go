@@ -183,12 +183,17 @@ func TestPieceAvailabilityFallback(t *testing.T) {
 	a := newAvail(t, q)
 	ctx := context.Background()
 
-	// progress ~= 0.5 -> first 10 MiB considered available
-	if !a.BytesAvailable(ctx, 2*pieceSize, 4096) {
-		t.Fatalf("fallback: early bytes should be available")
+	// Progress is around 0.5, but it is a count of downloaded bytes rather than
+	// a description of where they are, and first/last-piece priority makes the
+	// file sparse from the start. Without a piece bitmap no specific range can
+	// be proven present, so an incomplete file must be refused everywhere —
+	// including near the beginning, which the old contiguous-prefix assumption
+	// wrongly allowed and which silently served zeros from a sparse hole.
+	if a.BytesAvailable(ctx, 2*pieceSize, 4096) {
+		t.Fatalf("fallback must not claim early bytes it cannot prove are present")
 	}
 	if a.BytesAvailable(ctx, 15*pieceSize, 4096) {
-		t.Fatalf("fallback: bytes past the progress prefix should be unavailable")
+		t.Fatalf("fallback must not claim later bytes either")
 	}
 	if a.pieceMode {
 		t.Fatalf("should have fallen back to estimate mode, not piece mode")
