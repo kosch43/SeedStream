@@ -1047,13 +1047,16 @@ func (s *Server) filterBlockedTorrents(streamLabel string, releases []*release.R
 // filterLowSeeders drops torrent releases whose tracker-reported seeder count is
 // below the configured minimum, so a swarm too thin to stream is never offered.
 //
-// It is deliberately conservative in two ways. The filter is off unless a
-// minimum is configured, and it only ever judges releases whose indexer actually
-// published a seeder count: a missing "seeders" attribute reads as 0 in the raw
-// value, so filtering on that would silently wipe out every result from an
-// indexer that does not report swarm health. It also refuses to remove every
-// candidate — if nothing clears the bar, the unfiltered list is returned so the
-// viewer still gets the best available option rather than an empty stream list.
+// It only ever judges releases whose indexer actually published a seeder count:
+// a missing "seeders" attribute reads as 0 in the raw value, so filtering on
+// that would silently wipe out every result from an indexer that does not report
+// swarm health. Those releases are checked against the tracker's live count
+// during prepare instead.
+//
+// It does NOT keep an under-seeded release as a last resort. Doing so listed
+// options that the play-time guard rejects on the same number, so the viewer
+// picked a stream and got an error — worse than being told nothing is available,
+// because it looks like a broken addon rather than a thin swarm.
 func (s *Server) filterLowSeeders(streamLabel string, releases []*release.Release) []*release.Release {
 	minSeeders := s.config.EffectiveMinSeeders()
 	if minSeeders <= 0 || len(releases) == 0 {
@@ -1072,9 +1075,11 @@ func (s *Server) filterLowSeeders(streamLabel string, releases []*release.Releas
 		return releases
 	}
 	if len(filtered) == 0 {
-		logger.Info("Seeder filter would remove every result, keeping the unfiltered list",
+		// Logged at info, not debug: an empty stream list is the most confusing
+		// thing a viewer can be shown, and this is the explanation for it.
+		logger.Info("No release meets the seeder minimum, so none are offered",
 			"stream", streamLabel, "min_seeders", minSeeders, "candidates", len(releases))
-		return releases
+		return filtered
 	}
 	logger.Debug("Seeder filter",
 		"stream", streamLabel, "min_seeders", minSeeders,

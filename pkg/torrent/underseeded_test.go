@@ -98,3 +98,33 @@ func TestUnderSeededDisabled(t *testing.T) {
 		t.Fatal("minimum 0 must disable the under-seeded check")
 	}
 }
+
+// TestUnderSeededJudgesTheSwarmNotTheConnections is the false-positive guard.
+// BitTorrent connects to a subset of a swarm, so 4 connected seeds out of 60 is
+// ordinary. Reading the connected count as the swarm size would flag a perfectly
+// healthy torrent and have Cerberus replace it with something worse.
+func TestUnderSeededJudgesTheSwarmNotTheConnections(t *testing.T) {
+	e := TorrentHealthEntry{
+		State: "downloading", Progress: 0.1,
+		NumSeeds: 4, SwarmSeeds: 60, SwarmKnown: true,
+		AddedAt:      time.Now().Add(-time.Hour),
+		LastActivity: time.Now().Add(-6 * time.Minute),
+	}
+	if isUnderSeeded(e, 10, 10*time.Minute) {
+		t.Fatal("a 60-seed swarm reached through 4 connections is healthy, not under-seeded")
+	}
+}
+
+// TestUnderSeededTrustsTheTrackerOverTheConnectionCount: the reverse case. Lots
+// of connections cannot rescue a swarm the tracker says is below the floor.
+func TestUnderSeededTrustsTheTrackerOverTheConnectionCount(t *testing.T) {
+	e := TorrentHealthEntry{
+		State: "downloading", Progress: 0.1,
+		NumSeeds: 12, SwarmSeeds: 3, SwarmKnown: true,
+		AddedAt:      time.Now().Add(-time.Hour),
+		LastActivity: time.Now().Add(-6 * time.Minute),
+	}
+	if !isUnderSeeded(e, 10, 10*time.Minute) {
+		t.Fatal("the tracker reports 3 seeders against a floor of 10; that is under-seeded")
+	}
+}
