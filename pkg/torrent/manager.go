@@ -113,6 +113,13 @@ type TorrentHealthEntry struct {
 	// uses it to spot a torrent that is too thinly seeded to finish, which
 	// otherwise looks identical to one that is merely slow.
 	NumSeeds int
+	// CompletedAt is when the download finished, which is when most trackers
+	// start counting a seeding obligation. Zero while still downloading.
+	CompletedAt time.Time
+	// SeedingHours and Ratio are qBittorrent's own accounting of the obligation
+	// so far. They are the client's view, not the tracker's.
+	SeedingHours float64
+	Ratio        float64
 }
 
 // ListAll returns all SeedStream-category torrents across every configured
@@ -135,6 +142,9 @@ func (m *Manager) ListAll(ctx context.Context) ([]TorrentHealthEntry, error) {
 				LastActivity: time.Unix(t.LastActivity, 0),
 				AddedAt:      time.Unix(t.AddedOn, 0),
 				NumSeeds:     t.NumSeeds,
+				CompletedAt:  time.Unix(t.CompletionOn, 0),
+				SeedingHours: float64(t.SeedingTime) / 3600,
+				Ratio:        t.Ratio,
 			})
 		}
 	}

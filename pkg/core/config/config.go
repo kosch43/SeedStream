@@ -150,6 +150,12 @@ type IndexerConfig struct {
 	HnRMinSeedHours float64 `json:"hnr_min_seed_hours,omitempty"`
 	HnRMinRatio     float64 `json:"hnr_min_ratio,omitempty"`
 	HnRMode         string  `json:"hnr_mode,omitempty"`
+	// HnRWindowDays is how long the tracker gives you to discharge the
+	// obligation, counted from when the download completed. Without it Cerberus
+	// can only report how much has been seeded, never how much time is left —
+	// which is the difference between warning you before a breach and noticing
+	// after. 0 means the tracker's deadline is unknown.
+	HnRWindowDays float64 `json:"hnr_window_days,omitempty"`
 	// HnRAllowCleanup opts this tracker in to being considered for automatic
 	// cleanup once its obligations are provably met. It must be turned on
 	// deliberately, per tracker: an absent or unmatched rule set must never be
@@ -280,6 +286,20 @@ func (c *Config) EffectiveFailoverFastMode() bool {
 		return true
 	}
 	return c.FailoverFastMode
+}
+
+// DefaultCerberusBlocklistDays is how long a torrent stays on the health
+// blocklist. Swarms recover, so a permanent ban steadily shrinks what is
+// available; expiring entries lets a once-dead torrent be reconsidered.
+const DefaultCerberusBlocklistDays = 30
+
+// EffectiveCerberusBlocklistDays returns the blocklist retention in days.
+// Negative disables expiry, keeping the old permanent behaviour.
+func (c *Config) EffectiveCerberusBlocklistDays() int {
+	if c == nil || c.CerberusBlocklistDays == 0 {
+		return DefaultCerberusBlocklistDays
+	}
+	return c.CerberusBlocklistDays
 }
 
 // DefaultHnRSafetyMarginPercent is how far past a tracker's stated requirement a
@@ -550,6 +570,10 @@ type Config struct {
 	CerberusBaseURL string `json:"cerberus_base_url,omitempty"`
 	// CerberusAPIKey is the optional bearer token for the central Cerberus server.
 	CerberusAPIKey string `json:"cerberus_api_key,omitempty"`
+
+	// CerberusBlocklistDays is how long a failed torrent stays blocklisted.
+	// 0 uses DefaultCerberusBlocklistDays; a negative value never expires.
+	CerberusBlocklistDays int `json:"cerberus_blocklist_days,omitempty"`
 
 	// HnRSafetyMarginPercent is how far past a tracker's stated seed-time
 	// requirement a torrent must go before its obligation counts as provably met.

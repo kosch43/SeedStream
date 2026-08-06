@@ -278,6 +278,33 @@ func (c *Client) KnownTorrentsForContent(ids ContentIDs) []TorrentRecord {
 	return out
 }
 
+// PruneBlocklist expires blocklist entries older than maxAgeDays, so a torrent
+// whose swarm has since recovered can be considered again. A non-positive value
+// keeps entries forever. Returns the number removed.
+func (c *Client) PruneBlocklist(maxAgeDays int) int64 {
+	if c == nil || maxAgeDays <= 0 {
+		return 0
+	}
+	n, err := c.store.PruneOldBlocklistEntries(int64(maxAgeDays) * 24 * 60 * 60 * 1000)
+	if err != nil {
+		logger.Warn("Cerberus: failed to expire old blocklist entries", "err", err)
+		return 0
+	}
+	if n > 0 {
+		logger.Info("Cerberus: expired old blocklist entries so recovered swarms can be reconsidered",
+			"count", n, "max_age_days", maxAgeDays)
+	}
+	return n
+}
+
+// Blocklist returns the current blocklist for display.
+func (c *Client) Blocklist(limit int) []persistence.BlocklistEntry {
+	if c == nil {
+		return nil
+	}
+	return c.store.GetBlocklistEntries(limit)
+}
+
 // GetContentByHash looks up what content an info_hash was registered for.
 // Returns nil if the hash has not been seen before.
 func (c *Client) GetContentByHash(infoHash string) *TorrentRecord {

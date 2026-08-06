@@ -22,11 +22,13 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
+import { ShieldCheck } from "lucide-react"
 import { cn } from "@/lib/utils"
 
 const navMain = [
   { id: "dashboard", title: "Dashboard", icon: LayoutDashboard },
   { id: "statistics", title: "Statistics", icon: ChartColumn },
+  { id: "cerberus", title: "Cerberus", icon: ShieldCheck },
   { id: "logs", title: "Logs", icon: FileText },
   { id: "settings", title: "Settings", icon: Settings },
 ]

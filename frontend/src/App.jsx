@@ -8,6 +8,7 @@ import { SiteHeader } from "@/components/SiteHeader"
 import { DashboardPage } from "@/components/DashboardPage"
 import { StatisticsPage } from "@/components/StatisticsPage"
 import { LogsPage } from "@/components/LogsPage"
+import { CerberusPage } from "@/components/CerberusPage"
 import { ProfilePage } from "@/components/ProfilePage"
 import { getApiUrl, UNAUTHORIZED_EVENT } from './api'
 import { AlertCircle, Loader2 } from "lucide-react"
@@ -234,6 +235,11 @@ function App() {
           )}
           {activePage === 'statistics' && (
             <StatisticsPage />
+          )}
+          {activePage === 'cerberus' && (
+            <div className="pt-4 md:pt-5 pb-3 px-4 lg:px-5">
+              <CerberusPage />
+            </div>
           )}
           {activePage === 'logs' && (
             <LogsPage logs={logs} />
