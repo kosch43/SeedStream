@@ -131,7 +131,7 @@ func TestFastFinishDoesNotWeakenTheHeadCheck(t *testing.T) {
 	mgr := etaManager(t, q)
 
 	_, err := mgr.PrepareForPlayback(context.Background(), prepareTestRelease(), 1, 1,
-		32<<20, 4*time.Second, nil)
+		32<<20, PlaybackProfile{}, 4*time.Second, nil)
 	if err == nil {
 		t.Fatal("a head with a hole in it must not be served, however fast the download")
 	}
@@ -151,7 +151,7 @@ func TestSlowFragmentedHeadIsStillReportedAsSuch(t *testing.T) {
 	mgr := etaManager(t, q)
 
 	_, err := mgr.PrepareForPlayback(context.Background(), prepareTestRelease(), 1, 1,
-		32<<20, 4*time.Second, nil)
+		32<<20, PlaybackProfile{}, 4*time.Second, nil)
 	if err == nil {
 		t.Fatal("expected an error")
 	}
@@ -172,7 +172,7 @@ func TestFastFinishStillServesTheMomentTheHeadIsWhole(t *testing.T) {
 
 	start := time.Now()
 	res, err := mgr.PrepareForPlayback(context.Background(), prepareTestRelease(), 1, 1,
-		16<<20, 20*time.Second, nil)
+		16<<20, PlaybackProfile{}, 20*time.Second, nil)
 	if err != nil {
 		t.Fatalf("a continuous head is playable and must be served at once: %v", err)
 	}
@@ -181,5 +181,75 @@ func TestFastFinishStillServesTheMomentTheHeadIsWhole(t *testing.T) {
 	}
 	if res.Name != "Thing.S01E01.1080p.mkv" {
 		t.Fatalf("unexpected file %q", res.Name)
+	}
+}
+
+// TestHeadIsRevisedDownwardWhileWaiting is Fix 2. The head is first computed
+// before the torrent exists, when no download rate can be observed, so it rests
+// on a bitrate prior. The rate then ramps — 4 MB/s at t+4s, 112 MB/s at t+20s on
+// a measured run — and deciding once at t=0 locks in the answer from the
+// slowest moment.
+//
+// Here the head is asked for as 120 MiB but only 16 pieces are on disk. A rate
+// far above playback must shrink the requirement enough for those 16 to satisfy
+// it, so the stream starts instead of waiting for another 104 MiB it does not
+// need.
+func TestHeadIsRevisedDownwardWhileWaiting(t *testing.T) {
+	q := &etaQBit{pieceSize: 1 << 20, totalPieces: 160, downloaded: map[int]bool{}, dlSpeed: 500 << 20}
+	for i := 0; i < 16; i++ {
+		q.downloaded[i] = true
+	}
+	mgr := etaManager(t, q)
+
+	// 160 MiB over 600s is ~280 KB/s of playback; the download is ~1800x that.
+	profile := PlaybackProfile{FileBytes: q.size(), RuntimeSeconds: 600}
+
+	start := time.Now()
+	res, err := mgr.PrepareForPlayback(context.Background(), prepareTestRelease(), 1, 1,
+		120<<20, profile, 20*time.Second, nil)
+	if err != nil {
+		t.Fatalf("a download this far ahead of playback needs only a small head: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 6*time.Second {
+		t.Fatalf("waited %v — the requirement should have been revised on an early poll", elapsed)
+	}
+	if res.Name != "Thing.S01E01.1080p.mkv" {
+		t.Fatalf("unexpected file %q", res.Name)
+	}
+}
+
+// TestHeadRevisionNeverGrows: shrink only. Growing would move the goalposts
+// mid-wait, so a momentary dip in a noisy rate would extend a wait already in
+// progress against a fixed budget.
+func TestHeadRevisionNeverGrows(t *testing.T) {
+	q := &etaQBit{pieceSize: 1 << 20, totalPieces: 160, downloaded: map[int]bool{}, dlSpeed: 1000}
+	mgr := etaManager(t, q)
+	c := mgr.clients[0].client
+	profile := PlaybackProfile{FileBytes: q.size(), RuntimeSeconds: 600}
+
+	// A crawling download: the formula wants far more head than the current
+	// requirement, and must not be allowed to raise it.
+	warned := false
+	const current = 8 << 20
+	got := mgr.reviseHead(context.Background(), c, "abcdefabcdefabcdefabcdefabcdefabcdefabcd",
+		current, 120<<20, profile, &warned)
+	if got > current {
+		t.Fatalf("the requirement grew from %d to %d mid-wait", current, got)
+	}
+}
+
+// TestHeadRevisionWithoutAProfileIsANoOp: no size or runtime means no playback
+// rate, so there is nothing to compute and the opening figure must stand.
+func TestHeadRevisionWithoutAProfileIsANoOp(t *testing.T) {
+	q := &etaQBit{pieceSize: 1 << 20, totalPieces: 160, downloaded: map[int]bool{}, dlSpeed: 500 << 20}
+	mgr := etaManager(t, q)
+	c := mgr.clients[0].client
+
+	warned := false
+	const current = 64 << 20
+	got := mgr.reviseHead(context.Background(), c, "abcdefabcdefabcdefabcdefabcdefabcdefabcd",
+		current, current, PlaybackProfile{}, &warned)
+	if got != current {
+		t.Fatalf("without a profile the head must be left alone, got %d want %d", got, current)
 	}
 }

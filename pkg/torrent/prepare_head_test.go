@@ -96,7 +96,7 @@ func TestPrepareRejectsFragmentedHead(t *testing.T) {
 	}
 
 	mgr := headManager(t, q)
-	_, err := mgr.PrepareForPlayback(context.Background(), prepareTestRelease(), 1, 1, 32<<20, 4*time.Second, nil)
+	_, err := mgr.PrepareForPlayback(context.Background(), prepareTestRelease(), 1, 1, 32<<20, PlaybackProfile{}, 4*time.Second, nil)
 	if err == nil {
 		t.Fatal("a file with holes inside the head must not be reported ready for playback")
 	}
@@ -120,7 +120,7 @@ func TestPrepareStreamsAtTenPercent(t *testing.T) {
 	mgr := headManager(t, q)
 	start := time.Now()
 	// Ask for far more head than a tenth: the ceiling must bring it back down.
-	res, err := mgr.PrepareForPlayback(context.Background(), prepareTestRelease(), 1, 1, 120<<20, 20*time.Second, nil)
+	res, err := mgr.PrepareForPlayback(context.Background(), prepareTestRelease(), 1, 1, 120<<20, PlaybackProfile{}, 20*time.Second, nil)
 	if err != nil {
 		t.Fatalf("a torrent 10%% downloaded in order must stream: %v", err)
 	}

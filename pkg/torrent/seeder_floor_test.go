@@ -99,7 +99,7 @@ func TestPrepareRejectsSwarmBelowTheMinimum(t *testing.T) {
 	mgr := swarmManager(t, q, 10)
 
 	start := time.Now()
-	_, err := mgr.PrepareForPlayback(context.Background(), prepareTestRelease(), 1, 1, 8<<20, 90*time.Second, nil)
+	_, err := mgr.PrepareForPlayback(context.Background(), prepareTestRelease(), 1, 1, 8<<20, PlaybackProfile{}, 90*time.Second, nil)
 	if err == nil {
 		t.Fatal("a swarm of 3 must not be served when the minimum is 10")
 	}
@@ -122,7 +122,7 @@ func TestPrepareAcceptsHealthySwarmWithFewConnections(t *testing.T) {
 	// Prepare cannot succeed (the head never fills), so the test is that it
 	// times out on buffering rather than being rejected for its swarm.
 	_, err := mgr.PrepareForPlayback(context.Background(), prepareTestRelease(), 1, 1,
-		8<<20, seedCheckGrace+6*time.Second, nil)
+		8<<20, PlaybackProfile{}, seedCheckGrace+6*time.Second, nil)
 	if err == nil {
 		t.Fatal("expected a buffering timeout")
 	}
@@ -139,7 +139,7 @@ func TestPrepareWithoutAScrapeFallsBackToProgress(t *testing.T) {
 	mgr := swarmManager(t, q, 10)
 
 	_, err := mgr.PrepareForPlayback(context.Background(), prepareTestRelease(), 1, 1,
-		8<<20, 90*time.Second, nil)
+		8<<20, PlaybackProfile{}, 90*time.Second, nil)
 	if err == nil {
 		t.Fatal("expected an error")
 	}

@@ -130,7 +130,10 @@ func (s *Server) serveTorrent(w http.ResponseWriter, r *http.Request, sess *sess
 		return fmt.Errorf("release does not have enough seeders: %w", err)
 	}
 
-	res, err := s.torrentManager.PrepareForPlayback(prepCtx, playRelease, season, episode, bufferBytes, prepareTimeout, nil)
+	// The profile lets prepare shrink the head once it can see the real download
+	// rate. The opening bufferBytes above was necessarily a guess from bitrate.
+	res, err := s.torrentManager.PrepareForPlayback(prepCtx, playRelease, season, episode,
+		bufferBytes, s.playbackProfile(sess), prepareTimeout, nil)
 	if err != nil {
 		logger.Warn("Torrent prepare failed", "session", sess.ID, "title", playRelease.Title, "err", err)
 		return fmt.Errorf("torrent still preparing: %w", err)
