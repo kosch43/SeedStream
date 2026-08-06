@@ -179,6 +179,13 @@ func (c *Client) Add(ctx context.Context, opts AddOptions) error {
 	}
 	if opts.Sequential {
 		form.Set("sequentialDownload", "true")
+		// First/last-piece priority is deliberate, not a leftover. Players read
+		// the tail of an MP4/MKV early — for the index and duration — and a seek
+		// to the end of the file is a normal thing for a user to do; without the
+		// last piece both stall for as long as the swarm takes to reach the end
+		// of a sequential download. It costs one piece at each end and does make
+		// the file sparse from the outset, which is precisely why availability is
+		// decided from the piece bitmap rather than from a byte count.
 		form.Set("firstLastPiecePrio", "true")
 	}
 	_, err := c.do(ctx, http.MethodPost, "/api/v2/torrents/add", form)
