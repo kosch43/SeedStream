@@ -8,7 +8,11 @@ import (
 	"time"
 )
 
-const seekPollInterval = 2 * time.Second
+// seekPollInterval is how long a read waits before re-asking whether its bytes
+// have arrived. It is the granularity of every stall, so it is kept far below
+// what a player will tolerate: a couple of seconds per miss compounds across one
+// HTTP response into a client-side timeout and reconnect.
+const seekPollInterval = 250 * time.Millisecond
 
 // seekWaitTimeout bounds how long a Read blocks waiting for missing torrent
 // data before failing. A var (not const) only so tests can shorten it.

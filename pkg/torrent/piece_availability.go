@@ -17,6 +17,12 @@ import (
 // stale bitmap is still correct — the TTL only delays learning about NEW data.
 const availabilityCacheTTL = 2 * time.Second
 
+// negativeRecheckInterval bounds how often a failed lookup may re-fetch the
+// bitmap. A negative answer is never trusted from cache — pieces arrive
+// constantly during playback, so "not in my last snapshot" and "not downloaded"
+// are different claims — but a genuine wait should not turn into a tight loop.
+const negativeRecheckInterval = 200 * time.Millisecond
+
 // fileAvailability answers "are bytes [offset, offset+length) of this file on
 // disk?" for one file of one torrent.
 //
@@ -182,12 +188,19 @@ func (a *fileAvailability) piecesAvailableLocked(ctx context.Context, offset, en
 		return true, true
 	}
 
-	// Downloaded pieces stay downloaded, so a cached "yes" is always safe.
+	// Downloaded pieces stay downloaded, so a cached "yes" is always safe and
+	// costs no round trip — which is what keeps steady-state playback fast.
 	if ok, _ := check(); ok {
 		a.latchCompleteLocked()
 		return true
 	}
-	if time.Since(a.lastFetch) < availabilityCacheTTL {
+	// A cached "no" proves nothing. The bitmap may simply predate the piece
+	// arriving, and reporting unavailable sends the reader to sleep for a whole
+	// poll interval over bytes already on disk. Refresh before answering no, so
+	// a miss costs one small request rather than a stall. Only the happy path
+	// is allowed to reuse the cache; the floor here exists solely to stop a
+	// genuine wait from becoming a tight request loop.
+	if time.Since(a.lastFetch) < negativeRecheckInterval {
 		return false
 	}
 
