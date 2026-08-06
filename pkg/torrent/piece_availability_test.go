@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"seedstream/pkg/torrent/qbittorrent"
 )
@@ -211,5 +212,64 @@ func TestPieceAvailabilityPastEOF(t *testing.T) {
 	a := newAvail(t, q)
 	if !a.BytesAvailable(context.Background(), 8*pieceSize+1, 4096) {
 		t.Fatalf("reads past EOF must return available, not block")
+	}
+}
+
+// TestStaleNegativeIsRefreshedNotTrusted is the regression test for the stall
+// cadence. A cached "yes" is safe because pieces never un-download, but a cached
+// "no" only means "not in my last snapshot" — and trusting it sent the reader to
+// sleep for a whole poll interval over bytes already on disk. Stacked across one
+// HTTP response those add up to a client timeout and reconnect.
+func TestStaleNegativeIsRefreshedNotTrusted(t *testing.T) {
+	const pieceSize = 1 << 20
+	q := &pieceQBit{
+		pieceSize: pieceSize, totalPieces: 20, downloadedPieces: 4,
+		supportsPieces: true, fileSize: 20 * pieceSize,
+	}
+	a := newAvail(t, q)
+	ctx := context.Background()
+
+	// Prime the bitmap: piece 10 is not yet downloaded.
+	if a.BytesAvailable(ctx, 10*pieceSize, 4096) {
+		t.Fatal("precondition: piece 10 should not be available yet")
+	}
+	callsAfterPrime := atomic.LoadInt64(&q.pieceCalls)
+
+	// The piece lands. The cached bitmap is now stale but still young.
+	atomic.StoreInt64(&q.downloadedPieces, 15)
+
+	// Must re-fetch rather than trusting the stale negative. Sleeping first would
+	// be the old behaviour; the point is that no wait is needed.
+	time.Sleep(negativeRecheckInterval + 50*time.Millisecond)
+	if !a.BytesAvailable(ctx, 10*pieceSize, 4096) {
+		t.Fatal("a negative must be re-checked against the client, not served from cache")
+	}
+	if atomic.LoadInt64(&q.pieceCalls) <= callsAfterPrime {
+		t.Fatal("expected a refresh request after the miss")
+	}
+}
+
+// TestPositiveStillServedFromCache: the happy path must not start making a
+// request per read, which is what the cache exists to prevent.
+func TestPositiveStillServedFromCache(t *testing.T) {
+	const pieceSize = 1 << 20
+	q := &pieceQBit{
+		pieceSize: pieceSize, totalPieces: 20, downloadedPieces: 20,
+		supportsPieces: true, fileSize: 20 * pieceSize,
+	}
+	a := newAvail(t, q)
+	ctx := context.Background()
+
+	if !a.BytesAvailable(ctx, 0, 4096) {
+		t.Fatal("precondition: should be available")
+	}
+	before := atomic.LoadInt64(&q.pieceCalls)
+	for i := 0; i < 200; i++ {
+		if !a.BytesAvailable(ctx, int64(i)*4096, 4096) {
+			t.Fatalf("read %d should be available", i)
+		}
+	}
+	if got := atomic.LoadInt64(&q.pieceCalls) - before; got != 0 {
+		t.Fatalf("cached positives must cost no requests, made %d", got)
 	}
 }
