@@ -39,6 +39,12 @@ func NewClient(cat *Catalog, definitionID, displayName, baseURLOverride string, 
 // Name identifies this tracker in logs, stats and the stream list.
 func (c *Client) Name() string { return c.name }
 
+// BaseURL is the tracker address in use, after any operator override.
+func (c *Client) BaseURL() string { return c.engine.BaseURL() }
+
+// DefinitionID is the definition this tracker was built from.
+func (c *Client) DefinitionID() string { return c.engine.Definition().ID }
+
 // Ping verifies the credentials by performing a login.
 func (c *Client) Ping() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

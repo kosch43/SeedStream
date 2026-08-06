@@ -11,6 +11,7 @@ import (
 	"seedstream/pkg/core/paths"
 	"seedstream/pkg/core/persistence"
 	"seedstream/pkg/indexer"
+	"seedstream/pkg/indexer/cardigann"
 	"seedstream/pkg/indexer/newznab"
 	"seedstream/pkg/stats"
 )
@@ -65,8 +66,12 @@ func BuildComponents(cfg *config.Config) (*InitializedComponents, error) {
 		logger.Error("Failed to initialize usage manager", "err", err)
 	}
 
+	catalog := TrackerCatalog(dataDir)
+
 	for _, idxCfg := range cfg.Indexers {
-		if idxCfg.URL == "" {
+		// A definition-driven tracker carries its own address, so only Torznab
+		// entries require a URL.
+		if idxCfg.URL == "" && !config.IsDefinitionIndexerType(idxCfg.Type) {
 			continue
 		}
 		if idxCfg.Enabled != nil && !*idxCfg.Enabled {
@@ -79,6 +84,22 @@ func BuildComponents(cfg *config.Config) (*InitializedComponents, error) {
 		if !config.IsTorrentIndexerType(idxCfg.Type) {
 			logger.Warn("Skipping non-torrent indexer (SeedStream only streams torrents)",
 				"name", idxCfg.Name, "type", idxCfg.Type)
+			continue
+		}
+
+		// Definition-driven trackers scrape the tracker's own site using a
+		// bundled definition, so they need no Torznab service in front of them.
+		if config.IsDefinitionIndexerType(idxCfg.Type) {
+			client, err := cardigann.NewClient(catalog, idxCfg.DefinitionID, idxCfg.Name,
+				idxCfg.URL, idxCfg.DefinitionSettings, idxCfg.EffectiveTimeout())
+			if err != nil {
+				logger.Warn("Skipping tracker: definition unavailable",
+					"name", idxCfg.Name, "definition", idxCfg.DefinitionID, "err", err)
+				continue
+			}
+			indexers = append(indexers, client)
+			logger.Info("Initialized tracker from definition",
+				"name", client.Name(), "definition", idxCfg.DefinitionID, "url", client.BaseURL())
 			continue
 		}
 

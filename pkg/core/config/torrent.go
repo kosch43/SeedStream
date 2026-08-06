@@ -39,11 +39,18 @@ type TorrentClientConfig struct {
 // source rather than a Usenet (Newznab) source.
 func IsTorrentIndexerType(indexerType string) bool {
 	switch strings.ToLower(strings.TrimSpace(indexerType)) {
-	case "torznab", "torrent":
+	case "torznab", "torrent", "cardigann":
 		return true
 	default:
 		return false
 	}
+}
+
+// IsDefinitionIndexerType reports whether an indexer is driven by a bundled
+// tracker definition (scraping the tracker's own site) rather than by a Torznab
+// endpoint.
+func IsDefinitionIndexerType(indexerType string) bool {
+	return strings.EqualFold(strings.TrimSpace(indexerType), "cardigann")
 }
 
 func (t TorrentClientConfig) IsEnabled() bool {
