@@ -150,6 +150,12 @@ type IndexerConfig struct {
 	HnRMinSeedHours float64 `json:"hnr_min_seed_hours,omitempty"`
 	HnRMinRatio     float64 `json:"hnr_min_ratio,omitempty"`
 	HnRMode         string  `json:"hnr_mode,omitempty"`
+	// HnRAllowCleanup opts this tracker in to being considered for automatic
+	// cleanup once its obligations are provably met. It must be turned on
+	// deliberately, per tracker: an absent or unmatched rule set must never be
+	// read as "nothing is owed", which is the mistake that costs an account.
+	// Cleanup is evaluation-only today and never removes anything.
+	HnRAllowCleanup *bool `json:"hnr_allow_cleanup,omitempty"`
 }
 
 // ValidateIndexerProxyURL returns nil if raw is empty or a valid http(s) proxy URL.
@@ -274,6 +280,22 @@ func (c *Config) EffectiveFailoverFastMode() bool {
 		return true
 	}
 	return c.FailoverFastMode
+}
+
+// DefaultHnRSafetyMarginPercent is how far past a tracker's stated requirement a
+// torrent must seed before its obligation is treated as provably met. Local
+// counters and the tracker's own accounting drift, so the margin absorbs that
+// difference rather than betting the account on them agreeing exactly.
+const DefaultHnRSafetyMarginPercent = 50
+
+// EffectiveHnRSafetyMarginPercent returns the configured margin, never below the
+// default — a smaller margin than the default is not accepted, since the whole
+// point is to stay clear of the boundary.
+func (c *Config) EffectiveHnRSafetyMarginPercent() int {
+	if c == nil || c.HnRSafetyMarginPercent < DefaultHnRSafetyMarginPercent {
+		return DefaultHnRSafetyMarginPercent
+	}
+	return c.HnRSafetyMarginPercent
 }
 
 // DefaultMinSeeders is the seeder count required of a torrent when the operator
@@ -528,6 +550,11 @@ type Config struct {
 	CerberusBaseURL string `json:"cerberus_base_url,omitempty"`
 	// CerberusAPIKey is the optional bearer token for the central Cerberus server.
 	CerberusAPIKey string `json:"cerberus_api_key,omitempty"`
+
+	// HnRSafetyMarginPercent is how far past a tracker's stated seed-time
+	// requirement a torrent must go before its obligation counts as provably met.
+	// Values below DefaultHnRSafetyMarginPercent are raised to it.
+	HnRSafetyMarginPercent int `json:"hnr_safety_margin_percent,omitempty"`
 
 	// MinSeeders is the minimum seeder count a torrent must have before
 	// SeedStream will offer or play it. A thin swarm downloads too slowly to
