@@ -99,6 +99,14 @@ func (s *Server) serveTorrent(w http.ResponseWriter, r *http.Request, sess *sess
 		return holdErr
 	}
 
+	// Size the head buffer by playback time rather than bytes when the upload
+	// guard has not already chosen one. A fixed byte count is far too small a
+	// cushion for a high-bitrate remux, which is why such releases start and then
+	// immediately rebuffer.
+	if bufferBytes <= 0 {
+		bufferBytes = s.playbackBufferBytes(sess, s.config.EffectiveTorrentBufferBytes())
+	}
+
 	// Cancel preparation when either the request ends or the session is
 	// closed (e.g. user closed it from the dashboard).
 	prepCtx, prepCancel := mergeSessionContext(r, sess)
