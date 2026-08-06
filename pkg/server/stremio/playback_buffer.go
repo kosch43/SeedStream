@@ -49,10 +49,13 @@ func (s *Server) playbackBufferBytes(sess *session.Session, configured int64) in
 	if want > maxPrebufferBytes {
 		want = maxPrebufferBytes
 	}
-	// Never buffer a large fraction of a small file — the whole thing would have
-	// to download before playback could start.
-	if half := sizeBytes / 2; want > half {
-		want = half
+	// A tenth of the file is minutes of video at any bitrate, so it is always
+	// enough headroom to start on. Runtime metadata is occasionally wrong, and
+	// this keeps a bad estimate from turning into a long wait — the resulting
+	// figure is a target for the continuous head, and once a tenth of the file
+	// is on disk from byte zero the stream plays.
+	if ceiling := int64(float64(sizeBytes) * torrent.StreamableHeadFraction); want > ceiling && ceiling > 0 {
+		want = ceiling
 	}
 	if configured <= 0 {
 		configured = torrent.DefaultBufferBytes

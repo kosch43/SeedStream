@@ -88,15 +88,15 @@ func headManager(t *testing.T, q *headQBit) *Manager {
 // answers the question that matters — is the head continuous?
 func TestPrepareRejectsFragmentedHead(t *testing.T) {
 	const pieceSize = 1 << 20
-	q := &headQBit{pieceSize: pieceSize, totalPieces: 16, downloaded: map[int]bool{}}
-	// 14 of 16 pieces on disk (87.5%), but pieces 2 and 3 are missing — so the
-	// continuous run from the start of the file is only 2 MiB.
-	for i := 0; i < 16; i++ {
-		q.downloaded[i] = i != 2 && i != 3
+	q := &headQBit{pieceSize: pieceSize, totalPieces: 160, downloaded: map[int]bool{}}
+	// 158 of 160 pieces on disk (98.75%), but pieces 8 and 9 are missing — so
+	// the continuous run from the start of the file is only 8 MiB.
+	for i := 0; i < 160; i++ {
+		q.downloaded[i] = i != 8 && i != 9
 	}
 
 	mgr := headManager(t, q)
-	_, err := mgr.PrepareForPlayback(context.Background(), prepareTestRelease(), 1, 1, 8<<20, 4*time.Second, nil)
+	_, err := mgr.PrepareForPlayback(context.Background(), prepareTestRelease(), 1, 1, 32<<20, 4*time.Second, nil)
 	if err == nil {
 		t.Fatal("a file with holes inside the head must not be reported ready for playback")
 	}
@@ -105,26 +105,50 @@ func TestPrepareRejectsFragmentedHead(t *testing.T) {
 	}
 }
 
-// TestPrepareAcceptsContiguousHead is the other half: the same amount of data,
-// arranged continuously from byte zero, must be served without waiting for the
-// rest of the torrent.
-func TestPrepareAcceptsContiguousHead(t *testing.T) {
+// TestPrepareStreamsAtTenPercent is the guarantee: a torrent whose first tenth
+// is downloaded, in order, plays. A tenth of a film is minutes of video, which
+// is more headroom than playback needs, so nothing further should be waited on
+// — not the rest of the file, and not a larger buffer some bitrate estimate
+// asked for.
+func TestPrepareStreamsAtTenPercent(t *testing.T) {
 	const pieceSize = 1 << 20
-	q := &headQBit{pieceSize: pieceSize, totalPieces: 16, downloaded: map[int]bool{}}
-	for i := 0; i < 8; i++ { // exactly the first 8 MiB, nothing else
+	q := &headQBit{pieceSize: pieceSize, totalPieces: 160, downloaded: map[int]bool{}}
+	for i := 0; i < 16; i++ { // exactly the first 10%, nothing else
 		q.downloaded[i] = true
 	}
 
 	mgr := headManager(t, q)
 	start := time.Now()
-	res, err := mgr.PrepareForPlayback(context.Background(), prepareTestRelease(), 1, 1, 8<<20, 20*time.Second, nil)
+	// Ask for far more head than a tenth: the ceiling must bring it back down.
+	res, err := mgr.PrepareForPlayback(context.Background(), prepareTestRelease(), 1, 1, 120<<20, 20*time.Second, nil)
 	if err != nil {
-		t.Fatalf("a continuous 8 MiB head is playable and should prepare: %v", err)
+		t.Fatalf("a torrent 10%% downloaded in order must stream: %v", err)
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Fatalf("prepare waited %v for a head that was already on disk", elapsed)
 	}
 	if res.Name != "Thing.S01E01.1080p.mkv" {
 		t.Fatalf("unexpected file %q", res.Name)
+	}
+}
+
+// TestRequiredHeadBytesCeiling pins the arithmetic behind that guarantee.
+func TestRequiredHeadBytesCeiling(t *testing.T) {
+	const gib = int64(1) << 30
+	cases := []struct {
+		name           string
+		want, size, in int64
+	}{
+		// A 51 GB remux: the 384 MB cap is well under a tenth, so it stands.
+		{"large file keeps its bitrate buffer", 384 << 20, 51 * gib, 384 << 20},
+		// A 700 MB episode asked for an implausible 300 MB head: capped at 70 MB.
+		{"small file is capped at a tenth", 70000000, 700000000, 300 << 20},
+		// Unknown size: nothing to compute a ceiling from, pass the ask through.
+		{"unknown size passes through", 16 << 20, 0, 16 << 20},
+	}
+	for _, tc := range cases {
+		if got := requiredHeadBytes(tc.in, tc.size); got != tc.want {
+			t.Errorf("%s: requiredHeadBytes(%d, %d) = %d, want %d", tc.name, tc.in, tc.size, got, tc.want)
+		}
 	}
 }

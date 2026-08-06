@@ -32,6 +32,33 @@ const DefaultBufferBytes int64 = 16 * 1024 * 1024
 // DefaultPrepareTimeout bounds how long PrepareForPlayback waits for the buffer.
 const DefaultPrepareTimeout = 90 * time.Second
 
+// StreamableHeadFraction is the ceiling on the head buffer, as a fraction of
+// the file. A tenth of a film is minutes of video — far more headroom than
+// playback needs — so once that much is on disk continuously from the start,
+// the stream plays, whatever a bitrate estimate asked for.
+//
+// It exists because every other input to the buffer size is an estimate:
+// runtime comes from metadata that is sometimes wrong, and bitrate is derived
+// from it. A bad estimate should be able to delay a stream by seconds, never
+// hold it back past the point where the answer is obviously yes.
+const StreamableHeadFraction = 0.10
+
+// requiredHeadBytes is how much continuous data must sit at the front of the
+// file before playback starts: the requested buffer, capped at a tenth of the
+// file, and never more than the file itself.
+func requiredHeadBytes(want, fileSize int64) int64 {
+	if fileSize <= 0 {
+		return want
+	}
+	if ceiling := int64(float64(fileSize) * StreamableHeadFraction); want > ceiling && ceiling > 0 {
+		want = ceiling
+	}
+	if want > fileSize {
+		want = fileSize
+	}
+	return want
+}
+
 // seedCheckGrace is how long a newly added torrent is given to find peers before
 // its swarm size is judged. Announcing to trackers and connecting to peers takes
 // a few seconds, so an immediate check would reject every torrent.
@@ -483,6 +510,17 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 		}
 	}
 
+	// Whatever route this torrent took into qBittorrent, make it download from
+	// the front. A torrent the client already held ignores the streaming flags
+	// on the add that "created" it, so without this a re-watch — or anything the
+	// user grabbed by hand — fills in rarest-first and never presents a
+	// continuous head, no matter how much of it is downloaded. Best-effort: a
+	// failure here costs ordering, not playback.
+	if err := c.EnsureStreamingOrder(ctx, info); err != nil {
+		logger.Debug("could not enable sequential download for streaming",
+			"hash", shortHash(info.Hash), "err", err)
+	}
+
 	deadline := time.Now().Add(timeout)
 	prioritySet := false
 	// Track why the loop is still waiting so a timeout reports the real reason
@@ -496,6 +534,9 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 	var avail *fileAvailability
 	warnedFragmented := false
 	fragmentedHead := false
+	// The head actually required, once the file size is known and the ceiling
+	// has been applied. Kept out here so a timeout reports the real target.
+	needHead := bufferBytes
 	// Swarm health: a freshly added torrent needs a moment to find peers, so the
 	// live seeder count is only judged after a grace period, and only when the
 	// download has also failed to advance — a small but fast swarm is fine.
@@ -553,21 +594,23 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 				if avail == nil && f.Size > 0 {
 					avail = newFileAvailability(c, info.Hash, f.Index, f.Size)
 				}
+				needHead = requiredHeadBytes(bufferBytes, f.Size)
 				headReady := false
 				if avail != nil {
-					headReady = avail.BytesAvailable(ctx, 0, bufferBytes)
+					headReady = avail.BytesAvailable(ctx, 0, needHead)
 				}
 				// Surface the divergence once: the old byte-count test passing
 				// while the head is fragmented is precisely the case that used to
 				// hand the player an unplayable file.
 				if !headReady && f.Size > 0 {
-					if done := int64(f.Progress * float64(f.Size)); done >= bufferBytes {
+					if done := int64(f.Progress * float64(f.Size)); done >= needHead {
 						fragmentedHead = true
 						if !warnedFragmented {
 							warnedFragmented = true
 							logger.Info("Playback: enough of this file is downloaded, but not at the start — waiting for a continuous head instead of starting into holes",
 								"hash", shortHash(info.Hash), "file", f.Index,
-								"progress", f.Progress, "need_head_bytes", bufferBytes)
+								"progress", f.Progress, "need_head_bytes", needHead,
+								"sequential", info.SequentialDL)
 						}
 					}
 				}
@@ -614,10 +657,10 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 				// is arriving fine, it is just not arriving at the front of the
 				// file, and the operator needs to know that to act on it.
 				return nil, fmt.Errorf("torrent has downloaded %.1f%% of the file but not the first %d bytes continuously after %s (pieces are arriving out of order)",
-					lastProgress*100, bufferBytes, timeout)
+					lastProgress*100, needHead, timeout)
 			}
 			return nil, fmt.Errorf("torrent still buffering after %s (file %.1f%% downloaded, need %d bytes of head)",
-				timeout, lastProgress*100, bufferBytes)
+				timeout, lastProgress*100, needHead)
 		}
 		select {
 		case <-ctx.Done():
