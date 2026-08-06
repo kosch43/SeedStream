@@ -42,9 +42,9 @@ export function CerberusPage() {
     setLoading(true)
     setError('')
     try {
-      const res = await apiFetch('/api/cerberus/status')
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      setData(await res.json())
+      // apiFetch returns the decoded body and throws on a non-2xx status, so
+      // there is no Response to inspect here.
+      setData(await apiFetch('/api/cerberus/status'))
     } catch (e) {
       setError(String(e.message || e))
     } finally {

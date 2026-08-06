@@ -52,15 +52,17 @@ func (s *Server) CerberusStatus(ctx context.Context) CerberusStatus {
 	if cer == nil {
 		return out
 	}
-	out.Enabled = true
 	if bl := cer.Blocklist(200); bl != nil {
 		out.Blocklist = bl
 	}
 	out.Summary.Blocked = len(out.Blocklist)
 
+	// Cerberus needs a torrent client to observe anything. Reporting enabled on
+	// the registry alone would leave a page of zeros with no explanation of why.
 	if mgr == nil || !mgr.Enabled() {
 		return out
 	}
+	out.Enabled = true
 	entries, err := mgr.ListAll(ctx)
 	if err != nil {
 		return out

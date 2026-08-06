@@ -24,9 +24,9 @@ export function TrackerDefinitionPicker({ onSelect, onCancel }) {
     setLoading(true)
     setError('')
     try {
-      const res = await apiFetch(`/api/trackers/definitions?q=${encodeURIComponent(q || '')}&limit=200`)
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const data = await res.json()
+      // apiFetch returns the decoded body and throws on a non-2xx status, so
+      // there is no Response to inspect here.
+      const data = (await apiFetch(`/api/trackers/definitions?q=${encodeURIComponent(q || '')}&limit=200`)) || {}
       setEntries(Array.isArray(data.definitions) ? data.definitions : [])
       setTotal(Number(data.total || 0))
       setDefinitionsDir(data.definitions_dir || '')
