@@ -490,6 +490,12 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 	var lastClientErr error
 	clientErrs := 0
 	lastProgress := -1.0
+	// Readiness is decided on the piece bitmap, not on a byte count. Created
+	// once the video file is known and reused across polls so its cached bitmap
+	// and complete-latch survive the loop.
+	var avail *fileAvailability
+	warnedFragmented := false
+	fragmentedHead := false
 	// Swarm health: a freshly added torrent needs a moment to find peers, so the
 	// live seeder count is only judged after a grace period, and only when the
 	// download has also failed to advance — a small but fast swarm is fine.
@@ -531,8 +537,41 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 						logger.Debug("torrent prepare: set file priority failed", "hash", info.Hash, "file", f.Index, "err", err)
 					}
 				}
-				done := int64(f.Progress * float64(f.Size))
-				if f.Progress >= 0.999 || done >= bufferBytes {
+				// A byte count cannot say where the bytes are. qBittorrent's
+				// sequential download is a preference, not a guarantee: pieces
+				// still arrive out of order from whichever peers have them, and
+				// first/last-piece priority deliberately pulls the tail in early.
+				// So the file can be 84% downloaded with only a handful of
+				// contiguous pieces at the front, and a head measured as
+				// "progress * size >= bufferBytes" is then mostly holes. Playback
+				// starts, drains the few real pieces, and stalls seconds in.
+				//
+				// Ask the piece bitmap instead: are the first bufferBytes of the
+				// file actually on disk, end to end? That is the same question the
+				// reader will ask on its first read, so answering it here means
+				// prepare returns only when playback can genuinely begin.
+				if avail == nil && f.Size > 0 {
+					avail = newFileAvailability(c, info.Hash, f.Index, f.Size)
+				}
+				headReady := false
+				if avail != nil {
+					headReady = avail.BytesAvailable(ctx, 0, bufferBytes)
+				}
+				// Surface the divergence once: the old byte-count test passing
+				// while the head is fragmented is precisely the case that used to
+				// hand the player an unplayable file.
+				if !headReady && f.Size > 0 {
+					if done := int64(f.Progress * float64(f.Size)); done >= bufferBytes {
+						fragmentedHead = true
+						if !warnedFragmented {
+							warnedFragmented = true
+							logger.Info("Playback: enough of this file is downloaded, but not at the start — waiting for a continuous head instead of starting into holes",
+								"hash", shortHash(info.Hash), "file", f.Index,
+								"progress", f.Progress, "need_head_bytes", bufferBytes)
+						}
+					}
+				}
+				if headReady {
 					abs := absFilePath(remotePath, c.SavePath(), info, f.Name)
 					return &PrepareResult{
 						AbsPath:    abs,
@@ -569,6 +608,13 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 			}
 			if lastProgress < 0 {
 				return nil, fmt.Errorf("torrent metadata not available after %s (no file list from client)", timeout)
+			}
+			if fragmentedHead {
+				// Reporting "still buffering" here would be misleading: the data
+				// is arriving fine, it is just not arriving at the front of the
+				// file, and the operator needs to know that to act on it.
+				return nil, fmt.Errorf("torrent has downloaded %.1f%% of the file but not the first %d bytes continuously after %s (pieces are arriving out of order)",
+					lastProgress*100, bufferBytes, timeout)
 			}
 			return nil, fmt.Errorf("torrent still buffering after %s (file %.1f%% downloaded, need %d bytes of head)",
 				timeout, lastProgress*100, bufferBytes)
