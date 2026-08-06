@@ -50,9 +50,14 @@ export function TrackerDefinitionPicker({ onSelect, onCancel }) {
   // cookies as plain text even though they must be masked.
   const isSecret = (setting) => setting.secret === true || setting.type === 'password'
 
+  // The definition's own address is the whole point of picking from the list, so
+  // it is filled in as a real value rather than shown as a placeholder. It stays
+  // editable, which is what keeps a tracker usable after it moves domain.
+  const definitionURL = (entry) => (entry?.links || []).find((l) => typeof l === 'string' && l.startsWith('http')) || ''
+
   const choose = (entry) => {
     setChosen(entry)
-    setUrlOverride('')
+    setUrlOverride(definitionURL(entry))
     const initial = {}
     for (const s of entry.settings || []) initial[s.name] = ''
     setValues(initial)
@@ -63,7 +68,9 @@ export function TrackerDefinitionPicker({ onSelect, onCancel }) {
       name: chosen.name,
       definition_id: chosen.id,
       definition_settings: values,
-      url: urlOverride.trim(),
+      // Falling back to the definition's address means clearing the field
+      // cannot silently produce a tracker with no URL.
+      url: urlOverride.trim() || definitionURL(chosen),
     })
   }
 
@@ -110,7 +117,7 @@ export function TrackerDefinitionPicker({ onSelect, onCancel }) {
             </Label>
             <Input
               className="h-9"
-              placeholder={(chosen.links && chosen.links[0]) || 'https://tracker.example.com'}
+              placeholder={definitionURL(chosen) || 'https://tracker.example.com'}
               value={urlOverride}
               onChange={(e) => setUrlOverride(e.target.value)}
               autoComplete="off"
