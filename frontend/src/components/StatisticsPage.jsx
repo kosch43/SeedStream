@@ -264,7 +264,7 @@ function IndexerDetailPanel({ row, allRows, winAvgMs }) {
                 label: 'Avg. response time',
                 value: row.avgResponseMs > 0 ? `${Math.round(row.avgResponseMs)} ms` : '—',
                 sub: delta != null ? `${delta > 0 ? '+' : delta < 0 ? '−' : ''}${Math.abs(delta)} ms vs avg` : null,
-                subColor: delta == null ? '' : delta > 0 ? 'text-red-500' : delta < 0 ? 'text-green-500' : 'text-muted-foreground',
+                subColor: delta == null ? '' : delta > 0 ? 'text-primary' : delta < 0 ? 'text-green-500' : 'text-muted-foreground',
               },
               { label: 'Searches', value: row.searches, sub: `${row.searchSharePct.toFixed(1)}% of total` },
               { label: 'Downloads', value: row.downloads, sub: `${row.downloadSharePct.toFixed(1)}% of total` },
@@ -553,7 +553,7 @@ export function StatisticsPage() {
                 if (row.avgResponseMs > 0 && winAvgMs > 0) {
                   const d = row.avgResponseMs - winAvgMs, abs = Math.round(Math.abs(d))
                   dText = abs === 0 ? '0 ms' : `${d > 0 ? '+' : '−'}${abs} ms`
-                  dClass = d > 0 ? 'text-red-500' : d < 0 ? 'text-green-500' : 'text-muted-foreground'
+                  dClass = d > 0 ? 'text-primary' : d < 0 ? 'text-green-500' : 'text-muted-foreground'
                 }
                 return (
                   <tr key={row.name} className="border-b border-border/40 hover:bg-muted/30 transition-colors">
