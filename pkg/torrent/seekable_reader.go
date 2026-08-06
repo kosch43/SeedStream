@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"time"
+
+	"seedstream/pkg/core/logger"
 )
 
 // seekPollInterval is how long a read waits before re-asking whether its bytes
@@ -33,14 +35,71 @@ type SeekableFileReader struct {
 	avail    *fileAvailability
 	fileSize int64
 	pos      int64
+
+	// playhead, when set, is updated as bytes are served so the rest of
+	// SeedStream can see where the viewer is. Nil is fine.
+	playhead     *Playhead
+	lastRunwayAt time.Time
+	// warnedRunway suppresses repeat warnings for one continuous shortfall, so
+	// a genuinely slow swarm produces one line rather than one per read.
+	warnedRunway bool
 }
 
-func newSeekableFileReader(f *os.File, avail *fileAvailability, fileSize int64) *SeekableFileReader {
+// runwayInterval is how often the contiguous run ahead of the playhead is
+// re-measured. Reads arrive every few tens of kilobytes; the runway changes on
+// the timescale of pieces, so measuring per read would be pure overhead.
+const runwayInterval = 2 * time.Second
+
+// lowRunwaySeconds is the point at which a stall is close enough to be worth
+// saying out loud. Below this the player is within a few seconds of catching
+// the download, which it will show as a freeze with no explanation.
+const lowRunwaySeconds = 10
+
+func newSeekableFileReader(f *os.File, avail *fileAvailability, fileSize int64, ph *Playhead) *SeekableFileReader {
 	return &SeekableFileReader{
 		f:        f,
 		avail:    avail,
 		fileSize: fileSize,
+		playhead: ph,
 	}
+}
+
+// Playhead returns the position tracker, or nil when this reader has none.
+func (r *SeekableFileReader) Playhead() *Playhead { return r.playhead }
+
+// trackRunway re-measures how much unbroken data sits between the playhead and
+// the first missing byte, on a timer so it costs nothing per read.
+func (r *SeekableFileReader) trackRunway() {
+	if r.playhead == nil || r.avail == nil {
+		return
+	}
+	if time.Since(r.lastRunwayAt) < runwayInterval {
+		return
+	}
+	r.lastRunwayAt = time.Now()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	end := r.avail.ContiguousEnd(ctx, r.pos)
+	r.playhead.noteFrontier(end)
+
+	pos := r.playhead.Position()
+	// Only meaningful once the runtime is known; without it there is no way to
+	// turn a byte count into "seconds before this stops".
+	if pos.RuntimeSeconds <= 0 || end >= r.fileSize {
+		r.warnedRunway = false
+		return
+	}
+	if pos.RunwaySeconds < lowRunwaySeconds {
+		if !r.warnedRunway {
+			r.warnedRunway = true
+			logger.Warn("Playback: the viewer is catching up with the download — a stall is likely",
+				"position_seconds", pos.PositionSeconds, "runway_seconds", pos.RunwaySeconds,
+				"runway_bytes", pos.RunwayBytes)
+		}
+		return
+	}
+	r.warnedRunway = false
 }
 
 // Read waits until the bytes at the current position are downloaded, then
@@ -75,6 +134,8 @@ func (r *SeekableFileReader) Read(p []byte) (int, error) {
 		n, err := r.f.ReadAt(p, r.pos)
 		if n > 0 {
 			r.pos += int64(n)
+			r.playhead.observeRead(r.pos)
+			r.trackRunway()
 			if err == io.EOF && r.pos < r.fileSize {
 				err = nil // more is coming; do not end the response here
 			}
@@ -110,11 +171,16 @@ func (r *SeekableFileReader) Seek(offset int64, whence int) (int64, error) {
 			return 0, err
 		}
 		r.pos = newPos
+		r.playhead.observeSeek(newPos)
 		return newPos, nil
 	}
 	newPos, err := r.f.Seek(offset, whence)
 	if err == nil {
 		r.pos = newPos
+		r.playhead.observeSeek(newPos)
+		// The runway ahead of the old position says nothing about the new one.
+		r.lastRunwayAt = time.Time{}
+		r.warnedRunway = false
 	}
 	return newPos, err
 }

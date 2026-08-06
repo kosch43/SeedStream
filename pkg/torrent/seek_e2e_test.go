@@ -57,7 +57,7 @@ func TestSeekIntoUnwrittenRegionBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	r := newSeekableFileReader(fh, avail, fileSize)
+	r := newSeekableFileReader(fh, avail, fileSize, nil)
 	defer r.Close()
 
 	// Read from piece 5 (downloaded): must succeed with real data.
@@ -112,7 +112,7 @@ func TestSeekBecomesReadableWhenPieceArrives(t *testing.T) {
 
 	avail := newFileAvailability(client, "dddddddddddddddddddddddddddddddddddddddd", 0, fileSize)
 	fh, _ := os.Open(path)
-	r := newSeekableFileReader(fh, avail, fileSize)
+	r := newSeekableFileReader(fh, avail, fileSize, nil)
 	defer r.Close()
 
 	r.Seek(8*pieceSize, 0)

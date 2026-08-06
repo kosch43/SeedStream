@@ -58,6 +58,51 @@ type Session struct {
 	selectedPlaybackFile string
 
 	bytesRead atomic.Int64
+
+	// position reports where the viewer currently is, supplied by whatever is
+	// serving the bytes. Held as a function rather than a value so the dashboard
+	// reads a live figure instead of whatever was last pushed, and so this
+	// package stays independent of how playback is implemented.
+	position atomic.Pointer[func() PlaybackPosition]
+}
+
+// PlaybackPosition is where the viewer is in the title and how much data lies
+// between them and the end of what has been downloaded.
+type PlaybackPosition struct {
+	ByteOffset      int64   `json:"byte_offset"`
+	FileSize        int64   `json:"file_size"`
+	Percent         float64 `json:"percent"`
+	PositionSeconds int64   `json:"position_seconds"`
+	RuntimeSeconds  int64   `json:"runtime_seconds"`
+	RunwayBytes     int64   `json:"runway_bytes"`
+	RunwaySeconds   int64   `json:"runway_seconds"`
+	Seeks           int64   `json:"seeks"`
+}
+
+// SetPositionSource registers where to read the live playback position from.
+// Called when a stream starts serving; passing nil clears it.
+func (s *Session) SetPositionSource(fn func() PlaybackPosition) {
+	if s == nil {
+		return
+	}
+	if fn == nil {
+		s.position.Store(nil)
+		return
+	}
+	s.position.Store(&fn)
+}
+
+// Position returns the live playback position, and false when nothing is
+// currently serving this session.
+func (s *Session) Position() (PlaybackPosition, bool) {
+	if s == nil {
+		return PlaybackPosition{}, false
+	}
+	fn := s.position.Load()
+	if fn == nil {
+		return PlaybackPosition{}, false
+	}
+	return (*fn)(), true
 }
 
 // Done returns a channel that is closed when the session is closed (e.g. user
@@ -489,6 +534,8 @@ type ActiveSessionInfo struct {
 	Title     string   `json:"title"`
 	Clients   []string `json:"clients"`
 	StartTime string   `json:"start_time"`
+	// Position is nil when nothing is currently serving bytes for this session.
+	Position *PlaybackPosition `json:"position,omitempty"`
 }
 
 func (m *Manager) GetActiveSessions() []ActiveSessionInfo {
@@ -518,12 +565,16 @@ func (m *Manager) GetActiveSessions() []ActiveSessionInfo {
 			if s.Release != nil && s.Release.Title != "" {
 				title = s.Release.Title
 			}
-			result = append(result, ActiveSessionInfo{
+			info := ActiveSessionInfo{
 				ID:        s.ID,
 				Title:     title,
 				Clients:   clients,
 				StartTime: s.CreatedAt.Format(time.Kitchen),
-			})
+			}
+			if pos, ok := s.Position(); ok {
+				info.Position = &pos
+			}
+			result = append(result, info)
 		}
 		s.mu.Unlock()
 	}

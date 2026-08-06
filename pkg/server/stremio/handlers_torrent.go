@@ -154,7 +154,27 @@ func (s *Server) serveTorrent(w http.ResponseWriter, r *http.Request, sess *sess
 		}
 	}
 
-	f, err := s.torrentManager.OpenForPlayback(res)
+	// Track where in the title the viewer is, so the position is a fact
+	// SeedStream holds rather than something inferred from the download. The
+	// runtime turns a byte offset into a timeline position; without it the
+	// offset is still exact, only the seconds are unavailable.
+	playhead := torrent.NewPlayhead(res.Size, s.resolveRuntimeSeconds(sess))
+	sess.SetPositionSource(func() session.PlaybackPosition {
+		p := playhead.Position()
+		return session.PlaybackPosition{
+			ByteOffset:      p.ByteOffset,
+			FileSize:        p.FileSize,
+			Percent:         p.Percent,
+			PositionSeconds: p.PositionSeconds,
+			RuntimeSeconds:  p.RuntimeSeconds,
+			RunwayBytes:     p.RunwayBytes,
+			RunwaySeconds:   p.RunwaySeconds,
+			Seeks:           p.Seeks,
+		}
+	})
+	defer sess.SetPositionSource(nil)
+
+	f, err := s.torrentManager.OpenForPlayback(res, playhead)
 	if err != nil {
 		logger.Error("Torrent file not readable", "session", sess.ID, "path", res.AbsPath, "err", err)
 		return fmt.Errorf("torrent file not readable by SeedStream (check that the qBittorrent save path is mounted and readable): %w", err)

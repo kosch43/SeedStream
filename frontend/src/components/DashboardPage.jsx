@@ -30,6 +30,66 @@ function formatDownloadedMb(mb) {
   return { value: n.toFixed(1), unit: 'MB' }
 }
 
+// formatClock renders seconds as h:mm:ss, or m:ss under an hour.
+function formatClock(totalSeconds) {
+  const s = Math.max(0, Math.floor(Number(totalSeconds) || 0))
+  const hours = Math.floor(s / 3600)
+  const minutes = Math.floor((s % 3600) / 60)
+  const seconds = s % 60
+  const pad = (n) => String(n).padStart(2, '0')
+  return hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${minutes}:${pad(seconds)}`
+}
+
+// formatRunway describes how long the stream could keep playing if the download
+// stopped now. Rounded to the unit a viewer would care about — the difference
+// between 4 and 6 seconds matters, the difference between 11 and 13 minutes
+// does not.
+function formatRunway(seconds) {
+  const s = Math.max(0, Math.floor(Number(seconds) || 0))
+  if (s < 60) return `${s}s`
+  if (s < 3600) return `${Math.floor(s / 60)}m`
+  return `${(s / 3600).toFixed(1)}h`
+}
+
+// StreamPosition shows where the viewer is in the title and how much downloaded
+// video sits in front of them.
+//
+// The runway is the number that predicts a stall: overall download progress can
+// climb steadily while the run ahead of the playhead does not move, and that
+// gap is exactly what a viewer experiences as a freeze. Showing it means a
+// struggling stream is visible here before it is visible on their screen.
+function StreamPosition({ position }) {
+  const hasTimeline = position.runtime_seconds > 0
+  const percent = Math.min(100, Math.max(0, Number(position.percent) || 0))
+  const runway = Number(position.runway_seconds) || 0
+  // Under ten seconds the player is within moments of catching the download.
+  const low = hasTimeline && position.runway_bytes > 0 && runway < 10
+  const stalled = position.runway_bytes <= 0
+
+  return (
+    <div className="mt-2 space-y-1">
+      <div className="h-1 w-full overflow-hidden rounded-full bg-muted">
+        <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${percent}%` }} />
+      </div>
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground tabular-nums">
+        <span>
+          {hasTimeline
+            ? `${formatClock(position.position_seconds)} / ${formatClock(position.runtime_seconds)}`
+            : `${percent.toFixed(1)}%`}
+        </span>
+        <span aria-hidden="true">·</span>
+        {stalled ? (
+          <span className="text-destructive">waiting for data</span>
+        ) : (
+          <span className={cn(low && "text-destructive")}>
+            {hasTimeline ? `${formatRunway(runway)} downloaded ahead` : 'buffered ahead'}
+          </span>
+        )}
+      </div>
+    </div>
+  )
+}
+
 export function DashboardPage({ stats, chartData, sendCommand, config }) {
   const [activeSessionToClose, setActiveSessionToClose] = useState(null)
 
@@ -231,6 +291,7 @@ export function DashboardPage({ stats, chartData, sendCommand, config }) {
                         {sess.title}
                       </div>
                       <div className="text-xs text-muted-foreground truncate min-w-0">{sess.clients.join(', ')}</div>
+                      {sess.position && <StreamPosition position={sess.position} />}
                     </CardContent>
                     <Button
                       variant="ghost"
