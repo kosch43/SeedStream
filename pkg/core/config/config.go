@@ -265,13 +265,21 @@ func (c *Config) EffectiveFailoverFastMode() bool {
 	return c.FailoverFastMode
 }
 
-// EffectiveMinSeeders returns the configured minimum seeder count, or 0 when
-// the filter is disabled.
+// DefaultMinSeeders is the seeder count required of a torrent when the operator
+// has not chosen one. Ten is enough of a swarm to sustain a download faster than
+// playback consumes it, which is what keeps a stream from stalling.
+const DefaultMinSeeders = 10
+
+// EffectiveMinSeeders returns the minimum seeder count to enforce. Unset means
+// DefaultMinSeeders; an explicit 0 (or a negative value) disables the check.
 func (c *Config) EffectiveMinSeeders() int {
-	if c == nil || c.MinSeeders < 0 {
+	if c == nil || c.MinSeeders == nil {
+		return DefaultMinSeeders
+	}
+	if *c.MinSeeders < 0 {
 		return 0
 	}
-	return c.MinSeeders
+	return *c.MinSeeders
 }
 
 // DefaultPostCapUploadMbps is the assumed post-cap throttle speed when a monthly
@@ -510,12 +518,16 @@ type Config struct {
 	// CerberusAPIKey is the optional bearer token for the central Cerberus server.
 	CerberusAPIKey string `json:"cerberus_api_key,omitempty"`
 
-	// MinSeeders drops torrent releases whose tracker-reported seeder count is
-	// below this before they are offered for playback, so a swarm too thin to
-	// stream is never picked. Only applied to releases whose indexer actually
-	// publishes a seeder count — a tracker that omits it is never filtered.
-	// 0 (the default) disables the filter; dead swarms are still sorted last.
-	MinSeeders int `json:"min_seeders,omitempty"`
+	// MinSeeders is the minimum seeder count a torrent must have before
+	// SeedStream will offer or play it. A thin swarm downloads too slowly to
+	// stream, which is what produces a stall or constant buffering, so such
+	// torrents are kept out of the stream list, refused at play time, and
+	// treated as stalled sooner by the watchdog.
+	//
+	// It is only applied where a seeder count is actually known: a tracker that
+	// does not publish one is never filtered on it. nil means the default
+	// (DefaultMinSeeders); 0 disables the check entirely.
+	MinSeeders *int `json:"min_seeders,omitempty"`
 
 	// MonthlyUploadCapGB is the seedbox's monthly upload allowance in gigabytes
 	// (decimal, matching how providers quote "2 TB" as 2000 GB). When > 0 the

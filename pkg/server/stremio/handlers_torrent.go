@@ -79,6 +79,16 @@ func (s *Server) serveTorrent(w http.ResponseWriter, r *http.Request, sess *sess
 		return fmt.Errorf("release does not match the requested content: %w", err)
 	}
 
+	// Refuse a swarm too thin to keep ahead of playback. Doing this before the
+	// torrent is handed to qBittorrent converts a guaranteed stall into an
+	// immediate failover to a better-seeded release.
+	if err := releaseHasEnoughSeeders(sess.Release, s.config.EffectiveMinSeeders()); err != nil {
+		logger.Info("Rejecting under-seeded release before playback",
+			"session", sess.ID, "release", sess.Release.Title,
+			"min_seeders", s.config.EffectiveMinSeeders(), "reason", err)
+		return fmt.Errorf("release does not have enough seeders: %w", err)
+	}
+
 	// Monthly upload guard: once the seedbox's allowance is spent the provider
 	// throttles upload, so hold titles too heavy to stream within that throttle
 	// (returning the disclaimer to the viewer) and give the rest a bigger head

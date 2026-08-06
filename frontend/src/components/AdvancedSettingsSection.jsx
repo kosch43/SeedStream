@@ -14,9 +14,9 @@ import { cn } from "@/lib/utils"
 const CARD_FIELDS = {
   admin: ['log_level', 'keep_log_files'],
   memory: ['memory_limit_mb'],
-  playback: ['playback_startup_timeout_seconds', 'min_seeders', 'failover_fast_mode', 'session_ttl_minutes', 'session_post_playback_ttl_minutes'],
+  playback: ['playback_startup_timeout_seconds', 'failover_fast_mode', 'session_ttl_minutes', 'session_post_playback_ttl_minutes'],
   metadata: ['tmdb_api_key', 'tvdb_api_key'],
-  cerberus: ['cerberus_base_url', 'cerberus_api_key'],
+  cerberus: ['min_seeders', 'cerberus_base_url', 'cerberus_api_key'],
   uploadGuard: ['monthly_upload_cap_gb', 'post_cap_upload_mbps', 'upload_cap_reset_day'],
 }
 
@@ -34,7 +34,7 @@ function pickInitialValues(values = {}) {
     log_level: values.log_level ?? 'INFO',
     keep_log_files: Number(values.keep_log_files ?? 9) || 9,
     memory_limit_mb: Number(values.memory_limit_mb ?? 512),
-    min_seeders: Number(values.min_seeders ?? 0) || 0,
+    min_seeders: values.min_seeders == null ? 10 : Number(values.min_seeders),
     playback_startup_timeout_seconds: Number.isFinite(parsedPlaybackStartupTimeout) ? parsedPlaybackStartupTimeout : 5,
     session_ttl_minutes: Number.isFinite(parsedSessionTtl) ? parsedSessionTtl : 30,
     session_post_playback_ttl_minutes: Number.isFinite(parsedSessionPostPlaybackTtl) ? parsedSessionPostPlaybackTtl : 240,
@@ -262,17 +262,6 @@ export const AdvancedSettingsSection = forwardRef(function AdvancedSettingsSecti
                       <FormMessage />
                     </FormItem>
                   )} />
-                  <FormField control={control} name="min_seeders" render={({ field }) => (
-                    <FormItem className="relative rounded-none border-0 p-3">
-                      <div className="absolute left-3 right-3 top-0 border-t border-border/60" />
-                      <div className={stackedFieldRowClass}>
-                        <FormLabel className={cn(labelClass, 'sm:flex-1')}>Minimum seeders</FormLabel>
-                        <FormControl><Input type="number" min={0} className={fieldClassName('min_seeders', `h-9 ${controlMediumClass}`)} {...field} value={field.value ?? ''} onChange={e => { const v = e.target.value; field.onChange(v === '' ? 0 : Math.max(0, Number(v) || 0)) }} /></FormControl>
-                      </div>
-                      <FormDescription className="mt-3">Hide torrents with fewer seeders than this, so a swarm too thin to stream is never picked. Only applies to trackers that report a seeder count, and is ignored if it would leave no results at all. 0 disables the filter — torrents with a reported zero seeders are still sorted last either way.</FormDescription>
-                      <FormMessage />
-                    </FormItem>
-                  )} />
                   <FormField control={control} name="failover_fast_mode" render={({ field }) => (
                     <FormItem className="relative rounded-none border-0 p-3">
                       <div className="absolute left-3 right-3 top-0 border-t border-border/60" />
@@ -448,8 +437,21 @@ export const AdvancedSettingsSection = forwardRef(function AdvancedSettingsSecti
           </CardHeader>
           <CardContent>
             <div className="rounded-md border border-border/60">
-              <FormField control={control} name="cerberus_base_url" render={({ field }) => (
+              <FormField control={control} name="min_seeders" render={({ field }) => (
                 <FormItem className="rounded-none border-0 p-3">
+                  <div className={stackedFieldRowClass}>
+                    <FormLabel className={cn(labelClass, 'sm:flex-1')}>Minimum seeders to play</FormLabel>
+                    <FormControl><Input type="number" min={0} className={fieldClassName('min_seeders', `h-9 ${controlMediumClass}`)} {...field} value={field.value ?? ''} onChange={e => { const v = e.target.value; field.onChange(v === '' ? 10 : Math.max(0, Number(v) || 0)) }} /></FormControl>
+                  </div>
+                  <FormDescription className="mt-3">
+                    A torrent needs at least this many seeders before SeedStream will offer or play it — a thinner swarm downloads slower than playback consumes it, which is what causes stalling and buffering. Enforced in three places: under-seeded releases are hidden from the stream list, refused at play time so failover picks a healthier one, and the watchdog acts on an under-seeded torrent at half the usual stall threshold. Only applies to trackers that report a seeder count, and it will never empty your stream list. Default 10; set to 0 to disable.
+                  </FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )} />
+              <FormField control={control} name="cerberus_base_url" render={({ field }) => (
+                <FormItem className="relative rounded-none border-0 p-3">
+                  <div className="absolute left-3 right-3 top-0 border-t border-border/60" />
                   <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:gap-4">
                     <FormLabel className="min-w-0 text-sm font-medium xl:flex-1 flex items-center gap-1.5">Central server URL <EnvOverrideIndicator show={envOverrides.includes('cerberus_base_url')} /></FormLabel>
                     <FormControl><div className="w-full xl:max-w-3xl"><Input className={fieldClassName('cerberus_base_url', 'h-9 w-full font-mono text-xs')} {...field} value={field.value || ''} placeholder="https://cerberus.example.com" autoComplete="off" /></div></FormControl>

@@ -273,7 +273,7 @@ export function useSettingsState({
       const postPlaybackTtl = Number(trimmedFullData.session_post_playback_ttl_minutes)
       trimmedFullData.session_post_playback_ttl_minutes = Math.min(1440, Math.max(1, Number.isNaN(postPlaybackTtl) ? 240 : postPlaybackTtl))
       const minSeeders = Number(trimmedFullData.min_seeders)
-      trimmedFullData.min_seeders = Math.max(0, Number.isNaN(minSeeders) ? 0 : minSeeders)
+      trimmedFullData.min_seeders = Math.max(0, Number.isNaN(minSeeders) ? 10 : minSeeders)
       const monthlyUploadCap = Number(trimmedFullData.monthly_upload_cap_gb)
       trimmedFullData.monthly_upload_cap_gb = Math.max(0, Number.isNaN(monthlyUploadCap) ? 0 : monthlyUploadCap)
       const postCapMbps = Number(trimmedFullData.post_cap_upload_mbps)

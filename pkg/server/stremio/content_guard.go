@@ -39,3 +39,27 @@ func releaseMatchesRequest(rel *release.Release, season, episode int) error {
 	}
 	return nil
 }
+
+// releaseHasEnoughSeeders reports why a release's swarm is too thin to stream,
+// or nil when it is healthy enough.
+//
+// A torrent with only a handful of seeders downloads slower than playback
+// consumes it, so it either never finishes buffering or stalls partway through.
+// Refusing it here — before it is handed to qBittorrent — turns a guaranteed
+// buffering session into an immediate failover to a better-seeded release.
+//
+// Only a count the tracker actually published is judged. Indexers that omit the
+// seeders attribute report 0 indistinguishably from a genuinely dead swarm, so
+// those releases pass through rather than being wrongly rejected.
+func releaseHasEnoughSeeders(rel *release.Release, minSeeders int) error {
+	if minSeeders <= 0 || rel == nil || !rel.IsTorrent() {
+		return nil
+	}
+	if !rel.SeedersKnown {
+		return nil
+	}
+	if rel.Seeders < minSeeders {
+		return fmt.Errorf("only %d seeder(s), need at least %d to stream without stalling", rel.Seeders, minSeeders)
+	}
+	return nil
+}

@@ -12,7 +12,7 @@ func seedRel(title string, seeders int, known bool) *release.Release {
 }
 
 func seederFilterServer(min int) *Server {
-	return &Server{config: &config.Config{MinSeeders: min}}
+	return &Server{config: &config.Config{MinSeeders: &min}}
 }
 
 // TestSeederFilterDisabledByDefault: with no minimum configured nothing is
