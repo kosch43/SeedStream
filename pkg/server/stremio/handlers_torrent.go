@@ -100,11 +100,14 @@ func (s *Server) serveTorrent(w http.ResponseWriter, r *http.Request, sess *sess
 	}
 
 	// Size the head buffer by playback time rather than bytes when the upload
-	// guard has not already chosen one. A fixed byte count is far too small a
-	// cushion for a high-bitrate remux, which is why such releases start and then
-	// immediately rebuffer.
+	// guard has not already chosen one. A fixed byte count is the wrong cushion
+	// in both directions: far too small for a high-bitrate remux, which starts
+	// and immediately rebuffers, and needlessly large for an ordinary 1080p
+	// release, which then waits on data it was never going to need. The raw
+	// setting is passed, not the effective one, so the built-in default does not
+	// act as a floor the scaling cannot go below.
 	if bufferBytes <= 0 {
-		bufferBytes = s.playbackBufferBytes(sess, s.config.EffectiveTorrentBufferBytes())
+		bufferBytes = s.playbackBufferBytes(sess, s.config.TorrentBufferBytes)
 	}
 
 	// Cancel preparation when either the request ends or the session is
