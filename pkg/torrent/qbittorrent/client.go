@@ -211,9 +211,19 @@ type TorrentInfo struct {
 	Downloaded   int64   `json:"downloaded"`
 	DlSpeed      int64   `json:"dlspeed"`
 	UpSpeed      int64   `json:"upspeed"`
-	NumSeeds     int     `json:"num_seeds"`
-	NumLeechs    int     `json:"num_leechs"`
-	PieceSize    int64   `json:"piece_size"`
+	// NumSeeds is how many seeds this client is CONNECTED to; NumComplete is how
+	// many exist in the swarm, from the tracker's own scrape. They answer
+	// different questions: a healthy torrent routinely shows 4 connected out of
+	// 60 in the swarm, because BitTorrent connects to a subset. Judging swarm
+	// health on the connected count alone therefore condemns healthy torrents.
+	//
+	// NumComplete is a pointer so that a server which does not send the field at
+	// all is distinguishable from one reporting zero seeders. Decoded into an
+	// int it would read as a dead swarm and reject everything.
+	NumSeeds    int   `json:"num_seeds"`
+	NumComplete *int  `json:"num_complete"`
+	NumLeechs   int   `json:"num_leechs"`
+	PieceSize   int64 `json:"piece_size"`
 	// SequentialDL and FirstLastPiecePrio report the streaming flags. They are
 	// only honoured on the torrent that an add actually created: adding a
 	// magnet qBittorrent already holds is a no-op, so the flags in that request
@@ -221,6 +231,24 @@ type TorrentInfo struct {
 	// them back is the only way to find out.
 	SequentialDL       bool `json:"seq_dl"`
 	FirstLastPiecePrio bool `json:"f_l_piece_prio"`
+}
+
+// SwarmSeeders returns how many seeders the tracker says the swarm holds, and
+// whether that is actually known.
+//
+// This is the number to judge a swarm on. The indexer's count comes from a
+// scrape that may be hours old and is whatever the tracker chose to publish;
+// this one is qBittorrent's own current scrape of the same tracker. Where the
+// two disagree, this is the one that reflects the swarm being downloaded from.
+//
+// Reports false before the first scrape completes (qBittorrent sends -1), and
+// on a server that omits the field entirely, so an unknown swarm is never
+// mistaken for an empty one.
+func (t *TorrentInfo) SwarmSeeders() (int, bool) {
+	if t == nil || t.NumComplete == nil || *t.NumComplete < 0 {
+		return 0, false
+	}
+	return *t.NumComplete, true
 }
 
 // Get returns the torrent with the given info hash, or nil if not present.

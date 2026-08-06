@@ -136,10 +136,15 @@ type TorrentHealthEntry struct {
 	Progress     float64
 	LastActivity time.Time
 	AddedAt      time.Time
-	// NumSeeds is the live swarm size qBittorrent is connected to. The watchdog
-	// uses it to spot a torrent that is too thinly seeded to finish, which
-	// otherwise looks identical to one that is merely slow.
-	NumSeeds int
+	// NumSeeds is how many seeds this client is CONNECTED to. SwarmSeeds is how
+	// many the tracker says exist, with SwarmKnown false until it has been
+	// scraped. The watchdog judges swarm health on SwarmSeeds where it can:
+	// connecting to 4 seeds out of 60 is ordinary BitTorrent behaviour, so
+	// treating the connected count as the swarm size condemns healthy torrents
+	// and replaces them with worse ones.
+	NumSeeds   int
+	SwarmSeeds int
+	SwarmKnown bool
 	// CompletedAt is when the download finished, which is when most trackers
 	// start counting a seeding obligation. Zero while still downloading.
 	CompletedAt time.Time
@@ -160,6 +165,7 @@ func (m *Manager) ListAll(ctx context.Context) ([]TorrentHealthEntry, error) {
 			continue
 		}
 		for _, t := range list {
+			swarm, swarmKnown := t.SwarmSeeders()
 			out = append(out, TorrentHealthEntry{
 				ClientName:   e.cfg.Name,
 				Hash:         t.Hash,
@@ -169,6 +175,8 @@ func (m *Manager) ListAll(ctx context.Context) ([]TorrentHealthEntry, error) {
 				LastActivity: time.Unix(t.LastActivity, 0),
 				AddedAt:      time.Unix(t.AddedOn, 0),
 				NumSeeds:     t.NumSeeds,
+				SwarmSeeds:   swarm,
+				SwarmKnown:   swarmKnown,
 				CompletedAt:  time.Unix(t.CompletionOn, 0),
 				SeedingHours: float64(t.SeedingTime) / 3600,
 				Ratio:        t.Ratio,
@@ -632,20 +640,42 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 				}
 			}
 		}
-		// Abandon a torrent whose swarm is too thin to ever finish buffering.
-		// Waiting out the full timeout on a dead swarm is what makes playback
-		// look like it hangs; failing here lets the caller fail over at once.
-		if m.MinSeeders > 0 && lastProgress >= 0 && time.Since(started) > seedCheckGrace {
-			if graceProgress < 0 {
-				graceProgress = lastProgress
-			} else if info2, err := c.Get(ctx, info.Hash); err == nil && info2 != nil {
-				if info2.NumSeeds < m.MinSeeders && lastProgress <= graceProgress {
-					return nil, fmt.Errorf("swarm too small to stream: %d seeder(s), need %d, and the download is not advancing (%.1f%%)",
-						info2.NumSeeds, m.MinSeeders, lastProgress*100)
-				}
-				// Progress moved, so the swarm is good enough regardless of size.
-				if lastProgress > graceProgress {
+		// Abandon a torrent whose swarm is below the configured minimum, or too
+		// thin to ever finish buffering. Waiting out the full timeout on a dead
+		// swarm is what makes playback look like it hangs; failing here lets the
+		// caller fail over at once.
+		//
+		// The grace period matters: a freshly added torrent has not announced to
+		// its tracker yet, so it reports no swarm at all for the first few
+		// seconds. Judging it immediately would reject everything.
+		if m.MinSeeders > 0 && lastProgress >= 0 && lastProgress < 0.999 && time.Since(started) > seedCheckGrace {
+			if info2, err := c.Get(ctx, info.Hash); err == nil && info2 != nil {
+				// The tracker's own live count, when it has been scraped, is the
+				// authority — and it is the same quantity the operator's setting
+				// is expressed in. It is checked on its own merits: a swarm below
+				// the minimum is refused whether or not bytes happen to be
+				// arriving, because the setting is a floor on swarm health, not a
+				// diagnosis of a stall.
+				if swarm, known := info2.SwarmSeeders(); known {
+					if swarm < m.MinSeeders {
+						return nil, fmt.Errorf("swarm has %d seeder(s), below the %d required to stream",
+							swarm, m.MinSeeders)
+					}
+				} else if graceProgress < 0 {
 					graceProgress = lastProgress
+				} else {
+					// No tracker scrape to go on. Only the connected-seed count is
+					// left, and it under-reports by design — BitTorrent connects
+					// to a subset of the swarm — so it is trusted only when the
+					// download has also failed to advance, which together do mean
+					// this is going nowhere.
+					if info2.NumSeeds < m.MinSeeders && lastProgress <= graceProgress {
+						return nil, fmt.Errorf("swarm too small to stream: %d connected seeder(s), need %d, and the download is not advancing (%.1f%%)",
+							info2.NumSeeds, m.MinSeeders, lastProgress*100)
+					}
+					if lastProgress > graceProgress {
+						graceProgress = lastProgress
+					}
 				}
 			}
 		}

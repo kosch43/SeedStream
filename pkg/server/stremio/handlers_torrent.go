@@ -79,16 +79,6 @@ func (s *Server) serveTorrent(w http.ResponseWriter, r *http.Request, sess *sess
 		return fmt.Errorf("release does not match the requested content: %w", err)
 	}
 
-	// Refuse a swarm too thin to keep ahead of playback. Doing this before the
-	// torrent is handed to qBittorrent converts a guaranteed stall into an
-	// immediate failover to a better-seeded release.
-	if err := releaseHasEnoughSeeders(sess.Release, s.config.EffectiveMinSeeders()); err != nil {
-		logger.Info("Rejecting under-seeded release before playback",
-			"session", sess.ID, "release", sess.Release.Title,
-			"min_seeders", s.config.EffectiveMinSeeders(), "reason", err)
-		return fmt.Errorf("release does not have enough seeders: %w", err)
-	}
-
 	// Monthly upload guard: once the seedbox's allowance is spent the provider
 	// throttles upload, so hold titles too heavy to stream within that throttle
 	// (returning the disclaimer to the viewer) and give the rest a bigger head
@@ -122,6 +112,22 @@ func (s *Server) serveTorrent(w http.ResponseWriter, r *http.Request, sess *sess
 	playHash := infoHash
 	if playRelease != sess.Release {
 		playHash = playRelease.InfoHash
+	}
+
+	// Refuse a swarm too thin to keep ahead of playback, converting a guaranteed
+	// stall into an immediate failover to a better-seeded release.
+	//
+	// Checked here rather than earlier so it covers the release actually being
+	// played: replaying from a torrent the seedbox already holds substitutes a
+	// different release, which used to slip past a check made on the viewer's
+	// original choice. The reported count is only a pre-filter — the tracker's
+	// live scrape decides during prepare — but rejecting here saves the whole
+	// add-and-buffer wait.
+	if err := s.releasePassesSeederFloor(prepCtx, playRelease, playHash); err != nil {
+		logger.Info("Rejecting under-seeded release before playback",
+			"session", sess.ID, "release", playRelease.Title,
+			"min_seeders", s.config.EffectiveMinSeeders(), "reason", err)
+		return fmt.Errorf("release does not have enough seeders: %w", err)
 	}
 
 	res, err := s.torrentManager.PrepareForPlayback(prepCtx, playRelease, season, episode, bufferBytes, prepareTimeout, nil)

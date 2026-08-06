@@ -52,13 +52,17 @@ func TestSeederFilterIgnoresUnreportedCounts(t *testing.T) {
 	}
 }
 
-// TestSeederFilterKeepsListWhenEverythingWouldGo: filtering to nothing would
-// leave the viewer with an empty stream list, which is worse than offering the
-// best of a bad set.
-func TestSeederFilterKeepsListWhenEverythingWouldGo(t *testing.T) {
+// TestSeederFilterOffersNothingRatherThanAnUnplayableList: when no release meets
+// the minimum, none are offered.
+//
+// Keeping them as a last resort listed streams that the play-time guard rejects
+// on the very same seeder count, so the viewer chose one and got an error. An
+// empty list is the honest answer, and it reads as "nothing available" rather
+// than as a broken addon.
+func TestSeederFilterOffersNothingRatherThanAnUnplayableList(t *testing.T) {
 	s := seederFilterServer(100)
 	in := []*release.Release{seedRel("a", 1, true), seedRel("b", 2, true)}
-	if got := s.filterLowSeeders("test", in); len(got) != 2 {
-		t.Fatalf("must not remove every candidate, got %d of 2", len(got))
+	if got := s.filterLowSeeders("test", in); len(got) != 0 {
+		t.Fatalf("no release meets the minimum, so none should be offered, got %d", len(got))
 	}
 }

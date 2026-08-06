@@ -148,7 +148,7 @@ func TestContiguousEndStopsAtTheFirstHole(t *testing.T) {
 	const pieceSize = 1 << 20
 	q := &pieceQBit{
 		pieceSize: pieceSize, totalPieces: 32, downloadedPieces: 10,
-		lastPieceDone: true, // a downloaded tail, far beyond the hole at piece 10
+		lastPieceDone:  true, // a downloaded tail, far beyond the hole at piece 10
 		supportsPieces: true, fileSize: 32 * pieceSize,
 	}
 	a := newAvail(t, q)

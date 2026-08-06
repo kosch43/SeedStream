@@ -382,7 +382,16 @@ func isUnderSeeded(e TorrentHealthEntry, minSeeders int, threshold time.Duration
 	if time.Since(e.AddedAt) < seedCheckGrace {
 		return false
 	}
-	if e.NumSeeds >= minSeeders {
+	// The tracker's count is the one the operator's setting is expressed in.
+	// Falling back to the connected count is unavoidable before the first
+	// scrape, but it under-reports — BitTorrent connects to a subset of the
+	// swarm — so on its own it would condemn healthy torrents and replace them
+	// with worse ones.
+	if e.SwarmKnown {
+		if e.SwarmSeeds >= minSeeders {
+			return false
+		}
+	} else if e.NumSeeds >= minSeeders {
 		return false
 	}
 	if e.LastActivity.Unix() <= 0 {

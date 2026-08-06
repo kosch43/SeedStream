@@ -1,6 +1,7 @@
 package stremio
 
 import (
+	"context"
 	"fmt"
 
 	"seedstream/pkg/release"
@@ -62,4 +63,29 @@ func releaseHasEnoughSeeders(rel *release.Release, minSeeders int) error {
 		return fmt.Errorf("only %d seeder(s), need at least %d to stream without stalling", rel.Seeders, minSeeders)
 	}
 	return nil
+}
+
+// releasePassesSeederFloor applies the seeder minimum to the release about to be
+// played, with one exemption: a torrent the seedbox has already downloaded in
+// full.
+//
+// A completed torrent is read from local disk. Its swarm could be empty and
+// playback would be unaffected — there is nobody to download from because there
+// is nothing left to download. Refusing it on a tracker's seeder count would
+// reject the fastest and most reliable copy available, which is the opposite of
+// what the setting is for.
+func (s *Server) releasePassesSeederFloor(ctx context.Context, rel *release.Release, hash string) error {
+	minSeeders := s.config.EffectiveMinSeeders()
+	if minSeeders <= 0 || rel == nil || !rel.IsTorrent() {
+		return nil
+	}
+	if hash == "" {
+		hash = releaseInfoHash(rel)
+	}
+	if hash != "" && s.torrentManager != nil {
+		if present := s.torrentManager.FindTorrent(ctx, hash); present.Complete() {
+			return nil
+		}
+	}
+	return releaseHasEnoughSeeders(rel, minSeeders)
 }
