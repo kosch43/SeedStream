@@ -63,12 +63,15 @@ type CategoryMapping struct {
 // Setting is one credential or option the user must supply, such as a username,
 // password or passkey. The UI renders a field per setting.
 type Setting struct {
-	Name     string   `yaml:"name"`
-	Type     string   `yaml:"type"` // text, password, checkbox, select, info
-	Label    string   `yaml:"label"`
-	Default  string   `yaml:"default"`
-	Options  []string `yaml:"options"`
-	Required *bool    `yaml:"required"`
+	Name     string   `yaml:"name" json:"name"`
+	Type     string   `yaml:"type" json:"type"` // text, password, checkbox, select, info
+	Label    string   `yaml:"label" json:"label"`
+	Default  string   `yaml:"default" json:"default,omitempty"`
+	Options  []string `yaml:"options" json:"options,omitempty"`
+	Required *bool    `yaml:"required" json:"required,omitempty"`
+	// Secret tells the UI to mask this field. Computed rather than declared,
+	// since definitions mark passkeys and cookies as plain text.
+	Secret bool `yaml:"-" json:"secret"`
 }
 
 // IsCredential reports whether this setting is something the user actually types
@@ -255,9 +258,11 @@ func (d *Definition) BaseURL(override string) string {
 func (d *Definition) Credentials() []Setting {
 	var out []Setting
 	for _, s := range d.Settings {
-		if s.IsCredential() {
-			out = append(out, s)
+		if !s.IsCredential() {
+			continue
 		}
+		s.Secret = s.IsSecret()
+		out = append(out, s)
 	}
 	return out
 }
