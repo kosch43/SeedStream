@@ -8,7 +8,8 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { ConfirmDialog } from "@/components/ConfirmDialog"
-import { Download, Plus, Settings, Trash2 } from "lucide-react"
+import { Download, Plus, Search, Settings, Trash2 } from "lucide-react"
+import { TrackerDefinitionPicker } from './TrackerDefinitionPicker'
 
 // Presets provide starting-point URLs; credentials are always entered by the user.
 const TRACKER_PRESETS = [
@@ -32,7 +33,12 @@ function normalizeTrackerDraft(draft) {
     // how the tracker ties the search back to your account. Stored as api_key in
     // IndexerConfig so the shared Torznab client picks it up automatically.
     api_key: v.api_key || '',
-    type: 'torznab',
+    // A definition-driven tracker scrapes the tracker's own site using a bundled
+    // definition, so it needs no Torznab service. Its URL is optional and, when
+    // set, overrides the definition's address for when a tracker changes domain.
+    type: v.definition_id ? 'cardigann' : 'torznab',
+    definition_id: v.definition_id || '',
+    definition_settings: v.definition_settings || {},
     api_hits_day: Number(v.api_hits_day || 0),
     rate_limit_rps: Number(v.rate_limit_rps || 0),
     timeout_seconds: Number(v.timeout_seconds || 0),
@@ -50,6 +56,9 @@ function emptyTrackerDraft() {
 
 function normalizeTrackerIdentity(draft) {
   const next = normalizeTrackerDraft(draft)
+  if (next.definition_id) {
+    return `cardigann::${normalizeName(next.definition_id)}::${normalizeName(next.url)}`
+  }
   return `torznab::${normalizeName(next.url)}::${normalizeName(next.api_path)}::${normalizeName(next.api_key)}`
 }
 
@@ -88,6 +97,10 @@ function firstFieldErrorMessage(fieldErrors, fallback) {
 
 function TrackerDialog({ open, onOpenChange, initialValue, onSave, onClearStatus, title, description, saveLabel, existingNames = [], existingTrackers = [], editing = false }) {
   const [draft, setDraft] = useState(() => normalizeTrackerDraft(initialValue))
+  // The tracker list is the easy path: pick a tracker by name and supply only
+  // the credentials its definition asks for. Manual Torznab entry stays
+  // available for endpoints that have no definition.
+  const [showPicker, setShowPicker] = useState(false)
   const [wasOpen, setWasOpen] = useState(open)
   const [saveError, setSaveError] = useState('')
   const [fieldErrors, setFieldErrors] = useState({})
@@ -179,7 +192,36 @@ function TrackerDialog({ open, onOpenChange, initialValue, onSave, onClearStatus
         </DialogHeader>
 
         <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+          {!editing && showPicker ? (
+            <TrackerDefinitionPicker
+              onCancel={() => setShowPicker(false)}
+              onSelect={(picked) => {
+                setSaveError('')
+                setFieldErrors({})
+                setDraft((current) => normalizeTrackerDraft({
+                  ...current,
+                  name: picked.name,
+                  url: picked.url,
+                  definition_id: picked.definition_id,
+                  definition_settings: picked.definition_settings,
+                }))
+                setShowPicker(false)
+              }}
+            />
+          ) : (
           <div className="space-y-4">
+
+            {!editing && !draft.definition_id && (
+              <Button type="button" variant="secondary" className="w-full" onClick={() => setShowPicker(true)}>
+                <Search className="mr-2 h-4 w-4" /> Choose from the tracker list
+              </Button>
+            )}
+            {draft.definition_id && (
+              <div className="rounded-md border border-border/60 bg-muted/40 p-3 text-xs">
+                Using the bundled definition <span className="font-mono">{draft.definition_id}</span>.
+                Credentials were taken from the tracker list; leave the address blank unless the tracker has moved.
+              </div>
+            )}
 
             {/* Name */}
             <div className="rounded-md border border-border/60 p-3">
@@ -405,6 +447,7 @@ function TrackerDialog({ open, onOpenChange, initialValue, onSave, onClearStatus
             </div>
 
           </div>
+          )}
         </div>
 
         <DialogFooter className="flex items-center justify-between gap-3">
