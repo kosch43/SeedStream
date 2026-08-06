@@ -10,11 +10,13 @@ package torrent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -63,6 +65,18 @@ func requiredHeadBytes(want, fileSize int64) int64 {
 // its swarm size is judged. Announcing to trackers and connecting to peers takes
 // a few seconds, so an immediate check would reject every torrent.
 const seedCheckGrace = 20 * time.Second
+
+// ErrStillBuffering marks a prepare that ran out of time on a torrent that was
+// downloading perfectly well — it simply had not finished filling the head yet.
+//
+// The distinction matters because of what the caller does with a failure. A
+// release that cannot work (no video file, a swarm below the floor, the wrong
+// title) should be abandoned for the next candidate. A release that merely
+// needs longer should not: failing over adds a SECOND torrent for the same
+// film, so two copies of a 59 GB remux download side by side, halving the
+// bandwidth available to the one the viewer is waiting for. Retrying the same
+// slot resumes a download that is already part-finished.
+var ErrStillBuffering = errors.New("torrent is still buffering")
 
 // fastCompletionWindow is the point at which waiting for the whole file beats
 // waiting for an ordered head.
@@ -724,21 +738,24 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 			if lastProgress < 0 {
 				return nil, fmt.Errorf("torrent metadata not available after %s (no file list from client)", timeout)
 			}
+			// Every remaining case is a torrent that is downloading and simply
+			// has not got there yet, so all of them wrap ErrStillBuffering: the
+			// caller must retry this same torrent rather than start another for
+			// the same film.
 			if fastFinish {
 				// The download was outrunning the clock, not misbehaving. Naming
 				// ordering here would point at the wrong thing entirely.
-				return nil, fmt.Errorf("torrent was still finishing after %s (file %.1f%% downloaded, and downloading fast — the prepare timeout is the limit here, not the swarm)",
-					timeout, lastProgress*100)
+				return nil, fmt.Errorf("%w: still finishing after %s (file %.1f%% downloaded, and downloading fast — the prepare timeout is the limit here, not the swarm)",
+					ErrStillBuffering, timeout, lastProgress*100)
 			}
 			if fragmentedHead {
-				// Reporting "still buffering" here would be misleading: the data
-				// is arriving fine, it is just not arriving at the front of the
-				// file, and the operator needs to know that to act on it.
-				return nil, fmt.Errorf("torrent has downloaded %.1f%% of the file but not the first %d bytes continuously after %s (pieces are arriving out of order)",
-					lastProgress*100, needHead, timeout)
+				// The data is arriving fine, just not at the front of the file,
+				// and the operator needs to know that to act on it.
+				return nil, fmt.Errorf("%w: downloaded %.1f%% of the file but not the first %d bytes continuously after %s (pieces are arriving out of order)",
+					ErrStillBuffering, lastProgress*100, needHead, timeout)
 			}
-			return nil, fmt.Errorf("torrent still buffering after %s (file %.1f%% downloaded, need %d bytes of head)",
-				timeout, lastProgress*100, needHead)
+			return nil, fmt.Errorf("%w: after %s the file is %.1f%% downloaded and needs %d bytes of head",
+				ErrStillBuffering, timeout, lastProgress*100, needHead)
 		}
 		select {
 		case <-ctx.Done():
@@ -868,25 +885,62 @@ func stripVideoExt(name string) string {
 	return name
 }
 
-// exactTitleMatch finds a torrent that is the same release as releaseTitle,
-// comparing normalised forms so punctuation and separators do not matter.
+// titleTokens returns the sorted, normalised words of a release name, which is
+// the form two names are compared in.
 //
-// Deliberately exact rather than the fuzzy overlap used elsewhere. This searches
-// the whole category rather than a handful of torrents that just appeared, and
-// sibling episodes of a show differ by a single token — "S05E01" against
-// "S05E02" shares seven words of eight, which sails past a majority-overlap
-// test. Requiring the whole normalised name to agree is what keeps a replay of
-// one episode from resolving to another.
+// Sorting is the whole point. The same release is written with its tags in
+// different orders by different parties — an indexer publishing
+// "Hybrid 2160p UHD BluRay REMUX ... TrueHD 7 1 Atmos" for what the torrent
+// itself calls "UHD.BluRay.2160p.TrueHD.Atmos.7.1 ... HYBRID.REMUX" — and
+// because normalisation joins words with no delimiter, any reordering yields a
+// completely different string. Comparing the sorted words instead tolerates the
+// reordering while keeping every word significant.
+func titleTokens(name string) []string {
+	words := release.NormalizeTitleWordsForMatch(stripVideoExt(name))
+	sorted := make([]string, len(words))
+	copy(sorted, words)
+	sort.Strings(sorted)
+	return sorted
+}
+
+// sameTokens reports whether two token lists are identical multisets.
+func sameTokens(a, b []string) bool {
+	if len(a) != len(b) || len(a) == 0 {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// exactTitleMatch finds a torrent that is the same release as releaseTitle,
+// comparing the multiset of normalised words so punctuation, separators and tag
+// ORDER do not matter.
+//
+// Deliberately exact on the words rather than the fuzzy overlap used elsewhere.
+// This searches the whole category rather than a handful of torrents that just
+// appeared, and sibling episodes of a show differ by a single token — "S05E01"
+// against "S05E02" shares seven words of eight, which sails past a
+// majority-overlap test. Requiring every word to be present, with the same
+// multiplicity, keeps a replay of one episode from resolving to another while
+// surviving a reordering that means nothing.
+//
+// Failing to match here is expensive: SeedStream adds a torrent, does not
+// recognise its own work, reports the candidate as failed and falls back to
+// another release — leaving two copies of the same film downloading.
 //
 // Prefers the most complete copy if the same release somehow appears twice.
 func exactTitleMatch(list []qbittorrent.TorrentInfo, releaseTitle string) *qbittorrent.TorrentInfo {
-	want := release.NormalizeTitleForDedup(stripVideoExt(releaseTitle))
-	if want == "" {
+	want := titleTokens(releaseTitle)
+	if len(want) == 0 {
 		return nil
 	}
 	var best *qbittorrent.TorrentInfo
 	for i := range list {
-		if release.NormalizeTitleForDedup(stripVideoExt(list[i].Name)) != want {
+		if !sameTokens(titleTokens(list[i].Name), want) {
 			continue
 		}
 		if best == nil || list[i].Progress > best.Progress {
