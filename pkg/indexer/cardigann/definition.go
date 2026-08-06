@@ -63,12 +63,12 @@ type CategoryMapping struct {
 // Setting is one credential or option the user must supply, such as a username,
 // password or passkey. The UI renders a field per setting.
 type Setting struct {
-	Name     string   `yaml:"name" json:"name"`
-	Type     string   `yaml:"type" json:"type"` // text, password, checkbox, select, info
-	Label    string   `yaml:"label" json:"label"`
-	Default  string   `yaml:"default" json:"default,omitempty"`
-	Options  []string `yaml:"options" json:"options,omitempty"`
-	Required *bool    `yaml:"required" json:"required,omitempty"`
+	Name     string  `yaml:"name" json:"name"`
+	Type     string  `yaml:"type" json:"type"` // text, password, checkbox, select, info
+	Label    string  `yaml:"label" json:"label"`
+	Default  string  `yaml:"default" json:"default,omitempty"`
+	Options  Options `yaml:"options" json:"options,omitempty"`
+	Required *bool   `yaml:"required" json:"required,omitempty"`
 	// Secret tells the UI to mask this field. Computed rather than declared,
 	// since definitions mark passkeys and cookies as plain text.
 	Secret bool `yaml:"-" json:"secret"`
@@ -135,14 +135,14 @@ type Captcha struct {
 
 // Search describes how to run a query and where the results are on the page.
 type Search struct {
-	Paths     []SearchPath      `yaml:"paths"`
-	Headers   map[string]string `yaml:"headers"`
-	Inputs    map[string]string `yaml:"inputs"`
-	Keywords  *KeywordFilters   `yaml:"keywordsfilters"`
-	Rows      Rows              `yaml:"rows"`
-	Fields    map[string]Field  `yaml:"fields"`
-	Error     []LoginError      `yaml:"error"`
-	Preprocss []Filter          `yaml:"preprocessingfilters"`
+	Paths     []SearchPath           `yaml:"paths"`
+	Headers   map[string]HeaderValue `yaml:"headers"`
+	Inputs    map[string]string      `yaml:"inputs"`
+	Keywords  []Filter               `yaml:"keywordsfilters"`
+	Rows      Rows                   `yaml:"rows"`
+	Fields    map[string]Field       `yaml:"fields"`
+	Error     []LoginError           `yaml:"error"`
+	Preprocss []Filter               `yaml:"preprocessingfilters"`
 }
 
 // SearchPath is one request the search makes. Definitions may list several when
@@ -162,10 +162,49 @@ type Response struct {
 	Attribute string `yaml:"attribute"`
 }
 
-// KeywordFilters rewrite the user's query before it is sent, e.g. stripping
-// characters a tracker's search cannot handle.
-type KeywordFilters struct {
-	Filters []Filter `yaml:"filters"`
+// HeaderValue is one request header. Definitions write these either as a plain
+// string or as a single-element sequence, so both are accepted.
+type HeaderValue string
+
+func (h *HeaderValue) UnmarshalYAML(n *yaml.Node) error {
+	switch n.Kind {
+	case yaml.ScalarNode:
+		*h = HeaderValue(n.Value)
+	case yaml.SequenceNode:
+		if len(n.Content) > 0 {
+			*h = HeaderValue(n.Content[0].Value)
+		}
+	}
+	return nil
+}
+
+// Options are a select setting's choices. Real definitions write them as a
+// value-to-label map, though a plain sequence also appears, so both shapes are
+// accepted and reduced to the list of values the UI offers.
+type Options []string
+
+func (o *Options) UnmarshalYAML(n *yaml.Node) error {
+	switch n.Kind {
+	case yaml.SequenceNode:
+		var list []string
+		if err := n.Decode(&list); err != nil {
+			return err
+		}
+		*o = list
+	case yaml.MappingNode:
+		// Keys are the values submitted to the tracker; labels are for display
+		// only, and the picker shows the value.
+		var list []string
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			list = append(list, n.Content[i].Value)
+		}
+		*o = list
+	case yaml.ScalarNode:
+		if n.Value != "" {
+			*o = []string{n.Value}
+		}
+	}
+	return nil
 }
 
 // Rows locates the repeating result element on the page.

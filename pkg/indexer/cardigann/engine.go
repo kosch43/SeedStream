@@ -288,7 +288,7 @@ func (e *Engine) filterKeywords(kw string) string {
 	if e.def.Search.Keywords == nil {
 		return kw
 	}
-	return ApplyFilters(kw, e.def.Search.Keywords.Filters, e.newContext())
+	return ApplyFilters(kw, e.def.Search.Keywords, e.newContext())
 }
 
 func (e *Engine) searchPath(ctx context.Context, p SearchPath, base *Context) ([]Result, error) {
@@ -333,7 +333,7 @@ func (e *Engine) searchPath(ctx context.Context, p SearchPath, base *Context) ([
 		form = nil
 	}
 
-	doc, _, err := e.do(ctx, method, target, form, e.def.Search.Headers)
+	doc, _, err := e.do(ctx, method, target, form, headerStrings(e.def.Search.Headers))
 	if err != nil {
 		return nil, err
 	}
@@ -465,4 +465,17 @@ func atoi(s string) int {
 		return 0
 	}
 	return n
+}
+
+// headerStrings flattens definition headers for the HTTP layer, which takes
+// plain strings.
+func headerStrings(in map[string]HeaderValue) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = string(v)
+	}
+	return out
 }
