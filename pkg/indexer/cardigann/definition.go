@@ -145,18 +145,18 @@ type Search struct {
 // SearchPath is one request the search makes. Definitions may list several when
 // a tracker splits results across endpoints.
 type SearchPath struct {
-	Path     string            `yaml:"path"`
-	Method   string            `yaml:"method"`
-	Inputs   map[string]string `yaml:"inputs"`
-	Response *Response         `yaml:"response"`
-	Categories []string        `yaml:"categories"`
+	Path       string            `yaml:"path"`
+	Method     string            `yaml:"method"`
+	Inputs     map[string]string `yaml:"inputs"`
+	Response   *Response         `yaml:"response"`
+	Categories []string          `yaml:"categories"`
 }
 
 // Response declares a non-HTML result format, currently JSON.
 type Response struct {
-	Type       string `yaml:"type"`
-	NoResults  string `yaml:"noResultsMessage"`
-	Attribute  string `yaml:"attribute"`
+	Type      string `yaml:"type"`
+	NoResults string `yaml:"noResultsMessage"`
+	Attribute string `yaml:"attribute"`
 }
 
 // KeywordFilters rewrite the user's query before it is sent, e.g. stripping
@@ -179,13 +179,13 @@ type Rows struct {
 // take its text or an Attribute, then run Filters over the result. Text
 // provides a constant or template when there is nothing to select.
 type Field struct {
-	Selector  string   `yaml:"selector"`
-	Attribute string   `yaml:"attribute"`
-	Remove    string   `yaml:"remove"`
+	Selector  string            `yaml:"selector"`
+	Attribute string            `yaml:"attribute"`
+	Remove    string            `yaml:"remove"`
 	Case      map[string]string `yaml:"case"`
-	Text      string   `yaml:"text"`
-	Filters   []Filter `yaml:"filters"`
-	Optional  bool     `yaml:"optional"`
+	Text      string            `yaml:"text"`
+	Filters   []Filter          `yaml:"filters"`
+	Optional  bool              `yaml:"optional"`
 }
 
 // Filter is one transformation step applied to an extracted value. Args is left

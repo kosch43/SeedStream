@@ -118,6 +118,17 @@ type IndexerConfig struct {
 	DisableIdSearch            *bool  `json:"disable_id_search,omitempty"`
 	DisableStringSearch        *bool  `json:"disable_string_search,omitempty"`
 
+	// DefinitionID selects a bundled tracker definition, which lets SeedStream
+	// talk to a private tracker's website directly instead of needing a Torznab
+	// service in front of it. When set, Type is "cardigann" and URL is optional:
+	// it overrides the definition's own address, which is what keeps a tracker
+	// working when it moves to a new domain.
+	DefinitionID string `json:"definition_id,omitempty"`
+	// DefinitionSettings holds the credentials the chosen definition asks for
+	// (username, password, passkey, session cookie and so on), keyed by the
+	// setting name the definition declares.
+	DefinitionSettings map[string]string `json:"definition_settings,omitempty"`
+
 	// ProxyURL is an optional HTTP or HTTPS proxy for this indexer (http://host:port or https://...).
 	// When empty, HTTP_PROXY / HTTPS_PROXY / NO_PROXY apply via the default proxy resolution.
 	ProxyURL string `json:"proxy_url,omitempty"`
