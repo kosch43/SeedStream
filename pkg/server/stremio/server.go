@@ -90,6 +90,7 @@ func NewServer(opts *ServerOptions) (*Server, error) {
 		mgr := torrent.NewManager(opts.Config.TorrentClients)
 		mgr.BufferBytes = opts.Config.EffectiveTorrentBufferBytes()
 		mgr.PrepareTimeout = opts.Config.EffectiveTorrentPrepareTimeout()
+		mgr.MinSeeders = opts.Config.EffectiveMinSeeders()
 		s.torrentManager = mgr
 	}
 	s.cerberusClient = opts.CerberusClient
@@ -196,6 +197,7 @@ func (s *Server) Reload(opts *ServerOptions) {
 		mgr := torrent.NewManager(opts.Config.TorrentClients)
 		mgr.BufferBytes = opts.Config.EffectiveTorrentBufferBytes()
 		mgr.PrepareTimeout = opts.Config.EffectiveTorrentPrepareTimeout()
+		mgr.MinSeeders = opts.Config.EffectiveMinSeeders()
 		s.torrentManager = mgr
 	}
 	s.indexer = opts.Indexer

@@ -149,7 +149,8 @@ func (w *Watchdog) check(ctx context.Context, stallThreshold time.Duration) {
 			}
 			continue
 		}
-		if !isStalled(e, stallThreshold) {
+		underSeeded := isUnderSeeded(e, w.minSeeders(), stallThreshold)
+		if !isStalled(e, stallThreshold) && !underSeeded {
 			continue
 		}
 		rec := w.cerberus.GetContentByHash(e.Hash)
@@ -231,6 +232,42 @@ func isPausedState(state string) bool {
 		return true
 	}
 	return false
+}
+
+// minSeeders is the configured swarm-size floor, or 0 when the check is off.
+func (w *Watchdog) minSeeders() int {
+	if w == nil || w.cfg == nil {
+		return 0
+	}
+	return w.cfg.EffectiveMinSeeders()
+}
+
+// isUnderSeeded reports whether an unfinished torrent's swarm is too thin to
+// carry it to completion, so the watchdog should act on it.
+//
+// Swarm size is predictive in a way that inactivity alone is not: a torrent with
+// two seeders may still be trickling bytes, yet it will never keep ahead of
+// playback. Rather than wait out the full stall threshold, a thin swarm is acted
+// on at half of it — and only after the torrent has had time to find peers,
+// since a freshly added torrent legitimately reports zero seeds for a few
+// seconds. What happens next is the ordinary stall handling: a torrent with
+// progress is only re-announced (never deleted, so seeding obligations survive),
+// while one with nothing downloaded is swapped for a better-seeded release.
+func isUnderSeeded(e TorrentHealthEntry, minSeeders int, threshold time.Duration) bool {
+	if minSeeders <= 0 || e.Progress >= 0.999 {
+		return false
+	}
+	if time.Since(e.AddedAt) < seedCheckGrace {
+		return false
+	}
+	if e.NumSeeds >= minSeeders {
+		return false
+	}
+	if e.LastActivity.Unix() <= 0 {
+		// Never had peer contact at all: judge from when it was added.
+		return time.Since(e.AddedAt) > threshold
+	}
+	return time.Since(e.LastActivity) > threshold/2
 }
 
 func isStalled(e TorrentHealthEntry, threshold time.Duration) bool {

@@ -32,6 +32,11 @@ const DefaultBufferBytes int64 = 16 * 1024 * 1024
 // DefaultPrepareTimeout bounds how long PrepareForPlayback waits for the buffer.
 const DefaultPrepareTimeout = 90 * time.Second
 
+// seedCheckGrace is how long a newly added torrent is given to find peers before
+// its swarm size is judged. Announcing to trackers and connecting to peers takes
+// a few seconds, so an immediate check would reject every torrent.
+const seedCheckGrace = 20 * time.Second
+
 var videoExts = map[string]struct{}{
 	".mkv": {}, ".mp4": {}, ".avi": {}, ".m4v": {}, ".mov": {},
 	".wmv": {}, ".flv": {}, ".webm": {}, ".ts": {}, ".m2ts": {},
@@ -45,6 +50,10 @@ type Manager struct {
 	// when the caller doesn't pass explicit values. Overridable via config.
 	BufferBytes    int64
 	PrepareTimeout time.Duration
+	// MinSeeders is the live swarm size a torrent must reach while buffering.
+	// A torrent that is under-seeded and making no progress is abandoned early
+	// so playback fails over instead of waiting out the whole timeout. 0 disables.
+	MinSeeders int
 
 	aggMu      sync.Mutex
 	aggCached  AggregateStats
@@ -100,6 +109,10 @@ type TorrentHealthEntry struct {
 	Progress     float64
 	LastActivity time.Time
 	AddedAt      time.Time
+	// NumSeeds is the live swarm size qBittorrent is connected to. The watchdog
+	// uses it to spot a torrent that is too thinly seeded to finish, which
+	// otherwise looks identical to one that is merely slow.
+	NumSeeds int
 }
 
 // ListAll returns all SeedStream-category torrents across every configured
@@ -121,6 +134,7 @@ func (m *Manager) ListAll(ctx context.Context) ([]TorrentHealthEntry, error) {
 				Progress:     t.Progress,
 				LastActivity: time.Unix(t.LastActivity, 0),
 				AddedAt:      time.Unix(t.AddedOn, 0),
+				NumSeeds:     t.NumSeeds,
 			})
 		}
 	}
@@ -434,6 +448,11 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 	var lastClientErr error
 	clientErrs := 0
 	lastProgress := -1.0
+	// Swarm health: a freshly added torrent needs a moment to find peers, so the
+	// live seeder count is only judged after a grace period, and only when the
+	// download has also failed to advance — a small but fast swarm is fine.
+	started := time.Now()
+	graceProgress := -1.0
 	for {
 		files, err := c.Files(ctx, info.Hash)
 		if err != nil {
@@ -482,6 +501,23 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 						ClientName: clientName,
 						Progress:   f.Progress,
 					}, nil
+				}
+			}
+		}
+		// Abandon a torrent whose swarm is too thin to ever finish buffering.
+		// Waiting out the full timeout on a dead swarm is what makes playback
+		// look like it hangs; failing here lets the caller fail over at once.
+		if m.MinSeeders > 0 && lastProgress >= 0 && time.Since(started) > seedCheckGrace {
+			if graceProgress < 0 {
+				graceProgress = lastProgress
+			} else if info2, err := c.Get(ctx, info.Hash); err == nil && info2 != nil {
+				if info2.NumSeeds < m.MinSeeders && lastProgress <= graceProgress {
+					return nil, fmt.Errorf("swarm too small to stream: %d seeder(s), need %d, and the download is not advancing (%.1f%%)",
+						info2.NumSeeds, m.MinSeeders, lastProgress*100)
+				}
+				// Progress moved, so the swarm is good enough regardless of size.
+				if lastProgress > graceProgress {
+					graceProgress = lastProgress
 				}
 			}
 		}
