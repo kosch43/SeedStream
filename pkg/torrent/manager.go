@@ -656,6 +656,25 @@ func (m *Manager) resolveAdded(ctx context.Context, c *qbittorrent.Client, hash 
 	return nil, fmt.Errorf("could not identify the torrent added for %q", releaseTitle)
 }
 
+// stripVideoExt removes a trailing video file extension.
+//
+// qBittorrent names a single-file torrent after the file itself, extension and
+// all, while an indexer's release title has none. Normalising collapses
+// separators but keeps the extension as a trailing token, so the two forms
+// differ by exactly that and never compare equal. Multi-file torrents are named
+// after their folder and carry no extension, which is why only single-file
+// releases — most TV episodes — were affected.
+func stripVideoExt(name string) string {
+	ext := filepath.Ext(name)
+	if ext == "" {
+		return name
+	}
+	if _, ok := videoExts[strings.ToLower(ext)]; ok {
+		return strings.TrimSuffix(name, ext)
+	}
+	return name
+}
+
 // exactTitleMatch finds a torrent that is the same release as releaseTitle,
 // comparing normalised forms so punctuation and separators do not matter.
 //
@@ -668,13 +687,13 @@ func (m *Manager) resolveAdded(ctx context.Context, c *qbittorrent.Client, hash 
 //
 // Prefers the most complete copy if the same release somehow appears twice.
 func exactTitleMatch(list []qbittorrent.TorrentInfo, releaseTitle string) *qbittorrent.TorrentInfo {
-	want := release.NormalizeTitleForDedup(releaseTitle)
+	want := release.NormalizeTitleForDedup(stripVideoExt(releaseTitle))
 	if want == "" {
 		return nil
 	}
 	var best *qbittorrent.TorrentInfo
 	for i := range list {
-		if release.NormalizeTitleForDedup(list[i].Name) != want {
+		if release.NormalizeTitleForDedup(stripVideoExt(list[i].Name)) != want {
 			continue
 		}
 		if best == nil || list[i].Progress > best.Progress {
