@@ -64,6 +64,25 @@ func requiredHeadBytes(want, fileSize int64) int64 {
 // a few seconds, so an immediate check would reject every torrent.
 const seedCheckGrace = 20 * time.Second
 
+// fastCompletionWindow is the point at which waiting for the whole file beats
+// waiting for an ordered head.
+//
+// A contiguous head only appears once the download frontier has passed it AND
+// every piece behind it has landed. The gap between those two is the set of
+// pieces in flight — libtorrent requests sequentially, but blocks come back from
+// dozens of peers at their own pace, so pieces complete out of order within that
+// window. Measured on a 72-piece torrent that finished in 24 seconds: the
+// contiguous run sat at 7 pieces while overall progress went from 24% to 78%,
+// then jumped to 72 at completion.
+//
+// The size of that window is set by bandwidth and peer count, not by file size.
+// On a large torrent it is a small fraction of the file and the ordered head
+// arrives early; on one that finishes in seconds it spans nearly the whole file,
+// so the ordered head effectively arrives at completion. Waiting for an ordering
+// that cannot assert itself before the file is simply finished delays nothing
+// and reports a fault that is not there.
+const fastCompletionWindow = 30 * time.Second
+
 var videoExts = map[string]struct{}{
 	".mkv": {}, ".mp4": {}, ".avi": {}, ".m4v": {}, ".mov": {},
 	".wmv": {}, ".flv": {}, ".webm": {}, ".ts": {}, ".m2ts": {},
@@ -545,7 +564,9 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 	// and complete-latch survive the loop.
 	var avail *fileAvailability
 	warnedFragmented := false
+	warnedFastFinish := false
 	fragmentedHead := false
+	fastFinish := false
 	// The head actually required, once the file size is known and the ceiling
 	// has been applied. Kept out here so a timeout reports the real target.
 	needHead := bufferBytes
@@ -590,14 +611,14 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 						logger.Debug("torrent prepare: set file priority failed", "hash", info.Hash, "file", f.Index, "err", err)
 					}
 				}
-				// A byte count cannot say where the bytes are. qBittorrent's
-				// sequential download is a preference, not a guarantee: pieces
-				// still arrive out of order from whichever peers have them, and
-				// first/last-piece priority deliberately pulls the tail in early.
-				// So the file can be 84% downloaded with only a handful of
-				// contiguous pieces at the front, and a head measured as
-				// "progress * size >= bufferBytes" is then mostly holes. Playback
-				// starts, drains the few real pieces, and stalls seconds in.
+				// A byte count cannot say where the bytes are. Sequential
+				// download orders the REQUESTS, not the arrivals: blocks come
+				// back from dozens of peers at their own pace, so pieces within
+				// the in-flight window complete out of order. Measured on a real
+				// download, the file passed 78% with a continuous run of seven
+				// pieces. A head measured as "progress * size >= bufferBytes" is
+				// therefore mostly holes, and playback starts, drains the few
+				// real pieces, and stalls seconds in.
 				//
 				// Ask the piece bitmap instead: are the first bufferBytes of the
 				// file actually on disk, end to end? That is the same question the
@@ -611,11 +632,28 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 				if avail != nil {
 					headReady = avail.BytesAvailable(ctx, 0, needHead)
 				}
-				// Surface the divergence once: the old byte-count test passing
-				// while the head is fragmented is precisely the case that used to
-				// hand the player an unplayable file.
 				if !headReady && f.Size > 0 {
-					if done := int64(f.Progress * float64(f.Size)); done >= needHead {
+					// When the whole file is seconds away, a head that is not yet
+					// ordered is not worth describing as missing. The in-flight
+					// window on a fast download spans most of the file, so the
+					// continuous run only completes as the download does: waiting
+					// for the file IS waiting for the head, and both arrive at the
+					// same moment. Saying otherwise sends an operator hunting for a
+					// fault in piece ordering that is not there.
+					fast, remain := nearingCompletion(ctx, c, info.Hash)
+					fastFinish = fast
+					if fast {
+						fragmentedHead = false
+						if !warnedFastFinish {
+							warnedFastFinish = true
+							logger.Info("Playback: this download finishes in moments, so waiting for the whole file rather than for the pieces to arrive in order",
+								"hash", shortHash(info.Hash), "progress", f.Progress,
+								"seconds_remaining", int(remain.Seconds()))
+						}
+					} else if done := int64(f.Progress * float64(f.Size)); done >= needHead {
+						// Enough bytes, in the wrong places, on a download slow
+						// enough that ordering has had time to assert itself.
+						// That one is worth reporting.
 						fragmentedHead = true
 						if !warnedFragmented {
 							warnedFragmented = true
@@ -686,6 +724,12 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 			if lastProgress < 0 {
 				return nil, fmt.Errorf("torrent metadata not available after %s (no file list from client)", timeout)
 			}
+			if fastFinish {
+				// The download was outrunning the clock, not misbehaving. Naming
+				// ordering here would point at the wrong thing entirely.
+				return nil, fmt.Errorf("torrent was still finishing after %s (file %.1f%% downloaded, and downloading fast — the prepare timeout is the limit here, not the swarm)",
+					timeout, lastProgress*100)
+			}
 			if fragmentedHead {
 				// Reporting "still buffering" here would be misleading: the data
 				// is arriving fine, it is just not arriving at the front of the
@@ -702,6 +746,32 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 		case <-time.After(1500 * time.Millisecond):
 		}
 	}
+}
+
+// nearingCompletion reports whether the whole torrent will be on disk within
+// fastCompletionWindow, and how long that is.
+//
+// It answers a question the piece bitmap cannot: whether waiting for the head
+// to be ordered is a meaningful wait at all. On a download this fast the
+// in-flight window covers most of the file, so the continuous run from byte
+// zero only completes as the download itself completes — the two conditions
+// become the same one, and reporting a fragmented head describes normal swarm
+// behaviour as a fault.
+//
+// Deliberately conservative: an unreadable torrent, an unknown size, or a
+// download rate of zero all report false, so the ordinary path is what runs
+// whenever this cannot be established.
+func nearingCompletion(ctx context.Context, c *qbittorrent.Client, hash string) (bool, time.Duration) {
+	info, err := c.Get(ctx, hash)
+	if err != nil || info == nil || info.Size <= 0 || info.DlSpeed <= 0 {
+		return false, 0
+	}
+	remaining := info.Size - int64(info.Progress*float64(info.Size))
+	if remaining <= 0 {
+		return true, 0
+	}
+	eta := time.Duration(float64(remaining) / float64(info.DlSpeed) * float64(time.Second))
+	return eta <= fastCompletionWindow, eta
 }
 
 // categoryHashes returns the set of info hashes currently in this client's
