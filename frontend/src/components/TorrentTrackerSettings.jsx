@@ -10,6 +10,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { ConfirmDialog } from "@/components/ConfirmDialog"
 import { Download, Plus, Search, Settings, Trash2 } from "lucide-react"
 import { TrackerDefinitionPicker } from './TrackerDefinitionPicker'
+import { apiFetch } from '../api'
 
 // Presets provide starting-point URLs; credentials are always entered by the user.
 const TRACKER_PRESETS = [
@@ -136,6 +137,38 @@ function TrackerDialog({ open, onOpenChange, initialValue, onSave, onClearStatus
   }
 
   const update = (key, value) => setDraft((current) => ({ ...current, [key]: value }))
+  const isDefinition = Boolean(draft.definition_id)
+
+  // The chosen definition's settings schema, so its credentials stay editable
+  // after the tracker has been added. Without this a mistyped password could
+  // only be fixed by deleting the tracker and adding it again.
+  const [definitionSchema, setDefinitionSchema] = useState(null)
+  useEffect(() => {
+    if (!open || !draft.definition_id) { setDefinitionSchema(null); return }
+    let cancelled = false
+    ;(async () => {
+      try {
+        const data = (await apiFetch(`/api/trackers/definitions?q=${encodeURIComponent(draft.definition_id)}&limit=200`)) || {}
+        const match = (data.definitions || []).find((d) => d.id === draft.definition_id)
+        if (!cancelled) setDefinitionSchema(match || null)
+      } catch {
+        if (!cancelled) setDefinitionSchema(null)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [open, draft.definition_id])
+
+  const definitionCredentials = (definitionSchema?.settings || []).filter(
+    (setting) => setting.type !== 'info' && setting.type !== 'checkbox' && setting.type !== 'select'
+  )
+
+  // A Torznab tracker pointed at a private tracker's own website cannot work:
+  // the tracker serves a website, not a Torznab API, so every request 404s. It
+  // is an easy mistake because the URL field asks for "the tracker", and the
+  // fix is a different kind of entry rather than a different value.
+  const looksLikeATrackerSite =
+    !isDefinition && !editing && /^https?:\/\//i.test(draft.url.trim()) &&
+    !/localhost|127\.0\.0\.1|jackett|prowlarr|:\d{4,5}/i.test(draft.url)
   const fieldClass = (key) => fieldErrors[key] ? 'border-destructive focus-visible:ring-destructive' : ''
   const rowClass = 'flex flex-col gap-3 min-[360px]:flex-row min-[360px]:items-center min-[360px]:gap-4'
   const labelClass = 'min-w-0 min-[360px]:flex-1'
@@ -216,10 +249,50 @@ function TrackerDialog({ open, onOpenChange, initialValue, onSave, onClearStatus
                 <Search className="mr-2 h-4 w-4" /> Choose from the tracker list
               </Button>
             )}
-            {draft.definition_id && (
+            {isDefinition && (
               <div className="rounded-md border border-border/60 bg-muted/40 p-3 text-xs">
-                Using the bundled definition <span className="font-mono">{draft.definition_id}</span>.
-                Credentials were taken from the tracker list; leave the address blank unless the tracker has moved.
+                Signing in to the tracker directly using the bundled definition{' '}
+                <span className="font-mono">{draft.definition_id}</span>. This needs no Jackett,
+                Prowlarr or passkey — SeedStream logs in and reads the site itself.
+              </div>
+            )}
+
+            {/* The definition's own credentials, editable after the fact. */}
+            {isDefinition && definitionCredentials.length > 0 && (
+              <div className="rounded-md border border-border/60 p-3 space-y-3">
+                <Label className="text-sm font-medium">Tracker sign-in</Label>
+                {definitionCredentials.map((setting) => (
+                  <div key={setting.name} className={rowClass}>
+                    <div className={labelClass}>
+                      <Label className="text-sm font-medium">{setting.label || setting.name}</Label>
+                    </div>
+                    <div className={controlWideClass}>
+                      <Input
+                        className="h-9"
+                        type={setting.secret === true || setting.type === 'password' ? 'password' : 'text'}
+                        autoComplete="off"
+                        value={draft.definition_settings?.[setting.name] ?? ''}
+                        onChange={(e) => update('definition_settings', {
+                          ...(draft.definition_settings || {}),
+                          [setting.name]: e.target.value,
+                        })}
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {looksLikeATrackerSite && (
+              <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs space-y-2">
+                <p>
+                  This looks like a tracker's own website. A private tracker serves a site, not a
+                  Torznab API, so searches against it will fail with a 404 however the passkey is set.
+                </p>
+                <p>
+                  Use <strong>Choose from the tracker list</strong> to sign in to the tracker directly,
+                  or point this at a Jackett or Prowlarr instance that publishes a Torznab feed for it.
+                </p>
               </div>
             )}
 
@@ -287,14 +360,22 @@ function TrackerDialog({ open, onOpenChange, initialValue, onSave, onClearStatus
               <div className="p-3">
                 <div className={rowClass}>
                   <div className={labelClass}>
-                    <Label className="text-sm font-medium">URL</Label>
-                    <p className="mt-1 text-xs text-muted-foreground">Base URL of the tracker or aggregator</p>
+                    <Label className="text-sm font-medium">{isDefinition ? 'Tracker address' : 'URL'}</Label>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {isDefinition
+                        ? "The tracker's own site. Only change it if the tracker has moved domain."
+                        : 'Base URL of your Torznab service (Jackett, Prowlarr, or similar)'}
+                    </p>
                   </div>
                   <div className={controlWideClass}>
                     <Input className={`h-9 ${fieldClass('url')}`} value={draft.url} onChange={(e) => update('url', e.target.value)} placeholder="https://tracker.example.com" autoComplete="off" />
                   </div>
                 </div>
               </div>
+              {/* Torznab path is meaningless for a definition-driven tracker: it
+                  logs in to the tracker's own site and scrapes it, so there is no
+                  Torznab endpoint to point at. */}
+              {!isDefinition && (
               <div className="relative p-3">
                 <div className="absolute left-3 right-3 top-0 border-t border-border/60" />
                 <div className={rowClass}>
@@ -307,9 +388,14 @@ function TrackerDialog({ open, onOpenChange, initialValue, onSave, onClearStatus
                   </div>
                 </div>
               </div>
+              )}
             </div>
 
-            {/* Passkey — the credential a private tracker issues for its Torznab feed */}
+            {/* Passkey — the credential a private tracker issues for its Torznab
+                feed. A definition-driven tracker signs in with a username and
+                password and scrapes the site, so no passkey applies; showing the
+                field invites entering one that is then silently ignored. */}
+            {!isDefinition && (
             <div className="rounded-md border border-border/60 p-3">
               <div className={rowClass}>
                 <div className={labelClass}>
@@ -323,6 +409,7 @@ function TrackerDialog({ open, onOpenChange, initialValue, onSave, onClearStatus
                 </div>
               </div>
             </div>
+            )}
 
             {/* Proxy */}
             <div className="rounded-md border border-border/60 p-3">
