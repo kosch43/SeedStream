@@ -80,7 +80,7 @@ function TorrentClientDialog({ open, onOpenChange, initialValue, onSave, title, 
       setDraft(normalizeDraft(initialValue))
       setError('')
     }
-  }, [open, initialValue])
+  }, [open])
 
   const update = (patch) => setDraft((d) => ({ ...d, ...patch }))
   const kind = clientType(draft.type)
