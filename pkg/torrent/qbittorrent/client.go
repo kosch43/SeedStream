@@ -172,14 +172,15 @@ func (c *Client) Add(ctx context.Context, opts AddOptions) error {
 	}
 	if opts.Sequential {
 		form.Set("sequentialDownload", "true")
-		// First/last-piece priority is deliberately DISABLED for streaming.
-		// While it sounds useful (players read the tail of MP4/MKV for the index),
-		// it actually interferes with sequential download: qBittorrent's piece
-		// scheduler prioritizes the first/last pieces over the sequential order,
-		// which can cause piece 0 to arrive late when the swarm is busy.
-		// Sequential download alone ensures pieces arrive in order, which is what
-		// streaming needs. The last piece will arrive naturally at the end.
-		// form.Set("firstLastPiecePrio", "true")
+		// First/last-piece priority is what actually pins piece 0 to the front
+		// of the queue. Sequential download alone only orders the REQUESTS;
+		// libtorrent's piece picker is still free to complete whatever arrives
+		// first, and on a fresh torrent it starts picking before any ordering
+		// has been asserted — which is how piece 0 ends up arriving late at
+		// random. With firstLastPiecePrio on, qBittorrent marks piece 0 (and
+		// the tail) priority 7, the highest the picker honours, so the head
+		// of the file is fetched ahead of everything else, every time.
+		form.Set("firstLastPiecePrio", "true")
 	}
 	_, err := c.do(ctx, http.MethodPost, "/api/v2/torrents/add", form)
 	return err
@@ -350,7 +351,7 @@ func (c *Client) EnsureStreamingOrder(ctx context.Context, info *TorrentInfo) er
 			info.FirstLastPiecePrio = current.FirstLastPiecePrio
 		}
 
-		if info.SequentialDL && !info.FirstLastPiecePrio {
+		if info.SequentialDL && info.FirstLastPiecePrio {
 			return nil
 		}
 
@@ -362,13 +363,13 @@ func (c *Client) EnsureStreamingOrder(ctx context.Context, info *TorrentInfo) er
 				info.SequentialDL = true
 			}
 		}
-		if info.FirstLastPiecePrio {
+		if !info.FirstLastPiecePrio {
 			if _, err := c.do(ctx, http.MethodPost, "/api/v2/torrents/toggleFirstLastPiecePrio", form); err != nil {
 				if firstErr == nil {
 					firstErr = err
 				}
 			} else {
-				info.FirstLastPiecePrio = false
+				info.FirstLastPiecePrio = true
 			}
 		}
 		if firstErr != nil {
