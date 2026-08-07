@@ -7,6 +7,7 @@ import (
 
 	"seedstream/pkg/core/logger"
 	"seedstream/pkg/torrent/qbittorrent"
+	"seedstream/pkg/torrent/tclient"
 )
 
 // availabilityCacheTTL is how long a fetched piece bitmap (or per-file
@@ -38,7 +39,7 @@ const negativeRecheckInterval = 200 * time.Millisecond
 // a sparse hole succeeds and yields zeros. Such a server can only serve a file
 // once it is complete.
 type fileAvailability struct {
-	client    *qbittorrent.Client
+	client    tclient.Client
 	hash      string
 	fileIndex int
 	fileSize  int64
@@ -65,7 +66,7 @@ type fileAvailability struct {
 	complete  bool // latched: every piece of the file confirmed downloaded
 }
 
-func newFileAvailability(client *qbittorrent.Client, hash string, fileIndex int, fileSize int64) *fileAvailability {
+func newFileAvailability(client tclient.Client, hash string, fileIndex int, fileSize int64) *fileAvailability {
 	return &fileAvailability{
 		client:    client,
 		hash:      hash,

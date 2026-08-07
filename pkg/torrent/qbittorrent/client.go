@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"seedstream/pkg/torrent/tclient"
 )
 
 // Client talks to one qBittorrent WebUI. It is safe for concurrent use.
@@ -154,15 +156,6 @@ func (c *Client) Ping(ctx context.Context) error {
 	return err
 }
 
-// AddOptions controls how a torrent is added.
-type AddOptions struct {
-	// Magnet or URL (magnet link, http(s) .torrent URL). Required.
-	URL string
-	// Sequential makes qBittorrent download pieces in order, so the start of the
-	// file is ready first for progressive playback.
-	Sequential bool
-}
-
 // Add submits a torrent to qBittorrent under the configured category, with
 // sequential download and first/last-piece priority enabled for streaming.
 // Auto Torrent Management is left off so SavePath is honoured.
@@ -192,64 +185,17 @@ func (c *Client) Add(ctx context.Context, opts AddOptions) error {
 	return err
 }
 
-// TorrentInfo is a subset of qBittorrent's /torrents/info response.
-type TorrentInfo struct {
-	Hash         string  `json:"hash"`
-	Name         string  `json:"name"`
-	Size         int64   `json:"size"`
-	Progress     float64 `json:"progress"`
-	State        string  `json:"state"`
-	SavePath     string  `json:"save_path"`
-	ContentPath  string  `json:"content_path"`
-	Category     string  `json:"category"`
-	AddedOn      int64   `json:"added_on"`
-	CompletionOn int64   `json:"completion_on"`
-	SeedingTime  int64   `json:"seeding_time"`
-	LastActivity int64   `json:"last_activity"`
-	Ratio        float64 `json:"ratio"`
-	Uploaded     int64   `json:"uploaded"`
-	Downloaded   int64   `json:"downloaded"`
-	DlSpeed      int64   `json:"dlspeed"`
-	UpSpeed      int64   `json:"upspeed"`
-	// NumSeeds is how many seeds this client is CONNECTED to; NumComplete is how
-	// many exist in the swarm, from the tracker's own scrape. They answer
-	// different questions: a healthy torrent routinely shows 4 connected out of
-	// 60 in the swarm, because BitTorrent connects to a subset. Judging swarm
-	// health on the connected count alone therefore condemns healthy torrents.
-	//
-	// NumComplete is a pointer so that a server which does not send the field at
-	// all is distinguishable from one reporting zero seeders. Decoded into an
-	// int it would read as a dead swarm and reject everything.
-	NumSeeds    int   `json:"num_seeds"`
-	NumComplete *int  `json:"num_complete"`
-	NumLeechs   int   `json:"num_leechs"`
-	PieceSize   int64 `json:"piece_size"`
-	// SequentialDL and FirstLastPiecePrio report the streaming flags. They are
-	// only honoured on the torrent that an add actually created: adding a
-	// magnet qBittorrent already holds is a no-op, so the flags in that request
-	// are discarded and the torrent keeps downloading rarest-first. Reading
-	// them back is the only way to find out.
-	SequentialDL       bool `json:"seq_dl"`
-	FirstLastPiecePrio bool `json:"f_l_piece_prio"`
-}
-
-// SwarmSeeders returns how many seeders the tracker says the swarm holds, and
-// whether that is actually known.
-//
-// This is the number to judge a swarm on. The indexer's count comes from a
-// scrape that may be hours old and is whatever the tracker chose to publish;
-// this one is qBittorrent's own current scrape of the same tracker. Where the
-// two disagree, this is the one that reflects the swarm being downloaded from.
-//
-// Reports false before the first scrape completes (qBittorrent sends -1), and
-// on a server that omits the field entirely, so an unknown swarm is never
-// mistaken for an empty one.
-func (t *TorrentInfo) SwarmSeeders() (int, bool) {
-	if t == nil || t.NumComplete == nil || *t.NumComplete < 0 {
-		return 0, false
-	}
-	return *t.NumComplete, true
-}
+// Types shared with every other download client live in tclient. They are
+// aliases, not conversions, so the qBittorrent decoder keeps unmarshalling
+// straight into them from its own JSON with no copying at the boundary.
+type (
+	TorrentInfo       = tclient.TorrentInfo
+	FileInfo          = tclient.FileInfo
+	TorrentProperties = tclient.TorrentProperties
+	TransferInfo      = tclient.TransferInfo
+	TrackerInfo       = tclient.TrackerInfo
+	AddOptions        = tclient.AddOptions
+)
 
 // Get returns the torrent with the given info hash, or nil if not present.
 func (c *Client) Get(ctx context.Context, hash string) (*TorrentInfo, error) {
@@ -283,19 +229,6 @@ func (c *Client) ListCategory(ctx context.Context) ([]TorrentInfo, error) {
 	return list, nil
 }
 
-// FileInfo is a subset of qBittorrent's /torrents/files response.
-type FileInfo struct {
-	Index    int     `json:"index"`
-	Name     string  `json:"name"`
-	Size     int64   `json:"size"`
-	Progress float64 `json:"progress"`
-	Priority int     `json:"priority"`
-	// PieceRange is [firstPiece, lastPiece] — the torrent-global indices of the
-	// pieces this file spans. Present on qBittorrent >= 4.4; empty on older
-	// versions, in which case callers must fall back to Progress.
-	PieceRange []int `json:"piece_range"`
-}
-
 // Files lists the files within a torrent.
 func (c *Client) Files(ctx context.Context, hash string) ([]FileInfo, error) {
 	body, err := c.do(ctx, http.MethodGet, "/api/v2/torrents/files?hash="+url.QueryEscape(strings.ToLower(hash)), nil)
@@ -315,11 +248,11 @@ func (c *Client) Files(ctx context.Context, hash string) ([]FileInfo, error) {
 	return list, nil
 }
 
-// Piece states as reported by /torrents/pieceStates.
+// Piece states, re-exported from tclient so call sites are unchanged.
 const (
-	PieceNotDownloaded = 0
-	PieceDownloading   = 1
-	PieceDownloaded    = 2
+	PieceNotDownloaded = tclient.PieceNotDownloaded
+	PieceDownloading   = tclient.PieceDownloading
+	PieceDownloaded    = tclient.PieceDownloaded
 )
 
 // PieceStates returns the per-piece download state for the whole torrent:
@@ -338,14 +271,6 @@ func (c *Client) PieceStates(ctx context.Context, hash string) ([]int, error) {
 	return states, nil
 }
 
-// TorrentProperties is a subset of /torrents/properties.
-type TorrentProperties struct {
-	PieceSize   int64 `json:"piece_size"`
-	PiecesNum   int   `json:"pieces_num"`
-	TotalSize   int64 `json:"total_size"`
-	SeedingTime int64 `json:"seeding_time"`
-}
-
 // Properties returns torrent-level metadata, notably the piece size needed to
 // map byte offsets onto piece indices.
 func (c *Client) Properties(ctx context.Context, hash string) (*TorrentProperties, error) {
@@ -358,17 +283,6 @@ func (c *Client) Properties(ctx context.Context, hash string) (*TorrentPropertie
 		return nil, fmt.Errorf("qbittorrent properties decode: %w", err)
 	}
 	return &props, nil
-}
-
-// TransferInfo is a subset of /transfer/info — the client's global transfer
-// counters. UpInfoData/DlInfoData are the bytes transferred in the current
-// qBittorrent session, so they reset to 0 whenever qBittorrent restarts;
-// callers that want a running total must accumulate positive deltas.
-type TransferInfo struct {
-	UpInfoData  int64 `json:"up_info_data"`
-	DlInfoData  int64 `json:"dl_info_data"`
-	UpInfoSpeed int64 `json:"up_info_speed"`
-	DlInfoSpeed int64 `json:"dl_info_speed"`
 }
 
 // TransferInfo returns the client's global transfer counters, used by the
@@ -455,21 +369,14 @@ func (c *Client) Resume(ctx context.Context, hash string) error {
 	return err
 }
 
-// Tracker announce states reported by /torrents/trackers.
+// Tracker announce states, re-exported from tclient.
 const (
-	TrackerDisabled     = 0 // DHT/PeX/LSD pseudo-entries
-	TrackerNotContacted = 1
-	TrackerWorking      = 2
-	TrackerUpdating     = 3
-	TrackerNotWorking   = 4
+	TrackerDisabled     = tclient.TrackerDisabled
+	TrackerNotContacted = tclient.TrackerNotContacted
+	TrackerWorking      = tclient.TrackerWorking
+	TrackerUpdating     = tclient.TrackerUpdating
+	TrackerNotWorking   = tclient.TrackerNotWorking
 )
-
-// TrackerInfo is a subset of /torrents/trackers.
-type TrackerInfo struct {
-	URL    string `json:"url"`
-	Status int    `json:"status"`
-	Msg    string `json:"msg"`
-}
 
 // Trackers returns the announce state of every tracker on a torrent.
 //
@@ -495,7 +402,7 @@ func (c *Client) Trackers(ctx context.Context, hash string) ([]TrackerInfo, erro
 
 // NoShareLimit disables a qBittorrent share limit, meaning the torrent is never
 // stopped automatically on that criterion.
-const NoShareLimit = -1
+const NoShareLimit = tclient.NoShareLimit
 
 // SetShareLimits sets when qBittorrent may stop seeding a torrent by itself.
 //

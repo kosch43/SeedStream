@@ -25,6 +25,8 @@ import (
 	"seedstream/pkg/core/logger"
 	"seedstream/pkg/release"
 	"seedstream/pkg/torrent/qbittorrent"
+	"seedstream/pkg/torrent/tclient"
+	"seedstream/pkg/torrent/transmission"
 )
 
 // DefaultBufferBytes is how much of the target file's head must be on disk
@@ -122,11 +124,44 @@ type Manager struct {
 
 type clientEntry struct {
 	cfg    config.TorrentClientConfig
-	client *qbittorrent.Client
+	client tclient.Client
 }
 
-// NewManager builds a Manager from config. Disabled or qBittorrent-less entries
-// are skipped. Returns a Manager that reports Enabled()==false when none apply.
+// newClient builds the client for one configured entry, or nil when the entry
+// names a kind SeedStream cannot drive.
+//
+// An empty type means qBittorrent. Every configuration written before
+// Transmission existed omits the field, and defaulting it keeps those working
+// untouched.
+func newClient(c config.TorrentClientConfig) tclient.Client {
+	if strings.TrimSpace(c.URL) == "" {
+		return nil
+	}
+	switch config.NormalizeTorrentClientType(c.Type) {
+	case config.TorrentClientQbittorrent:
+		return qbittorrent.New(qbittorrent.Options{
+			BaseURL:  c.URL,
+			Username: c.Username,
+			Password: c.Password,
+			Category: c.CategoryOrDefault(),
+			SavePath: c.SavePath,
+		})
+	case config.TorrentClientTransmission:
+		return transmission.New(transmission.Options{
+			BaseURL:  c.URL,
+			Username: c.Username,
+			Password: c.Password,
+			Category: c.CategoryOrDefault(),
+			SavePath: c.SavePath,
+		})
+	default:
+		return nil
+	}
+}
+
+// NewManager builds a Manager from config. Disabled entries, entries with no
+// URL, and entries naming an unsupported client are skipped. Returns a Manager
+// that reports Enabled()==false when none apply.
 func NewManager(clients []config.TorrentClientConfig) *Manager {
 	m := &Manager{
 		BufferBytes:    DefaultBufferBytes,
@@ -136,22 +171,11 @@ func NewManager(clients []config.TorrentClientConfig) *Manager {
 		if !c.IsEnabled() {
 			continue
 		}
-		if strings.ToLower(strings.TrimSpace(c.Type)) != "qbittorrent" {
+		client := newClient(c)
+		if client == nil {
 			continue
 		}
-		if strings.TrimSpace(c.URL) == "" {
-			continue
-		}
-		m.clients = append(m.clients, &clientEntry{
-			cfg: c,
-			client: qbittorrent.New(qbittorrent.Options{
-				BaseURL:  c.URL,
-				Username: c.Username,
-				Password: c.Password,
-				Category: c.CategoryOrDefault(),
-				SavePath: c.SavePath,
-			}),
-		})
+		m.clients = append(m.clients, &clientEntry{cfg: c, client: client})
 	}
 	return m
 }
@@ -414,7 +438,7 @@ func (m *Manager) GetSeedingStatus(ctx context.Context, hash, clientName string)
 }
 
 // clientByName finds the managed qBittorrent client with the given name.
-func (m *Manager) clientByName(name string) *qbittorrent.Client {
+func (m *Manager) clientByName(name string) tclient.Client {
 	for _, e := range m.clients {
 		if e.cfg.Name == name {
 			return e.client
@@ -501,7 +525,7 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 	// Resolve which qBittorrent client to use: prefer the stream-level override
 	// so each member can point to their own seedbox, fall back to the first
 	// globally configured client.
-	var c *qbittorrent.Client
+	var c tclient.Client
 	var clientName, remotePath string
 	if clientOverride != nil && strings.TrimSpace(clientOverride.URL) != "" {
 		c = qbittorrent.New(qbittorrent.Options{
@@ -787,7 +811,7 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 // momentary dip in the rate would extend a wait already in progress, and the
 // caller has a fixed budget to spend. ceiling is the requirement as first
 // computed, which nothing may exceed.
-func (m *Manager) reviseHead(ctx context.Context, c *qbittorrent.Client, hash string, current, ceiling int64, profile PlaybackProfile, warned *bool) int64 {
+func (m *Manager) reviseHead(ctx context.Context, c tclient.Client, hash string, current, ceiling int64, profile PlaybackProfile, warned *bool) int64 {
 	if current <= 0 || current > ceiling {
 		current = ceiling
 	}
@@ -825,7 +849,7 @@ func (m *Manager) reviseHead(ctx context.Context, c *qbittorrent.Client, hash st
 // Deliberately conservative: an unreadable torrent, an unknown size, or a
 // download rate of zero all report false, so the ordinary path is what runs
 // whenever this cannot be established.
-func nearingCompletion(ctx context.Context, c *qbittorrent.Client, hash string) (bool, time.Duration) {
+func nearingCompletion(ctx context.Context, c tclient.Client, hash string) (bool, time.Duration) {
 	info, err := c.Get(ctx, hash)
 	if err != nil || info == nil || info.Size <= 0 || info.DlSpeed <= 0 {
 		return false, 0
@@ -840,7 +864,7 @@ func nearingCompletion(ctx context.Context, c *qbittorrent.Client, hash string) 
 
 // categoryHashes returns the set of info hashes currently in this client's
 // category, used to tell which torrent an Add actually created.
-func (m *Manager) categoryHashes(ctx context.Context, c *qbittorrent.Client) map[string]bool {
+func (m *Manager) categoryHashes(ctx context.Context, c tclient.Client) map[string]bool {
 	out := map[string]bool{}
 	list, err := c.ListCategory(ctx)
 	if err != nil {
@@ -867,7 +891,7 @@ func (m *Manager) categoryHashes(ctx context.Context, c *qbittorrent.Client) map
 // by another request would be picked up and served instead — the session, the
 // stream list and the release would all be correct while the bytes came from an
 // unrelated title.
-func (m *Manager) resolveAdded(ctx context.Context, c *qbittorrent.Client, hash string, before map[string]bool, releaseTitle string) (*qbittorrent.TorrentInfo, error) {
+func (m *Manager) resolveAdded(ctx context.Context, c tclient.Client, hash string, before map[string]bool, releaseTitle string) (*qbittorrent.TorrentInfo, error) {
 	for i := 0; i < 12; i++ {
 		if hash != "" {
 			if info, err := c.Get(ctx, hash); err == nil && info != nil {
