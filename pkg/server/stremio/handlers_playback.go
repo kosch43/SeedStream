@@ -159,7 +159,7 @@ func (s *Server) GetStreams(ctx context.Context, contentType, id string, stream 
 }
 
 func forceDisconnect(w http.ResponseWriter, r *http.Request, baseURL string) {
-	errorVideoURL := strings.TrimSuffix(baseURL, "/") + "/error/failure.mp4"
+	errorVideoURL := strings.TrimSuffix(baseURL, "/") + errorVideoPath
 	logger.Info("Redirecting to error video", "url", errorVideoURL)
 
 	w.Header().Set("Connection", "close")
