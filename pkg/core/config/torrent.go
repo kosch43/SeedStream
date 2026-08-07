@@ -11,7 +11,8 @@ import "strings"
 // healthy on private trackers; nothing is leeched-and-discarded.
 type TorrentClientConfig struct {
 	Name string `json:"name"`
-	// Type of client. Currently "qbittorrent" is supported.
+	// Type of client: "qbittorrent" or "transmission". Empty means qBittorrent,
+	// so configurations written before Transmission was supported keep working.
 	Type string `json:"type"`
 	// URL of the client's WebUI, e.g. http://seedbox:8080 (no trailing slash needed).
 	URL      string `json:"url"`
@@ -33,6 +34,35 @@ type TorrentClientConfig struct {
 	// Leave empty when both services share a filesystem.
 	RemotePath string `json:"remote_path,omitempty"`
 	Enabled    *bool  `json:"enabled,omitempty"`
+}
+
+// Supported download client kinds.
+const (
+	TorrentClientQbittorrent  = "qbittorrent"
+	TorrentClientTransmission = "transmission"
+)
+
+// SupportedTorrentClientTypes lists the kinds SeedStream can drive, for the UI.
+func SupportedTorrentClientTypes() []string {
+	return []string{TorrentClientQbittorrent, TorrentClientTransmission}
+}
+
+// NormalizeTorrentClientType canonicalises a configured client type.
+//
+// An empty type means qBittorrent: every configuration written before
+// Transmission was supported omits the field, and they must keep working
+// without being rewritten. An unrecognised type is returned lowercased so the
+// caller can reject it by name rather than silently treating it as qBittorrent
+// and pointing a Transmission URL at a qBittorrent client.
+func NormalizeTorrentClientType(t string) string {
+	switch s := strings.ToLower(strings.TrimSpace(t)); s {
+	case "", TorrentClientQbittorrent, "qbit", "qb":
+		return TorrentClientQbittorrent
+	case TorrentClientTransmission, "transmission-daemon", "transmissionbt":
+		return TorrentClientTransmission
+	default:
+		return s
+	}
 }
 
 // IsTorrentIndexerType reports whether an indexer type denotes a torrent (Torznab)

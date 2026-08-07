@@ -10,11 +10,40 @@ import { HardDrive, Plus, Settings, Trash2 } from "lucide-react"
 
 const CACHE_CLEARED_SUFFIX = ' Search cache cleared.'
 
+// The clients SeedStream can drive. Each carries the labels its own users would
+// recognise: Transmission has no categories, it has labels, and its RPC lives at
+// a fixed path rather than on a WebUI root.
+const CLIENT_TYPES = [
+  {
+    value: 'qbittorrent',
+    label: 'qBittorrent',
+    urlLabel: 'qBittorrent WebUI URL',
+    urlPlaceholder: 'http://seedbox:8080',
+    categoryLabel: 'Category',
+    note: 'Downloads sequentially with first and last pieces prioritised.',
+  },
+  {
+    value: 'transmission',
+    label: 'Transmission',
+    urlLabel: 'Transmission RPC URL',
+    urlPlaceholder: 'http://seedbox:9091',
+    categoryLabel: 'Label',
+    note: 'Sequential download needs Transmission 4.1 or newer; on 4.0 and older, pieces arrive in whatever order the swarm sends them.',
+  },
+]
+
+function clientType(value) {
+  return CLIENT_TYPES.find((t) => t.value === value) || CLIENT_TYPES[0]
+}
+
 function normalizeDraft(draft) {
   const v = draft || {}
+  // An empty type means qBittorrent — that is what every client configured
+  // before Transmission was supported looks like, and they must not change.
+  const type = CLIENT_TYPES.some((t) => t.value === v.type) ? v.type : 'qbittorrent'
   return {
     name: (v.name || '').trim(),
-    type: 'qbittorrent',
+    type,
     url: (v.url || '').trim(),
     username: v.username || '',
     password: v.password || '',
@@ -30,9 +59,10 @@ function emptyDraft() {
 }
 
 function summarize(client) {
-  const parts = []
+  const kind = clientType(client.type)
+  const parts = [kind.label]
   if (client.url) parts.push(client.url)
-  parts.push(`Category: ${client.category || 'seedstream'}`)
+  parts.push(`${kind.categoryLabel}: ${client.category || 'seedstream'}`)
   if (client.remote_path && client.save_path) {
     parts.push(`${client.remote_path} → ${client.save_path}`)
   } else if (client.save_path) {
@@ -53,11 +83,12 @@ function TorrentClientDialog({ open, onOpenChange, initialValue, onSave, title, 
   }, [open, initialValue])
 
   const update = (patch) => setDraft((d) => ({ ...d, ...patch }))
+  const kind = clientType(draft.type)
 
   const handleSave = () => {
     const next = normalizeDraft(draft)
     if (!next.name) { setError('Name is required.'); return }
-    if (!next.url) { setError('WebUI URL is required (e.g. http://seedbox:8080).'); return }
+    if (!next.url) { setError(`${clientType(next.type).urlLabel} is required (e.g. ${clientType(next.type).urlPlaceholder}).`); return }
     const nameKey = next.name.toLowerCase()
     if (existingNames.some((n) => n.toLowerCase() === nameKey)) {
       setError('A torrent client with this name already exists.')
@@ -80,8 +111,25 @@ function TorrentClientDialog({ open, onOpenChange, initialValue, onSave, title, 
               onChange={(e) => update({ name: e.target.value })} autoComplete="off" />
           </div>
           <div className="flex flex-col gap-2">
-            <Label htmlFor="tc-url">qBittorrent WebUI URL</Label>
-            <Input id="tc-url" value={draft.url} placeholder="http://seedbox:8080"
+            <Label>Client</Label>
+            <div className="grid grid-cols-2 gap-2">
+              {CLIENT_TYPES.map((t) => (
+                <Button
+                  key={t.value}
+                  type="button"
+                  variant={draft.type === t.value ? 'default' : 'outline'}
+                  onClick={() => update({ type: t.value })}
+                  aria-pressed={draft.type === t.value}
+                >
+                  {t.label}
+                </Button>
+              ))}
+            </div>
+            <p className="text-xs text-muted-foreground">{kind.note}</p>
+          </div>
+          <div className="flex flex-col gap-2">
+            <Label htmlFor="tc-url">{kind.urlLabel}</Label>
+            <Input id="tc-url" value={draft.url} placeholder={kind.urlPlaceholder}
               onChange={(e) => update({ url: e.target.value })} autoComplete="off" />
           </div>
           <div className="grid grid-cols-2 gap-3">
@@ -98,7 +146,7 @@ function TorrentClientDialog({ open, onOpenChange, initialValue, onSave, title, 
             </div>
           </div>
           <div className="flex flex-col gap-2">
-            <Label htmlFor="tc-cat">Category</Label>
+            <Label htmlFor="tc-cat">{kind.categoryLabel}</Label>
             <Input id="tc-cat" value={draft.category} placeholder="seedstream"
               onChange={(e) => update({ category: e.target.value })} autoComplete="off" />
           </div>
@@ -108,17 +156,17 @@ function TorrentClientDialog({ open, onOpenChange, initialValue, onSave, title, 
               onChange={(e) => update({ save_path: e.target.value })} autoComplete="off" />
             <p className="text-xs text-muted-foreground">
               The path SeedStream reads torrent files from. On a same-machine setup this is
-              qBittorrent's download directory. On a remote seedbox, set this to the local
+              the client's own download directory. On a remote seedbox, set this to the local
               mount point (e.g. <code className="font-mono">/mnt/seedbox</code>).
             </p>
           </div>
           <div className="flex flex-col gap-2">
-            <Label htmlFor="tc-remote-path">Remote path (qBittorrent's path on the seedbox)</Label>
+            <Label htmlFor="tc-remote-path">Remote path ({kind.label}'s path on the seedbox)</Label>
             <Input id="tc-remote-path" value={draft.remote_path} placeholder="/downloads/seedstream"
               onChange={(e) => update({ remote_path: e.target.value })} autoComplete="off" />
             <p className="text-xs text-muted-foreground">
-              Only needed when qBittorrent runs on a different machine. Enter the path qBittorrent
-              writes to on <em>its</em> machine. SeedStream will replace this prefix with the Save
+              Only needed when {kind.label} runs on a different machine. Enter the path it writes
+              to on <em>its</em> machine. SeedStream will replace this prefix with the Save
               path above when reading files. Leave blank if both services share a filesystem.
             </p>
           </div>
@@ -191,9 +239,9 @@ export function TorrentClientSettings({ fields, append, update, remove, replace,
             <div className="min-w-0 flex-1 space-y-0.5">
               <CardTitle>Torrent Clients</CardTitle>
               <CardDescription>
-                qBittorrent instances (on seedboxes) that receive torrent picks. Torrents download
-                sequentially for instant playback and keep seeding for private-tracker ratio —
-                SeedStream never seeds itself. Add a Torznab/Prowlarr indexer under Indexers to get torrent results.
+                qBittorrent or Transmission instances (on seedboxes) that receive torrent picks.
+                Torrents download sequentially for instant playback and keep seeding for
+                private-tracker ratio — SeedStream never seeds itself. Add a Torznab/Prowlarr indexer under Indexers to get torrent results.
               </CardDescription>
             </div>
             <Button type="button" size="sm" onClick={() => setAddOpen(true)} className="shrink-0">
@@ -204,7 +252,8 @@ export function TorrentClientSettings({ fields, append, update, remove, replace,
         <CardContent className="space-y-3">
           {clients.length === 0 && (
             <p className="text-sm text-muted-foreground">
-              No torrent clients configured. Add a qBittorrent client to enable torrent streaming.
+              No torrent clients configured. Add a qBittorrent or Transmission client to enable
+              torrent streaming.
             </p>
           )}
           {clients.map((client, index) => (
@@ -243,7 +292,7 @@ export function TorrentClientSettings({ fields, append, update, remove, replace,
         initialValue={emptyDraft()}
         onSave={handleAdd}
         title="Add torrent client"
-        description="Connect a qBittorrent WebUI running on a seedbox."
+        description="Connect a qBittorrent or Transmission instance running on a seedbox."
         saveLabel="Add"
         existingNames={existingNames}
       />
