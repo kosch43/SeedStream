@@ -327,30 +327,58 @@ func (c *Client) SetFilePriority(ctx context.Context, hash string, fileIndex, pr
 // Both endpoints are toggles, so the current state has to be read first;
 // calling them unconditionally would switch the flags off on a torrent that
 // already had them right.
+//
+// Race condition: when a torrent is newly added with these flags set, qBittorrent
+// may not have processed them yet when Get() is called, returning stale data
+// showing the flags as off. The toggle then flips them off after qBittorrent
+// processes the add. To handle this, we re-read the state before toggling and
+// verify after toggling, retrying if needed.
 func (c *Client) EnsureStreamingOrder(ctx context.Context, info *TorrentInfo) error {
 	if info == nil || strings.TrimSpace(info.Hash) == "" {
 		return nil
 	}
 	form := url.Values{}
 	form.Set("hashes", strings.ToLower(info.Hash))
-	var firstErr error
-	if !info.SequentialDL {
-		if _, err := c.do(ctx, http.MethodPost, "/api/v2/torrents/toggleSequentialDownload", form); err != nil {
-			firstErr = err
-		} else {
-			info.SequentialDL = true
+
+	for attempt := 0; attempt < 3; attempt++ {
+		current, err := c.Get(ctx, info.Hash)
+		if err != nil {
+			return err
 		}
-	}
-	if !info.FirstLastPiecePrio {
-		if _, err := c.do(ctx, http.MethodPost, "/api/v2/torrents/toggleFirstLastPiecePrio", form); err != nil {
-			if firstErr == nil {
+		if current != nil {
+			info.SequentialDL = current.SequentialDL
+			info.FirstLastPiecePrio = current.FirstLastPiecePrio
+		}
+
+		if info.SequentialDL && info.FirstLastPiecePrio {
+			return nil
+		}
+
+		var firstErr error
+		if !info.SequentialDL {
+			if _, err := c.do(ctx, http.MethodPost, "/api/v2/torrents/toggleSequentialDownload", form); err != nil {
 				firstErr = err
+			} else {
+				info.SequentialDL = true
 			}
-		} else {
-			info.FirstLastPiecePrio = true
 		}
+		if !info.FirstLastPiecePrio {
+			if _, err := c.do(ctx, http.MethodPost, "/api/v2/torrents/toggleFirstLastPiecePrio", form); err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+			} else {
+				info.FirstLastPiecePrio = true
+			}
+		}
+		if firstErr != nil {
+			return firstErr
+		}
+
+		time.Sleep(200 * time.Millisecond)
 	}
-	return firstErr
+
+	return nil
 }
 
 // Resume starts a paused/stopped torrent. qBittorrent 5.0 renamed the endpoint
