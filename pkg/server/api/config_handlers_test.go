@@ -9,6 +9,7 @@ import (
 func TestConfigForAdminAPIPreservesTrackerCredentials(t *testing.T) {
 	cfg := &config.Config{
 		AdminPasswordHash: "hash",
+		AdminSessionToken: "session-token",
 		AdminToken:        "token",
 		IndexerProxyURL:   "http://u:p@proxy-global:8080",
 		Indexers: []config.IndexerConfig{{
@@ -21,7 +22,7 @@ func TestConfigForAdminAPIPreservesTrackerCredentials(t *testing.T) {
 	}
 
 	out := configForAdminAPI(cfg)
-	if out.AdminPasswordHash != "" || out.AdminToken != "" {
+	if out.AdminPasswordHash != "" || out.AdminSessionToken != "" || out.AdminToken != "" {
 		t.Fatalf("expected admin auth secrets to be cleared, got %#v", out)
 	}
 	if out.Indexers[0].APIKey != "key" || out.Indexers[0].Username != "user" || out.Indexers[0].Password != "pass" {

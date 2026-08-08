@@ -187,96 +187,13 @@ Now when you search something in Stremio, SeedStream's releases appear alongside
 
 ---
 
-## Step 5: Disk Watchdog (recommended)
+## Step 5: Disk Guard (recommended)
 
-Torrents downloading can still fill the disk before the ratio limit kicks in. Install a simple watchdog that stops all torrents at 85% usage:
+The disk guard is integrated into Cerberus. Set **Settings → Advanced → Disk guard threshold (%)** to `85` (or another value) to pause SeedStream torrents when the filesystem containing a torrent client's local `save_path` reaches that usage. Set it to `0` to disable it.
 
-Create `/opt/scripts/disk-guard.sh`:
+Cerberus checks the filesystem during its normal watchdog pass, pauses torrents without deleting data, and does not immediately resume them while disk pressure remains. Normal watchdog behavior returns after usage drops five percentage points below the threshold.
 
-```bash
-#!/bin/bash
-set -uo pipefail
-
-LOGFILE="/opt/seedstream/disk-guard.log"
-exec >> "$LOGFILE" 2>&1
-
-QBIT_URL="http://127.0.0.1:8080"   # or http://LAN-IP:8080 if qBittorrent is elsewhere
-QBIT_USER="admin"                   # your qBittorrent WebUI credentials (Step 1)
-QBIT_PASS="YOURPASSWORD"
-STOP_THRESHOLD=85
-TARGET="/opt/seedstream/downloads"  # the disk that holds torrents
-
-pct=$(df -P "$TARGET" | awk 'NR==2 {gsub(/%/,"",$5); print $5}')
-echo "[disk-guard] $(date '+%F %T') used=${pct}% limit=${STOP_THRESHOLD}%"
-
-[ "$pct" -ge "$STOP_THRESHOLD" ] || exit 0
-
-# qBittorrent v5 login: the session ID comes back in a Set-Cookie header
-SID=$(wget -S -O - --post-data="username=${QBIT_USER}&password=${QBIT_PASS}" \
-  "${QBIT_URL}/api/v2/auth/login" 2>&1 | grep -oP 'QBT_SID_[0-9]+=[^;]+' | head -1)
-
-if [ -z "$SID" ]; then
-  echo "[disk-guard] ERROR: qBittorrent login failed (no SID)"
-  exit 1
-fi
-
-wget -q -O - --post-data='hashes=all' --header="Cookie: SID=$SID" \
-  "${QBIT_URL}/api/v2/torrents/stop"
-echo "[disk-guard] stopped all torrents (${pct}%)"
-```
-
-Make it executable and test it:
-
-```bash
-chmod +x /opt/scripts/disk-guard.sh && /opt/scripts/disk-guard.sh
-```
-
-> On qBittorrent v5 the endpoints are `torrents/stop` / `torrents/start` — v4 used `pause` / `resume`. The script above targets v5.
-
-Schedule it every 5 minutes with cron:
-
-```bash
-crontab -e
-```
-
-```
-*/5 * * * * /opt/scripts/disk-guard.sh
-```
-
-Or as a systemd timer if you prefer:
-
-```bash
-sudo systemctl edit --force --full disk-guard.timer
-```
-
-```ini
-[Unit]
-Description=Run disk guard every 5 minutes
-
-[Timer]
-OnBootSec=5min
-OnUnitActiveSec=5min
-
-[Install]
-WantedBy=timers.target
-```
-
-```bash
-sudo systemctl edit --force --full disk-guard.service
-```
-
-```ini
-[Unit]
-Description=Stop torrents when disk is full
-
-[Service]
-Type=oneshot
-ExecStart=/opt/scripts/disk-guard.sh
-```
-
-```bash
-sudo systemctl enable --now disk-guard.timer
-```
+The guard can inspect only paths mounted on the SeedStream host. With a remote seedbox, configure a local download mount as the torrent client's `save_path`; a remote-only path cannot be measured from this process.
 
 ---
 

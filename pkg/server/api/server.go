@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -40,6 +41,8 @@ type Server struct {
 	metricsMu       sync.Mutex
 	lastMetricsAt   time.Time
 	metricsInFlight bool
+	configSaveMu    sync.Mutex
+	reloadMu        sync.Mutex
 }
 
 type Client struct {
@@ -47,7 +50,16 @@ type Client struct {
 	send   chan WSMessage
 	stream *auth.Stream
 
-	user *auth.Stream
+	user  *auth.Stream
+	admin bool
+
+	ctx           context.Context
+	cancel        context.CancelFunc
+	done          chan struct{}
+	lifecycleOnce sync.Once
+	closeOnce     sync.Once
+	sendMu        sync.RWMutex
+	closed        bool
 }
 
 func NewServer(cfg *config.Config, sessMgr *session.Manager, strmServer *stremio.Server, indexer indexer.Indexer, streamManager *auth.StreamManager, tmdbAPIKey, tvdbAPIKey string) *Server {
@@ -79,27 +91,83 @@ func (s *Server) broadcastLogs() {
 		msg := WSMessage{Type: "log_entry", Payload: json.RawMessage(fmt.Sprintf("%q", msgStr))}
 
 		s.clientsMu.Lock()
+		clients := make([]*Client, 0, len(s.clients))
 		for client := range s.clients {
-			select {
-			case client.send <- msg:
-			default:
-			}
+			clients = append(clients, client)
 		}
 		s.clientsMu.Unlock()
+		for _, client := range clients {
+			trySendWS(client, msg)
+		}
 	}
 }
 
 func (s *Server) AddClient(client *Client) {
+	if client == nil {
+		return
+	}
+	client.ensureLifecycle(context.Background())
 	s.clientsMu.Lock()
 	s.clients[client] = true
 	s.clientsMu.Unlock()
 }
 
 func (s *Server) RemoveClient(client *Client) {
+	if client == nil {
+		return
+	}
 	s.clientsMu.Lock()
 	delete(s.clients, client)
 	s.clientsMu.Unlock()
-	close(client.send)
+	client.stop()
+}
+
+func (c *Client) context() context.Context {
+	if c == nil {
+		return context.Background()
+	}
+	c.sendMu.RLock()
+	defer c.sendMu.RUnlock()
+	if c.ctx == nil {
+		return context.Background()
+	}
+	return c.ctx
+}
+
+func (c *Client) ensureLifecycle(parent context.Context) {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	c.lifecycleOnce.Do(func() {
+		if c.ctx == nil {
+			c.ctx = parent
+		}
+		c.ctx, c.cancel = context.WithCancel(c.ctx)
+		c.done = make(chan struct{})
+		if c.closed {
+			c.cancel()
+			close(c.done)
+		}
+	})
+}
+
+func (c *Client) stop() {
+	if c == nil {
+		return
+	}
+	c.closeOnce.Do(func() {
+		c.sendMu.Lock()
+		c.closed = true
+		if c.cancel != nil {
+			c.cancel()
+		}
+		if c.done != nil {
+			close(c.done)
+		}
+		c.sendMu.Unlock()
+		if c.conn != nil {
+			_ = c.conn.Close()
+		}
+	})
 }
 
 func (s *Server) SetIndexerCaps(caps map[string]*indexer.Caps) {
@@ -181,7 +249,17 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/auth/logout", s.handleLogout)
 	mux.HandleFunc("/api/info", s.handleInfo)
 
-	authMiddleware := auth.StreamAuthMiddleware(s.streamManager, func() string { return s.config.GetAdminUsername() }, func() string { return s.config.AdminToken })
+	authMiddleware := auth.AuthMiddleware(s.streamManager, func() string {
+		if s.config == nil {
+			return ""
+		}
+		return s.config.GetAdminUsername()
+	}, func() string {
+		if s.config == nil {
+			return ""
+		}
+		return s.config.AdminSessionToken
+	})
 	mux.Handle("/api/ws", authMiddleware(http.HandlerFunc(s.handleWebSocket)))
 	mux.Handle("/api/config", authMiddleware(http.HandlerFunc(s.handleConfig)))
 	mux.Handle("/api/cache/clear", authMiddleware(http.HandlerFunc(s.handleClearCache)))
@@ -202,6 +280,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/api/tmdb/tv/", authMiddleware(http.HandlerFunc(s.handleTMDBTV)))
 	mux.Handle("/api/search/streams", authMiddleware(http.HandlerFunc(s.handleStreams)))
 	mux.Handle("/api/search/releases", authMiddleware(http.HandlerFunc(s.handleSearchReleases)))
+	streamsHandler := authMiddleware(http.HandlerFunc(s.handleManagedStreams))
+	mux.Handle("/api/streams", streamsHandler)
+	mux.Handle("/api/streams/", streamsHandler)
 
 	mux.Handle("/api/logs/download", authMiddleware(http.HandlerFunc(s.handleDownloadLogs)))
 

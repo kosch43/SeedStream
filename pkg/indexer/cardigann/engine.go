@@ -14,7 +14,9 @@ import (
 
 	"github.com/PuerkitoBio/goquery"
 
+	"seedstream/pkg/core/config"
 	"seedstream/pkg/core/logger"
+	"seedstream/pkg/indexer/httpproxy"
 )
 
 // Engine drives one tracker: it holds the definition, the operator's
@@ -37,7 +39,9 @@ const loginTTL = 30 * time.Minute
 
 // NewEngine builds an engine for a definition. baseURLOverride lets the operator
 // point at a different domain when a tracker moves, without editing the file.
-func NewEngine(def *Definition, baseURLOverride string, settings map[string]string, timeout time.Duration) (*Engine, error) {
+// The optional indexer config preserves the legacy constructor while allowing
+// callers to apply the same proxy and verified TLS policy as Torznab clients.
+func NewEngine(def *Definition, baseURLOverride string, settings map[string]string, timeout time.Duration, indexerConfigs ...config.IndexerConfig) (*Engine, error) {
 	if def == nil {
 		return nil, fmt.Errorf("nil definition")
 	}
@@ -52,6 +56,14 @@ func NewEngine(def *Definition, baseURLOverride string, settings map[string]stri
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
+	var indexerCfg config.IndexerConfig
+	if len(indexerConfigs) > 0 {
+		indexerCfg = indexerConfigs[0]
+	}
+	tlsConfig, err := indexerCfg.TLSClientConfig()
+	if err != nil {
+		return nil, err
+	}
 	cfg := map[string]string{}
 	for k, v := range settings {
 		cfg[k] = v
@@ -62,11 +74,19 @@ func NewEngine(def *Definition, baseURLOverride string, settings map[string]stri
 			cfg[s.Name] = s.Default
 		}
 	}
+	transport := &http.Transport{
+		Proxy:               httpproxy.IndexerProxy(indexerCfg.ProxyURL),
+		TLSClientConfig:     tlsConfig,
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 100,
+		MaxConnsPerHost:     100,
+		IdleConnTimeout:     90 * time.Second,
+	}
 	return &Engine{
 		def:     def,
 		baseURL: base,
 		config:  cfg,
-		http:    &http.Client{Jar: jar, Timeout: timeout},
+		http:    &http.Client{Jar: jar, Timeout: timeout, Transport: transport},
 	}, nil
 }
 

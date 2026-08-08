@@ -124,7 +124,7 @@ func (s *Server) handleTMDBTV(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if _, ok := auth.StreamFromContext(r); !ok {
+	if !auth.IsAdminContext(r) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}

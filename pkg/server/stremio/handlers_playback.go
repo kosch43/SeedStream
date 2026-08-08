@@ -51,7 +51,7 @@ func (s *Server) buildStreamsForKey(ctx context.Context, key StreamSlotKey, stre
 // bootstrapPlaylistForPlay rebuilds the play list and deferred sessions the same way as /stream.
 func (s *Server) bootstrapPlaylistForPlay(ctx context.Context, key StreamSlotKey, stream *auth.Stream) (*playlistResult, error) {
 	if key.StreamID == "" {
-		key.StreamID = defaultStreamID
+		key.StreamID = streamID(stream)
 	}
 	isAIOStreams := streamUsesAIOStreamsProfile(stream)
 	list, err := s.buildPlaylist(ctx, key, isAIOStreams, stream)
@@ -66,7 +66,7 @@ func (s *Server) bootstrapPlaylistForPlay(ctx context.Context, key StreamSlotKey
 		return nil, fmt.Errorf("no candidates found")
 	}
 	for _, slotPath := range list.SlotPaths {
-		s.sessionManager.ClearSlotFailedDuringPlayback(slotPath)
+		s.sessionManager.ClearSlotFailedDuringPlaybackForStream(slotPath, streamID(stream))
 	}
 	s.ensureDeferredSessionsForPlaylist(list, key, stream)
 	return list, nil
@@ -75,9 +75,17 @@ func (s *Server) bootstrapPlaylistForPlay(ctx context.Context, key StreamSlotKey
 // recoverPlaySessionAfterEviction re-runs the /stream bootstrap and resolves to a playable slot.
 // Prioritizes the requested slot index from sessionID, falling back sequentially and wrapping around.
 func (s *Server) recoverPlaySessionAfterEviction(ctx context.Context, sessionID string, stream *auth.Stream) (*session.Session, string, error) {
+	canonicalID, err := canonicalizeStreamSlotID(sessionID, stream)
+	if err != nil {
+		return nil, "", err
+	}
+	sessionID = canonicalID
 	streamId, contentType, id, requestedIndex, ok := parseStreamSlotID(sessionID)
 	if !ok {
 		return nil, "", fmt.Errorf("invalid slot path %q", sessionID)
+	}
+	if streamId == "" {
+		streamId = streamID(stream)
 	}
 	key := StreamSlotKey{StreamID: streamId, ContentType: contentType, ID: id}
 	list, err := s.bootstrapPlaylistForPlay(ctx, key, stream)
@@ -104,7 +112,7 @@ func (s *Server) recoverPlaySessionAfterEviction(ctx context.Context, sessionID 
 			}
 			return nil, "", fmt.Errorf("no playable slot in rebuilt play list")
 		}
-		nextSess, err := s.sessionManager.GetSession(nextID)
+		nextSess, err := s.sessionManager.GetSessionForStream(nextID, streamID(stream))
 		if err != nil {
 			_, _, _, nextIndex, nextOK := parseStreamSlotID(nextID)
 			if !nextOK {
@@ -132,7 +140,8 @@ func (s *Server) applyExposedPlaylistOrder(list *playlistResult, key StreamSlotK
 	if !streamUsesAIOStreamsProfile(stream) {
 		return list
 	}
-	if order := s.sessionManager.GetStreamFailoverOrder(streamToken(stream), key.CacheKey()); len(order) > 0 {
+	key.StreamID = streamID(stream)
+	if order := canonicalizeFailoverOrder(s.sessionManager.GetStreamFailoverOrderForStream(streamToken(stream), streamID(stream), key.CacheKey()), stream); len(order) > 0 {
 		list = filterPlaylistByOrder(list, key, order)
 	}
 	return list
@@ -434,6 +443,7 @@ func (s *Server) ensureDeferredSessionsForPlaylist(list *playlistResult, key Str
 	if list == nil || list.Params == nil {
 		return
 	}
+	key.StreamID = streamID(stream)
 	n := len(list.Candidates)
 	createdCount := 0
 	reusedCount := 0
@@ -477,7 +487,7 @@ func (s *Server) ensureDeferredSessionsForPlaylist(list *playlistResult, key Str
 
 func (s *Server) resolveStreamSlot(ctx context.Context, key StreamSlotKey, index int, stream *auth.Stream) (*session.Session, error) {
 	if key.StreamID == "" {
-		key.StreamID = defaultStreamID
+		key.StreamID = streamID(stream)
 	}
 	isAIOStreams := streamUsesAIOStreamsProfile(stream)
 	list, err := s.buildPlaylist(ctx, key, isAIOStreams, stream)
@@ -495,6 +505,9 @@ func (s *Server) resolveStreamSlot(ctx context.Context, key StreamSlotKey, index
 }
 
 func (s *Server) resolveStreamSlotFromPlaylist(key StreamSlotKey, index int, list *playlistResult, stream *auth.Stream) (*session.Session, error) {
+	if key.StreamID == "" {
+		key.StreamID = streamID(stream)
+	}
 	requestedSlotPath := key.SlotPath(index)
 	candidateIndex := index
 	if len(list.SlotPaths) == len(list.Candidates) {
@@ -519,7 +532,7 @@ func (s *Server) resolveStreamSlotFromPlaylist(key StreamSlotKey, index int, lis
 	if err != nil {
 		return nil, fmt.Errorf("create deferred session: %w", err)
 	}
-	sess, err := s.sessionManager.GetSession(sessionID)
+	sess, err := s.sessionManager.GetSessionForStream(sessionID, streamID(stream))
 	if err != nil {
 		return nil, err
 	}
@@ -531,9 +544,18 @@ func (s *Server) resolveStreamSlotFromPlaylist(key StreamSlotKey, index int, lis
 // advances through releases so repeated clicks return :1, :2, :3, ... rather than always :1.
 // For slot :N (direct progression from a known position), deriveNextSlotID is used as-is.
 func (s *Server) handleNextRelease(w http.ResponseWriter, r *http.Request, stream *auth.Stream) {
-	sessionID := strings.TrimPrefix(r.URL.Path, "/next/")
-	if sessionID == "" {
+	rawSessionID := strings.TrimPrefix(r.URL.Path, "/next/")
+	if rawSessionID == "" {
 		http.Error(w, "Missing stream slot", http.StatusBadRequest)
+		return
+	}
+	sessionID, err := canonicalizeStreamSlotID(rawSessionID, stream)
+	if err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, errForeignStreamSlot) {
+			status = http.StatusForbidden
+		}
+		http.Error(w, err.Error(), status)
 		return
 	}
 	streamId, contentType, id, currentIndex, ok := parseStreamSlotID(sessionID)
@@ -541,22 +563,19 @@ func (s *Server) handleNextRelease(w http.ResponseWriter, r *http.Request, strea
 		http.Error(w, "Invalid stream slot", http.StatusBadRequest)
 		return
 	}
-	if streamId == "" {
-		streamId = defaultStreamID
-	}
 	key := StreamSlotKey{StreamID: streamId, ContentType: contentType, ID: id}
 
 	var nextSlotID string
-	var err error
+	var nextErr error
 	if currentIndex == 0 {
 		// The "next release" stream URL is always anchored to slot :0 regardless of how many times the
 		// user has already clicked "next". Use a cursor so successive clicks advance through the list.
-		nextSlotID, err = s.advanceNextReleaseCursor(r.Context(), key, stream)
+		nextSlotID, nextErr = s.advanceNextReleaseCursor(r.Context(), key, stream)
 	} else {
 		// Called from a specific non-zero slot (e.g. AIOStreams failover order progression).
-		nextSlotID, err = s.deriveNextSlotID(r.Context(), sessionID, stream)
+		nextSlotID, nextErr = s.deriveNextSlotID(r.Context(), sessionID, stream)
 	}
-	if err != nil || nextSlotID == "" {
+	if nextErr != nil || nextSlotID == "" {
 		http.Error(w, "No next release available", http.StatusNotFound)
 		return
 	}
@@ -580,7 +599,7 @@ type nextReleaseCursor struct {
 // of the /next/ URL from prematurely advancing through the playlist.
 func (s *Server) advanceNextReleaseCursor(ctx context.Context, key StreamSlotKey, stream *auth.Stream) (string, error) {
 	if key.StreamID == "" {
-		key.StreamID = defaultStreamID
+		key.StreamID = streamID(stream)
 	}
 	isAIOStreams := streamUsesAIOStreamsProfile(stream)
 	list, err := s.buildPlaylist(ctx, key, isAIOStreams, stream)
@@ -603,7 +622,7 @@ func (s *Server) advanceNextReleaseCursor(ctx context.Context, key StreamSlotKey
 
 	// If we have a pending slot, decide whether to stay or advance.
 	if cursor.pendingSlot != "" {
-		if s.sessionManager.GetSlotFailedDuringPlayback(cursor.pendingSlot) {
+		if s.sessionManager.GetSlotFailedDuringPlaybackForStream(cursor.pendingSlot, streamID(stream)) {
 			// Pending slot failed; fall through to find the next.
 			cursor.pendingSlot = ""
 		} else if _, committed := s.recordedSuccessSessionIDs.Load(cursor.pendingSlot); !committed {
@@ -627,7 +646,7 @@ func (s *Server) advanceNextReleaseCursor(ctx context.Context, key StreamSlotKey
 		if useSlotPaths {
 			slotPath = list.SlotPaths[i]
 		}
-		if !s.sessionManager.GetSlotFailedDuringPlayback(slotPath) {
+		if !s.sessionManager.GetSlotFailedDuringPlaybackForStream(slotPath, streamID(stream)) {
 			cursor.pendingSlot = slotPath
 			cursor.nextIndex = i + 1
 			return slotPath, nil
@@ -650,32 +669,82 @@ func parseStreamSlotID(sessionID string) (streamId, contentType, id string, inde
 		return "", "", "", 0, false
 	}
 	index, err := strconv.Atoi(parts[len(parts)-1])
-	if err != nil {
+	if err != nil || index < 0 {
 		return "", "", "", 0, false
 	}
-	if len(parts) == 3 {
+	if len(parts) >= 4 && (parts[1] == "movie" || parts[1] == "series") {
+		if parts[0] == "" {
+			return "", "", "", 0, false
+		}
+		streamId = parts[0]
+		contentType = parts[1]
+		id = strings.Join(parts[2:len(parts)-1], ":")
+		if id == "" {
+			return "", "", "", 0, false
+		}
+		return streamId, contentType, id, index, true
+	}
+	if parts[0] == "movie" || parts[0] == "series" {
 		contentType = parts[0]
-		id = parts[1]
+		id = strings.Join(parts[1:len(parts)-1], ":")
+		if id == "" {
+			return "", "", "", 0, false
+		}
 		return "", contentType, id, index, true
 	}
-	streamId = parts[0]
-	contentType = parts[1]
-	id = strings.Join(parts[2:len(parts)-1], ":")
-	return streamId, contentType, id, index, true
+	return "", "", "", 0, false
+}
+
+var errForeignStreamSlot = errors.New("stream slot belongs to another stream")
+
+// canonicalizeStreamSlotID maps legacy ownerless slot IDs to the authenticated
+// stream and rejects IDs explicitly owned by a different stream.
+func canonicalizeStreamSlotID(sessionID string, stream *auth.Stream) (string, error) {
+	streamIDValue, contentType, id, index, ok := parseStreamSlotID(sessionID)
+	if !ok {
+		return "", fmt.Errorf("invalid slot path %q", sessionID)
+	}
+	owner := streamID(stream)
+	if streamIDValue != "" && streamIDValue != owner {
+		return "", fmt.Errorf("%w: %s", errForeignStreamSlot, streamIDValue)
+	}
+	return formatStreamSlotPath(owner, contentType, id, index), nil
+}
+
+func canonicalizeFailoverOrder(order []string, stream *auth.Stream) []string {
+	if len(order) == 0 {
+		return nil
+	}
+	canonical := make([]string, 0, len(order))
+	for _, entry := range order {
+		if value, err := canonicalizeStreamSlotID(entry, stream); err == nil {
+			canonical = append(canonical, value)
+		}
+	}
+	return canonical
 }
 
 // handlePlay resolves the play slot's session (recovering after eviction) and
 // serves the torrent stream. If the torrent fails to prepare, the slot is
 // marked failed and the next fallback slot is tried before giving up.
 func (s *Server) handlePlay(w http.ResponseWriter, r *http.Request, streamConfig *auth.Stream) {
-	sessionID := strings.TrimPrefix(r.URL.Path, "/play/")
+	rawSessionID := strings.TrimPrefix(r.URL.Path, "/play/")
+	sessionID, canonicalErr := canonicalizeStreamSlotID(rawSessionID, streamConfig)
+	if canonicalErr != nil {
+		status := http.StatusBadRequest
+		if errors.Is(canonicalErr, errForeignStreamSlot) {
+			status = http.StatusForbidden
+		}
+		http.Error(w, canonicalErr.Error(), status)
+		return
+	}
 	logger.Debug("Play request", "session", sessionID)
 
-	sess, err := s.sessionManager.GetSession(sessionID)
+	sess, err := s.sessionManager.GetSessionForStream(sessionID, streamID(streamConfig))
 	if err != nil {
 		// The session may have been evicted. If the slot was marked as failed,
 		// redirect the client to the next working slot rather than 404.
-		if streamFailoverEnabled(streamConfig) && s.sessionManager.GetSlotFailedDuringPlayback(sessionID) {
+		if streamFailoverEnabled(streamConfig) && s.sessionManager.GetSlotFailedDuringPlaybackForStream(sessionID, streamID(streamConfig)) {
 			if nextID, deriveErr := s.deriveNextSlotID(r.Context(), sessionID, streamConfig); nextID != "" && deriveErr == nil {
 				nextURL := s.baseURLWithToken(streamConfig) + "/play/" + nextID
 				logger.Info("Session deleted (slot failed during playback), redirecting to next", "from", sessionID, "to", nextID)
@@ -695,7 +764,7 @@ func (s *Server) handlePlay(w http.ResponseWriter, r *http.Request, streamConfig
 		logger.Info("Play: recovered after cache/session eviction", "requested", sessionID, "playing", recoveredID)
 		sess = recoveredSess
 		sessionID = recoveredID
-	} else if streamFailoverEnabled(streamConfig) && s.sessionManager.GetSlotFailedDuringPlayback(sessionID) {
+	} else if streamFailoverEnabled(streamConfig) && s.sessionManager.GetSlotFailedDuringPlaybackForStream(sessionID, streamID(streamConfig)) {
 		if nextID, deriveErr := s.deriveNextSlotID(r.Context(), sessionID, streamConfig); nextID != "" && deriveErr == nil {
 			nextURL := s.baseURLWithToken(streamConfig) + "/play/" + nextID
 			logger.Info("Redirecting to next fallback (slot failed during playback)", "from", sessionID, "to", nextID)
@@ -766,9 +835,15 @@ func (s *Server) handlePlay(w http.ResponseWriter, r *http.Request, streamConfig
 		if deriveErr != nil || nextID == "" {
 			break
 		}
-		nextSess, nextErr := s.sessionManager.GetSession(nextID)
+		nextSess, nextErr := s.sessionManager.GetSessionForStream(nextID, streamID(streamConfig))
 		if nextErr != nil {
 			if streamId, contentType, id, index, ok := parseStreamSlotID(nextID); ok {
+				if streamId == "" {
+					streamId = streamID(streamConfig)
+				}
+				if streamId != streamID(streamConfig) {
+					break
+				}
 				key := StreamSlotKey{StreamID: streamId, ContentType: contentType, ID: id}
 				nextSess, nextErr = s.resolveStreamSlot(r.Context(), key, index, streamConfig)
 			}
@@ -792,9 +867,14 @@ func errorString(err error) string {
 }
 
 func (s *Server) deriveNextSlotID(ctx context.Context, currentID string, stream *auth.Stream) (string, error) {
+	canonicalID, err := canonicalizeStreamSlotID(currentID, stream)
+	if err != nil {
+		return "", err
+	}
+	currentID = canonicalID
 	streamId, contentType, id, currentIndex, ok := parseStreamSlotID(currentID)
 	if !ok {
-		return "", nil
+		return "", fmt.Errorf("invalid slot path %q", currentID)
 	}
 	key := StreamSlotKey{StreamID: streamId, ContentType: contentType, ID: id}
 	isAIOStreams := streamUsesAIOStreamsProfile(stream)
@@ -847,7 +927,7 @@ func (s *Server) deriveNextSlotIDFromPlaylist(currentID string, key StreamSlotKe
 		if useSlotPaths {
 			slotPath = list.SlotPaths[i]
 		}
-		if !s.sessionManager.GetSlotFailedDuringPlayback(slotPath) {
+		if !s.sessionManager.GetSlotFailedDuringPlaybackForStream(slotPath, streamID(stream)) {
 			return slotPath
 		}
 	}

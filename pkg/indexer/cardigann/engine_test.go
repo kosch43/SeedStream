@@ -2,12 +2,18 @@ package cardigann
 
 import (
 	"context"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"seedstream/pkg/core/config"
 )
 
 // fakeTracker is a stand-in private tracker: it requires a form login carrying a
@@ -253,5 +259,67 @@ func TestBaseURLOverride(t *testing.T) {
 	}
 	if len(results) != 2 {
 		t.Fatalf("expected results from the overridden host, got %d", len(results))
+	}
+}
+
+func TestEngineUsesVerifiedTLSAndPerIndexerCA(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "<html><body>ok</body></html>")
+	}))
+	defer server.Close()
+
+	def, err := Parse([]byte(fmt.Sprintf(testDefinition, server.URL)))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	withoutCA, err := NewEngine(def, "", nil, 10*time.Second)
+	if err != nil {
+		t.Fatalf("engine without CA: %v", err)
+	}
+	if tlsConfig := withoutCA.http.Transport.(*http.Transport).TLSClientConfig; tlsConfig.InsecureSkipVerify {
+		t.Fatal("Cardigann must not disable TLS verification")
+	}
+	if _, _, err := withoutCA.do(context.Background(), http.MethodGet, server.URL, nil, nil); err == nil {
+		t.Fatal("self-signed HTTPS tracker must fail without a custom CA")
+	}
+
+	caPath := filepath.Join(t.TempDir(), "tracker-ca.pem")
+	if err := os.WriteFile(caPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}), 0o600); err != nil {
+		t.Fatalf("write CA: %v", err)
+	}
+	withCA, err := NewEngine(def, "", nil, 10*time.Second, config.IndexerConfig{TLSCAFile: caPath})
+	if err != nil {
+		t.Fatalf("engine with CA: %v", err)
+	}
+	if _, _, err := withCA.do(context.Background(), http.MethodGet, server.URL, nil, nil); err != nil {
+		t.Fatalf("custom CA should trust tracker: %v", err)
+	}
+	if roots := withCA.http.Transport.(*http.Transport).TLSClientConfig.RootCAs; roots == nil {
+		t.Fatal("custom CA should configure a root pool")
+	}
+	if _, err := x509.SystemCertPool(); err != nil {
+		t.Logf("system certificate pool unavailable in test environment: %v", err)
+	}
+}
+
+func TestEnginePreservesConfiguredProxy(t *testing.T) {
+	var proxiedHost string
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxiedHost = r.URL.Host
+		fmt.Fprint(w, "<html><body>proxied</body></html>")
+	}))
+	defer proxy.Close()
+
+	def := &Definition{ID: "proxy", Name: "Proxy", Links: []string{"http://tracker.invalid/"}}
+	eng, err := NewEngine(def, "", nil, 10*time.Second, config.IndexerConfig{ProxyURL: proxy.URL})
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+	if _, _, err := eng.do(context.Background(), http.MethodGet, "http://tracker.invalid/search", nil, nil); err != nil {
+		t.Fatalf("proxied request: %v", err)
+	}
+	if proxiedHost != "tracker.invalid" {
+		t.Fatalf("proxy saw host %q, want tracker.invalid", proxiedHost)
 	}
 }

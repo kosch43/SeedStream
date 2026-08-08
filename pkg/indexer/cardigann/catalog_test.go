@@ -154,3 +154,31 @@ func TestBaseURLPrefersOverride(t *testing.T) {
 		t.Fatalf("override should win: %q", got)
 	}
 }
+
+func TestBaseURLFallsBackToLegacyLinks(t *testing.T) {
+	def, err := Parse([]byte(`
+id: legacy-tracker
+name: Legacy Tracker
+type: private
+links: []
+legacylinks:
+  - https://legacy.example/
+search:
+  paths:
+    - path: browse
+  rows:
+    selector: tr.row
+  fields:
+    title:
+      selector: a.title
+    download:
+      selector: a.download
+      attribute: href
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got := def.BaseURL(""); got != "https://legacy.example/" {
+		t.Fatalf("legacy fallback base URL = %q", got)
+	}
+}

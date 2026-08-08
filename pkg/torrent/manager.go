@@ -138,6 +138,10 @@ func newClient(c config.TorrentClientConfig) tclient.Client {
 	if strings.TrimSpace(c.URL) == "" {
 		return nil
 	}
+	clientSavePath := c.SavePath
+	if strings.TrimSpace(c.RemotePath) != "" {
+		clientSavePath = c.RemotePath
+	}
 	switch config.NormalizeTorrentClientType(c.Type) {
 	case config.TorrentClientQbittorrent:
 		return qbittorrent.New(qbittorrent.Options{
@@ -145,7 +149,7 @@ func newClient(c config.TorrentClientConfig) tclient.Client {
 			Username: c.Username,
 			Password: c.Password,
 			Category: c.CategoryOrDefault(),
-			SavePath: c.SavePath,
+			SavePath: clientSavePath,
 		})
 	case config.TorrentClientTransmission:
 		return transmission.New(transmission.Options{
@@ -153,7 +157,7 @@ func newClient(c config.TorrentClientConfig) tclient.Client {
 			Username: c.Username,
 			Password: c.Password,
 			Category: c.CategoryOrDefault(),
-			SavePath: c.SavePath,
+			SavePath: clientSavePath,
 		})
 	default:
 		return nil
@@ -742,6 +746,16 @@ func (m *Manager) Resume(ctx context.Context, clientName, hash string) error {
 		return fmt.Errorf("torrent client %q not found", clientName)
 	}
 	return c.Resume(ctx, hash)
+}
+
+// Pause stops a torrent on the named client without deleting its data. The
+// Cerberus disk guard uses this when the download filesystem is full.
+func (m *Manager) Pause(ctx context.Context, clientName, hash string) error {
+	c := m.clientByName(clientName)
+	if c == nil {
+		return fmt.Errorf("torrent client %q not found", clientName)
+	}
+	return c.Pause(ctx, hash)
 }
 
 // SeedingUploadTotals returns each configured client's current session upload
@@ -1600,10 +1614,12 @@ var seasonEpisodeRe = regexp.MustCompile(`(?i)s(\d{1,2})[ ._-]*e(\d{1,3})`)
 // whose name matches SxxExx; otherwise it falls back to the largest video file.
 func pickVideoFile(files []qbittorrent.FileInfo, season, episode int) *qbittorrent.FileInfo {
 	var largest *qbittorrent.FileInfo
+	videoCount := 0
 	for i := range files {
 		if !isVideo(files[i].Name) {
 			continue
 		}
+		videoCount++
 		if largest == nil || files[i].Size > largest.Size {
 			largest = &files[i]
 		}
@@ -1619,6 +1635,9 @@ func pickVideoFile(files []qbittorrent.FileInfo, season, episode int) *qbittorre
 				}
 			}
 		}
+	}
+	if season > 0 && episode > 0 && videoCount > 1 {
+		return nil
 	}
 	return largest
 }

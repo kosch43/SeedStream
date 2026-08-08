@@ -103,10 +103,8 @@ func main() {
 		if found, _ := stateMgr.Get("admin", &stateAdmin); found {
 			cfg.AdminPasswordHash = stateAdmin.PasswordHash
 			cfg.AdminMustChangePassword = stateAdmin.MustChangePassword
-			if cfg.AdminToken == "" {
-				if tok, err := auth.GenerateToken(); err == nil {
-					cfg.AdminToken = tok
-				}
+			if _, err := cfg.EnsureBootstrapAdminPassword(); err != nil {
+				initialization.WaitForInputAndExit(fmt.Errorf("failed to initialize admin credentials: %w", err))
 			}
 			if err := cfg.Save(); err != nil {
 				logger.Warn("Failed to save config after admin migration", "err", err)
@@ -120,9 +118,8 @@ func main() {
 	}
 
 	{
-		if !cfg.ResetLegacyStreamState {
-			var stateStreams map[string]*auth.Stream
-			if found, _ := stateMgr.Get("devices", &stateStreams); found && len(stateStreams) > 0 {
+		var stateStreams map[string]*auth.Stream
+		if found, _ := stateMgr.Get("devices", &stateStreams); found && len(stateStreams) > 0 {
 				if cfg.Streams == nil {
 					cfg.Streams = make(map[string]*config.StreamEntry)
 				}
@@ -164,7 +161,6 @@ func main() {
 					_ = stateMgr.Flush()
 					logger.Info("Migrated streams from state.json to config.json")
 				}
-			}
 		}
 	}
 
@@ -238,7 +234,13 @@ func main() {
 	mux.Handle("/api/", apiServer.Handler())
 
 	addr := fmt.Sprintf(":%d", comp.Config.AddonPort)
-	srv := &http.Server{Addr: addr, Handler: mux}
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
 
 	tlsMode := comp.Config.EffectiveTLSMode()
 	if comp.Config.TLSEnabled {

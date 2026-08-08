@@ -1,7 +1,5 @@
 export function getApiUrl(path) {
-  const base = window.location.pathname.split('/').filter(Boolean)[0]
-  const prefix = base && base !== 'api' ? `/${base}` : ''
-  return `${prefix}${path}`
+  return path
 }
 
 export const UNAUTHORIZED_EVENT = 'seedstream:unauthorized'
@@ -14,10 +12,6 @@ export function notifyUnauthorized(detail = {}) {
 export async function apiFetch(path, options = {}) {
   const url = getApiUrl(path)
   const headers = new Headers(options.headers || {})
-  const storedToken = typeof window !== 'undefined' ? window.localStorage.getItem('auth_token') || '' : ''
-  if (storedToken && !headers.has('Authorization')) {
-    headers.set('Authorization', `Bearer ${storedToken}`)
-  }
   const res = await fetch(url, { credentials: 'include', ...options, headers })
   let data = null
   const contentType = res.headers.get('content-type')
