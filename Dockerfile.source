@@ -19,6 +19,9 @@ RUN npm run build
 FROM golang:1.25-alpine AS backend
 ENV CGO_ENABLED=0 GOTOOLCHAIN=auto
 WORKDIR /src
+# Review/test containers made from this stage are temporary and must not be
+# treated as deployable images by WUD.
+LABEL wud.watch="false"
 RUN apk add --no-cache git
 COPY go.mod go.sum ./
 RUN go mod download
