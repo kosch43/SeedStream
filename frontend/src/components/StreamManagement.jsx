@@ -54,7 +54,9 @@ function normalizeStreamDraft(draft) {
     indexer_mode: draft?.indexer_mode === 'failover' ? 'failover' : 'combine',
     username: (draft?.username || '').trim(),
     combine_results: draft?.combine_results !== false,
-    enable_failover: draft?.enable_failover !== false,
+    // Off unless explicitly enabled, matching the server: swapping a failed
+    // release for another adds a second torrent for the same film.
+    enable_failover: draft?.enable_failover === true,
     results_mode: normalizedFilterSortingMode === 'aiostreams' || draft?.results_mode === 'display_all' ? 'display_all' : 'combined_stream',
     auto_add_indexers: draft?.auto_add_indexers === true,
     indexers: uniquePreserveOrder(draft?.indexers),
@@ -128,7 +130,7 @@ function generalCompactValues(stream) {
 
 function generalDetailValues(stream) {
   return [
-    `Failover ${stream?.enable_failover !== false ? 'On' : 'Off'}`,
+    `Failover ${stream?.enable_failover === true ? 'On' : 'Off'}`,
     `Trackers ${(stream?.indexer_mode || 'combine') === 'failover' ? 'Failover' : 'Combine'}`,
     `Search ${stream?.combine_results !== false ? 'Combine' : 'First hit'}`,
     `Results ${stream?.results_mode === 'display_all' ? 'All' : 'Combine'}`,
@@ -551,12 +553,15 @@ function StreamDialog({
                 <div className="flex items-center justify-between gap-4">
                   <div className="text-sm font-medium">Failover</div>
                   <Switch
-                    checked={draft.enable_failover}
+                    checked={draft.enable_failover === true}
                     onCheckedChange={(checked) => setDraft((current) => ({ ...current, enable_failover: checked === true }))}
                   />
                 </div>
                 <p className="mt-3 text-sm text-muted-foreground">
-                  If enabled, SeedStream automatically tries the next release in order when the current torrent fails during playback.
+                  When a release fails to start, try the next one in order automatically. Off by
+                  default: each attempt adds another torrent to the seedbox, so one title can
+                  become several downloads the viewer never chose. With it off, a failure is shown
+                  and the next release stays one click away in the stream list.
                 </p>
               </div>
 

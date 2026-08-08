@@ -81,6 +81,27 @@ const seedCheckGrace = 20 * time.Second
 // slot resumes a download that is already part-finished.
 var ErrStillBuffering = errors.New("torrent is still buffering")
 
+// ErrStreamingOrderUnavailable marks a prepare abandoned because sequential
+// download could not be confirmed on the torrent.
+//
+// It shares ErrStillBuffering's meaning for the caller — keep this release,
+// retry it — for a different reason. The obstacle is the download client, not
+// the release, so the next candidate would be handed to the same client and
+// fail the same way. Treating it as a failed candidate walks the whole fallback
+// list, starting a download for each, and ends with several copies of one film
+// competing for the same bandwidth and none of them ordered any better.
+var ErrStreamingOrderUnavailable = errors.New("streaming order could not be enabled")
+
+// KeepReleaseOnRetry reports whether a prepare failure means "try this same
+// release again" rather than "try a different one".
+//
+// The failover loop's real question is not what went wrong but whether another
+// candidate could do better. Everything that answers no belongs here, so the
+// loop asks once instead of accumulating sentinel checks that drift apart.
+func KeepReleaseOnRetry(err error) bool {
+	return errors.Is(err, ErrStillBuffering) || errors.Is(err, ErrStreamingOrderUnavailable)
+}
+
 // fastCompletionWindow is the point at which waiting for the whole file beats
 // waiting for an ordered head.
 //
@@ -1067,11 +1088,15 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 		// the front. A torrent the client already held ignores the streaming flags
 		// on the add that "created" it, so without this a re-watch — or anything the
 		// user grabbed by hand — fills in rarest-first and never presents a
-		// continuous head, no matter how much of it is downloaded. Best-effort: a
-		// failure here means the requested streaming invariant cannot be proven, so
-		// do not start a player on a potentially sparse file.
+		// continuous head, no matter how much of it is downloaded. A failure here
+		// means the requested streaming invariant cannot be proven, so do not
+		// start a player on a potentially sparse file.
+		//
+		// Marked as a keep-this-release failure: the obstacle is the client, so
+		// handing the next candidate to the same client fails identically, and
+		// walking the fallback list would start a download for each of them.
 		if err := c.EnsureStreamingOrder(ctx, info); err != nil {
-			return nil, fmt.Errorf("enable streaming order: %w", err)
+			return nil, fmt.Errorf("%w: %w", ErrStreamingOrderUnavailable, err)
 		}
 	}
 	forceLeaseAcquired := false
