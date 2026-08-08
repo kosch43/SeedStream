@@ -69,6 +69,10 @@ type TorrentInfo struct {
 	// them back is the only way to find out.
 	SequentialDL       bool `json:"seq_dl"`
 	FirstLastPiecePrio bool `json:"f_l_piece_prio"`
+	ForceStart         bool `json:"force_start"`
+	// StreamingOrderSupported distinguishes an ordered client reporting "off"
+	// from an older client that has no sequential-download capability at all.
+	StreamingOrderSupported bool `json:"-"`
 }
 
 // SwarmSeeders returns how many seeders the tracker says the swarm holds, and

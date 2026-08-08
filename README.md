@@ -108,7 +108,7 @@ AIOStreams has to be able to reach SeedStream over the network: a cloud-hosted A
 
 ## Cerberus torrent health
 
-Cerberus is SeedStream's built-in torrent watchdog. It records which info-hash served which content, watches your seedbox for stalled torrents, and keeps a local blocklist so a torrent that already failed is not offered again — at search time and at playback time.
+Cerberus is SeedStream's built-in torrent watchdog. It records which info-hash served which content, watches your seedbox for stalled torrents, and keeps a local blocklist so a torrent that already failed is not offered again — at search time and at playback time. It also repairs qBittorrent's streaming order, prioritizes the selected video in multi-file torrents, and verifies that video's real first piece through qBittorrent's piece bitmap.
 
 Torrents with downloaded data are never deleted, only re-announced, so partial downloads can't turn into a Hit & Run on a private tracker. Per-tracker seeding time and ratio rules are configured under **Settings → Torrent Trackers**.
 

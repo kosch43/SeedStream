@@ -2,6 +2,8 @@ package torrent
 
 import (
 	"bytes"
+	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -133,5 +135,46 @@ func TestSeekBecomesReadableWhenPieceArrives(t *testing.T) {
 	}
 	if buf[0] != 0xEE {
 		t.Fatalf("unblocked read returned wrong data: %x", buf[0])
+	}
+}
+
+func TestSeekWaitStopsWhenRequestIsCanceled(t *testing.T) {
+	const pieceSize = 1 << 20
+	const fileSize = 16 * pieceSize
+	dir := t.TempDir()
+	path := filepath.Join(dir, "video.mkv")
+	if err := os.WriteFile(path, make([]byte, fileSize), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	q := &pieceQBit{pieceSize: pieceSize, totalPieces: 16, supportsPieces: true, fileSize: fileSize}
+	client := qbittorrent.New(qbittorrent.Options{BaseURL: q.server(t).URL, Category: "seedstream"})
+	avail := newFileAvailability(client, "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", 0, fileSize)
+	fh, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer fh.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	r := newSeekableFileReaderWithContext(ctx, fh, avail, fileSize, nil)
+	defer r.Close()
+	r.Seek(8*pieceSize, io.SeekStart)
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := r.Read(make([]byte, 4096))
+		result <- err
+	}()
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-result:
+		if err != context.Canceled {
+			t.Fatalf("canceled read returned %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("canceled read remained blocked")
 	}
 }

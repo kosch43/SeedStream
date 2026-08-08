@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 )
 
@@ -105,8 +106,8 @@ func TestEnsureStreamingOrderPartial(t *testing.T) {
 
 // TestEnsureStreamingOrderRaceCondition covers the race where a newly added
 // torrent has its flags set by Add(), but Get() returns stale data showing
-// them as off. The toggle would flip them off after qBittorrent processes
-// the add. The fix re-reads state before toggling and verifies after.
+// them as off. The confirmation read must observe the settled add state and
+// avoid toggling both flags back off.
 func TestEnsureStreamingOrderRaceCondition(t *testing.T) {
 	var calls []string
 	// Simulate qBittorrent processing the add after the first Get() call
@@ -127,10 +128,10 @@ func TestEnsureStreamingOrderRaceCondition(t *testing.T) {
 		}
 	})
 	mux.HandleFunc("/api/v2/torrents/toggleSequentialDownload", func(w http.ResponseWriter, r *http.Request) {
-		*calls = append(*calls, "seq")
+		calls = append(calls, "seq")
 	})
 	mux.HandleFunc("/api/v2/torrents/toggleFirstLastPiecePrio", func(w http.ResponseWriter, r *http.Request) {
-		*calls = append(*calls, "flpp")
+		calls = append(calls, "flpp")
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -142,12 +143,73 @@ func TestEnsureStreamingOrderRaceCondition(t *testing.T) {
 		t.Fatalf("EnsureStreamingOrder: %v", err)
 	}
 
-	// The first Get() showed flags off, so toggles were called
-	// The second Get() (verification) showed flags on, so no more toggles
-	if len(calls) != 2 || calls[0] != "seq" || calls[1] != "flpp" {
-		t.Fatalf("expected exactly one toggle of each flag, got %v", calls)
+	if len(calls) != 0 {
+		t.Fatalf("settled add state was already correct; no toggle should be sent, got %v", calls)
 	}
 	if !info.SequentialDL || !info.FirstLastPiecePrio {
 		t.Fatal("info should reflect the verified state (both flags on)")
+	}
+}
+
+func TestEnsureStreamingOrderSerializesConcurrentClients(t *testing.T) {
+	const hash = "abcdefabcdefabcdefabcdefabcdefabcdefabcd"
+	var mu sync.Mutex
+	state := TorrentInfo{Hash: hash}
+	var calls []string
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/auth/login", func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "SID", Value: "x"})
+		fmt.Fprint(w, "Ok.")
+	})
+	mux.HandleFunc("/api/v2/torrents/info", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		fmt.Fprintf(w, `[{"hash":%q,"seq_dl":%t,"f_l_piece_prio":%t}]`,
+			state.Hash, state.SequentialDL, state.FirstLastPiecePrio)
+	})
+	mux.HandleFunc("/api/v2/torrents/toggleSequentialDownload", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls = append(calls, "seq")
+		state.SequentialDL = !state.SequentialDL
+	})
+	mux.HandleFunc("/api/v2/torrents/toggleFirstLastPiecePrio", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls = append(calls, "flpp")
+		state.FirstLastPiecePrio = !state.FirstLastPiecePrio
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	clients := []*Client{
+		New(Options{BaseURL: srv.URL}),
+		New(Options{BaseURL: srv.URL}),
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for _, c := range clients {
+		wg.Add(1)
+		go func(c *Client) {
+			defer wg.Done()
+			errs <- c.EnsureStreamingOrder(context.Background(), &TorrentInfo{Hash: hash})
+		}(c)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("EnsureStreamingOrder: %v", err)
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(calls) != 2 || calls[0] != "seq" || calls[1] != "flpp" {
+		t.Fatalf("concurrent callers must toggle each flag exactly once, got %v", calls)
+	}
+	if !state.SequentialDL || !state.FirstLastPiecePrio {
+		t.Fatalf("streaming flags ended disabled: %+v", state)
 	}
 }

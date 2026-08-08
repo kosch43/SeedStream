@@ -26,10 +26,12 @@ const (
 	// where a dip has somewhere to fall before it starves the player.
 	rateDipFactor = 2
 
-	// MinHeadBytes is the smallest head worth starting on: the container header
-	// and index plus a few seconds of a modest stream. Below this the first read
-	// sits at the edge of the downloaded region and stalls immediately.
-	MinHeadBytes int64 = 4 * 1024 * 1024
+	// MinHeadBytes is the smallest head worth starting on. A single 4 MiB piece
+	// is enough to pass a piece check but not enough runway for a player to get
+	// through its initial probes before the next piece arrives. Four pieces at
+	// the common 4 MiB qBittorrent piece size gives the reader room to start
+	// without immediately catching the download frontier.
+	MinHeadBytes int64 = 16 * 1024 * 1024
 
 	// MaxHeadBytes bounds startup on an extreme bitrate, and keeps the prepare
 	// budget from being consumed entirely by buffering.
@@ -67,7 +69,9 @@ func (p PlaybackProfile) BytesPerSecond() float64 {
 // be worse than using the one thing that is actually known.
 //
 // The result is always bounded: never below MinHeadBytes, never above
-// MaxHeadBytes, and never more than a tenth of the file.
+// MaxHeadBytes, and normally no more than a tenth of the file. For a tiny file
+// where a tenth is below MinHeadBytes, the minimum runway wins and the whole
+// file may be required.
 func HeadBytesFor(p PlaybackProfile, dlBytesPerSec int64) int64 {
 	if !p.Valid() {
 		return 0
@@ -138,7 +142,7 @@ func clampHead(want, fileBytes int64) int64 {
 	// A tenth of the file is minutes of video at any bitrate, so it is always
 	// enough to start on, and it keeps a bad runtime estimate from becoming a
 	// long wait.
-	if ceiling := int64(float64(fileBytes) * StreamableHeadFraction); ceiling > 0 && want > ceiling {
+	if ceiling := int64(float64(fileBytes) * StreamableHeadFraction); ceiling > 0 && want > ceiling && ceiling >= MinHeadBytes {
 		want = ceiling
 	}
 	if want < MinHeadBytes {

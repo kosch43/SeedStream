@@ -3,6 +3,7 @@ package stremio
 import (
 	"context"
 	"fmt"
+	"io"
 	"mime"
 	"net"
 	"net/http"
@@ -138,6 +139,7 @@ func (s *Server) serveTorrent(w http.ResponseWriter, r *http.Request, sess *sess
 		logger.Warn("Torrent prepare failed", "session", sess.ID, "title", playRelease.Title, "err", err)
 		return fmt.Errorf("torrent still preparing: %w", err)
 	}
+	defer s.torrentManager.ReleasePlayback(res)
 
 	// Register the torrent with Cerberus so the watchdog can correlate stalled
 	// hashes back to their content IDs, and so a later viewing of this title can
@@ -183,7 +185,7 @@ func (s *Server) serveTorrent(w http.ResponseWriter, r *http.Request, sess *sess
 	})
 	defer sess.SetPositionSource(nil)
 
-	f, err := s.torrentManager.OpenForPlayback(res, playhead)
+	f, err := s.torrentManager.OpenForPlayback(prepCtx, res, playhead)
 	if err != nil {
 		logger.Error("Torrent file not readable", "session", sess.ID, "path", res.AbsPath, "err", err)
 		return fmt.Errorf("torrent file not readable by SeedStream (check that the qBittorrent save path is mounted and readable): %w", err)
@@ -224,7 +226,17 @@ func (s *Server) serveTorrent(w http.ResponseWriter, r *http.Request, sess *sess
 	// Count bytes so that a successful read is strong evidence the torrent
 	// is healthy: report it to Cerberus and mark the slot committed.
 	crw := &countingResponseWriter{ResponseWriter: w}
-	http.ServeContent(crw, r, res.Name, stat.ModTime(), f)
+	tracked := &trackingReadSeekCloser{ReadSeekCloser: f}
+	http.ServeContent(crw, r, res.Name, stat.ModTime(), tracked)
+	streamReadFailed := tracked.readErr != nil && r.Context().Err() == nil && prepCtx.Err() == nil
+	if streamReadFailed {
+		// Response bytes may already be committed, so do not return an error to
+		// this request. Mark the slot so the next player retry can fail over
+		// instead of reopening the same stalled range indefinitely.
+		s.sessionManager.SetSlotFailedDuringPlayback(sess.ID)
+		logger.Warn("Torrent stream read failed after playback started",
+			"session", sess.ID, "offset", playhead.Position().ByteOffset, "err", tracked.readErr)
+	}
 
 	sess.AddBytesRead(crw.written)
 	// Fold this stream's egress into the monthly upload guard so streaming, not
@@ -233,7 +245,7 @@ func (s *Server) serveTorrent(w http.ResponseWriter, r *http.Request, sess *sess
 		s.uploadMeter.AddStreamBytes(crw.written)
 	}
 	const minHealthyBytes = 512 * 1024
-	if crw.written >= minHealthyBytes {
+	if !streamReadFailed && crw.written >= minHealthyBytes {
 		s.markSessionServedSuccessfully(sess.ID, sess)
 		if s.cerberusClient != nil && registerHash != "" {
 			s.cerberusClient.ReportHealthy(registerHash, cerberusIDs)
@@ -293,6 +305,19 @@ func contentTypeForFile(name string) string {
 type countingResponseWriter struct {
 	http.ResponseWriter
 	written int64
+}
+
+type trackingReadSeekCloser struct {
+	io.ReadSeekCloser
+	readErr error
+}
+
+func (t *trackingReadSeekCloser) Read(p []byte) (int, error) {
+	n, err := t.ReadSeekCloser.Read(p)
+	if err != nil && err != io.EOF {
+		t.readErr = err
+	}
+	return n, err
 }
 
 func (c *countingResponseWriter) Write(b []byte) (int, error) {

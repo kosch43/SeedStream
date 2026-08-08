@@ -111,7 +111,7 @@ func TestHeadBoundsAlwaysHold(t *testing.T) {
 		if got > MaxHeadBytes {
 			t.Errorf("%s: head %d exceeds the cap %d", tc.name, got, MaxHeadBytes)
 		}
-		if ceiling := int64(float64(tc.p.FileBytes) * StreamableHeadFraction); got > ceiling && got > MinHeadBytes {
+		if ceiling := int64(float64(tc.p.FileBytes) * StreamableHeadFraction); ceiling >= MinHeadBytes && got > ceiling {
 			t.Errorf("%s: head %d exceeds a tenth of the file (%d)", tc.name, got, ceiling)
 		}
 		if got > tc.p.FileBytes {
