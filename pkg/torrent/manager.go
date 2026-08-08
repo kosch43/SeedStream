@@ -1264,6 +1264,18 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 						}
 					}
 				}
+				if fragmentedHead {
+					// The file has plenty of bytes but they are scattered —
+					// a small head check may pass while the runway beyond
+					// it is sparse. Starting on a minimum head that just
+					// happens to be contiguous leads to a stall seconds in:
+					// the player drains those and hits a hole. Wait for a
+					// deeper continuous run before beginning.
+					if floor := MinHeadBytes * 4; needHead < floor {
+						needHead = floor
+						headReady = false
+					}
+				}
 				if headReady {
 					abs := absFilePath(remotePath, c.SavePath(), info, f.Name)
 					res := &PrepareResult{
@@ -1488,6 +1500,15 @@ func (m *Manager) resolveAdded(ctx context.Context, c tclient.Client, hash strin
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-time.After(500 * time.Millisecond):
+		}
+	}
+	// Polling exhausted. When qBittorrent no-opped the add because the
+	// torrent was already present, neither a new hash appeared nor did the
+	// exact title match pass (indexer and client name the same release
+	// differently). A fuzzy match as a last resort catches that case.
+	if list, err := c.ListCategory(ctx); err == nil {
+		if best := bestTitleMatch(list, releaseTitle); best != nil {
+			return best, nil
 		}
 	}
 	return nil, fmt.Errorf("could not identify the torrent added for %q", releaseTitle)
