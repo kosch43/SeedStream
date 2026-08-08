@@ -114,6 +114,8 @@ Torrents with downloaded data are never deleted, only re-announced, so partial d
 
 Cerberus runs fully locally by default. **Settings → Advanced** can optionally point it at a central Cerberus server to share failure reports and pull a community blocklist.
 
+The same watchdog can optionally protect local disk space. Set **Disk guard threshold (%)** under **Settings → Advanced**; when a configured torrent client's local `save_path` reaches that percentage, Cerberus pauses SeedStream torrents without deleting data and resumes normal watchdog behavior after the disk recovers. Set it to `0` to disable.
+
 ---
 
 ## Troubleshooting

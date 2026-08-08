@@ -18,7 +18,7 @@ import (
 )
 
 type persistedStatsResponse struct {
-	Indexers  []persistence.IndexerMetric  `json:"indexers"`
+	Indexers []persistence.IndexerMetric `json:"indexers"`
 }
 
 func parseDateParam(raw string) (*time.Time, error) {
@@ -55,8 +55,7 @@ func (s *Server) handleRefreshIndexerCaps(w http.ResponseWriter, r *http.Request
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	stream, _ := auth.StreamFromContext(r)
-	if stream == nil || stream.Username != s.config.GetAdminUsername() {
+	if !auth.IsAdminContext(r) {
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
@@ -94,8 +93,7 @@ func (s *Server) handleCloseSession(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	stream, _ := auth.StreamFromContext(r)
-	if stream == nil || stream.Username != s.config.GetAdminUsername() {
+	if !auth.IsAdminContext(r) {
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
@@ -117,8 +115,7 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	stream, _ := auth.StreamFromContext(r)
-	if stream == nil || stream.Username != s.config.GetAdminUsername() {
+	if !auth.IsAdminContext(r) {
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
@@ -171,7 +168,7 @@ func (s *Server) handlePersistedStats(w http.ResponseWriter, r *http.Request) {
 	mgr := s.attemptLister
 	s.mu.RUnlock()
 	resp := persistedStatsResponse{
-		Indexers:  []persistence.IndexerMetric{},
+		Indexers: []persistence.IndexerMetric{},
 	}
 	if mgr == nil {
 		w.Header().Set("Content-Type", "application/json")
@@ -198,7 +195,7 @@ func (s *Server) handleStatsHistory(w http.ResponseWriter, r *http.Request) {
 	mgr := s.attemptLister
 	s.mu.RUnlock()
 	resp := persistedStatsResponse{
-		Indexers:  []persistence.IndexerMetric{},
+		Indexers: []persistence.IndexerMetric{},
 	}
 	if mgr == nil {
 		w.Header().Set("Content-Type", "application/json")

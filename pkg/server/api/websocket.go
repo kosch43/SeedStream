@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 	"seedstream/pkg/core/logger"
 	"seedstream/pkg/core/paths"
 	"seedstream/pkg/indexer"
+	"seedstream/pkg/indexer/cardigann"
 	"seedstream/pkg/indexer/newznab"
 	"seedstream/pkg/initialization"
 	"seedstream/pkg/search/triage"
@@ -31,7 +33,12 @@ import (
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
-		return true
+		origin := strings.TrimSpace(r.Header.Get("Origin"))
+		if origin == "" {
+			return true
+		}
+		u, err := url.Parse(origin)
+		return err == nil && u.Host != "" && strings.EqualFold(u.Host, r.Host)
 	},
 }
 
@@ -41,31 +48,18 @@ type WSMessage struct {
 }
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-
-	stream, ok := auth.StreamFromContext(r)
-	if !ok {
-
-		cookie, err := r.Cookie("auth_session")
-		if err == nil && cookie != nil {
-			stream, err = s.streamManager.AuthenticateToken(cookie.Value, s.config.GetAdminUsername(), s.config.AdminToken)
-			if err != nil {
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
-				return
-			}
-			ok = true
-		}
-	}
-
-	if !ok {
+	if !auth.IsAdminContext(r) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
+	stream, _ := auth.StreamFromContext(r)
 
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		logger.Error("WS upgrade error", "err", err)
 		return
 	}
+	conn.SetReadLimit(1 << 20)
 	defer conn.Close()
 
 	client := &Client{
@@ -73,7 +67,9 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		send:   make(chan WSMessage, 256),
 		stream: stream,
 		user:   stream,
+		admin:  true,
 	}
+	client.ensureLifecycle(r.Context())
 	s.AddClient(client)
 
 	defer func() {
@@ -95,13 +91,16 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		cfg := s.config
 		s.mu.RUnlock()
 		var mustChangePassword bool
-		if client.stream != nil && client.stream.Username == cfg.GetAdminUsername() {
+		if client.admin && client.stream != nil {
 			mustChangePassword = cfg.AdminMustChangePassword
 		}
 		authInfo := map[string]interface{}{
 			"authenticated":        true,
-			"username":             client.stream.Username,
+			"username":             "",
 			"must_change_password": mustChangePassword,
+		}
+		if client.stream != nil {
+			authInfo["username"] = client.stream.Username
 		}
 		if s.strmServer != nil {
 			authInfo["version"] = s.strmServer.Version()
@@ -117,7 +116,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 					logger.Warn("WS read error", "err", err)
 				}
-				conn.Close()
+				client.stop()
 				return
 			}
 			switch msg.Type {
@@ -143,9 +142,10 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-ticker.C:
 			s.sendStats(client)
+		case <-client.done:
+			return
 		case msg, ok := <-client.send:
 			if !ok {
-				conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
 			if err := conn.WriteJSON(msg); err != nil {
@@ -156,6 +156,14 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 }
 
 func trySendWS(client *Client, msg WSMessage) bool {
+	if client == nil {
+		return false
+	}
+	client.sendMu.RLock()
+	defer client.sendMu.RUnlock()
+	if client.closed || client.send == nil {
+		return false
+	}
 	select {
 	case client.send <- msg:
 		return true
@@ -173,7 +181,7 @@ func (s *Server) sendStats(client *Client) {
 func (s *Server) sendConfig(client *Client) {
 
 	var cfg config.Config
-	if client.stream != nil && client.stream.Username == s.config.GetAdminUsername() {
+	if client.admin {
 		cfg = configForAdminAPI(s.config)
 	} else if client.stream != nil {
 		cfg = redactedConfigForViewer(s.config)
@@ -182,7 +190,7 @@ func (s *Server) sendConfig(client *Client) {
 	}
 
 	var payload []byte
-	if client.stream != nil && client.stream.Username == s.config.GetAdminUsername() {
+	if client.admin {
 		envKeys := config.GetEnvOverrideKeys()
 		pl := configPayload{Config: cfg, EnvOverrides: envKeys}
 		payload, _ = json.Marshal(pl)
@@ -212,72 +220,70 @@ func (s *Server) sendLogHistory(client *Client) {
 }
 
 func (s *Server) handleSaveConfigWS(conn *websocket.Conn, client *Client, payload json.RawMessage) {
-	var newCfg config.Config
-	if err := json.Unmarshal(payload, &newCfg); err != nil {
+	if !client.admin {
+		trySendWS(client, WSMessage{Type: "save_status", Payload: json.RawMessage(`{"status":"error","message":"Only admin can save global configuration"}`)})
+		return
+	}
+	s.configSaveMu.Lock()
+	defer s.configSaveMu.Unlock()
+	s.mu.RLock()
+	currentCfg := s.config
+	currentLoadedPath := s.config.LoadedPath
+	s.mu.RUnlock()
+	newCfg, err := mergeConfigPatch(currentCfg, payload)
+	if err != nil {
 		trySendWS(client, WSMessage{Type: "save_status", Payload: json.RawMessage(`{"status":"error","message":"Invalid config data"}`)})
 		return
 	}
 
-	if client.stream != nil && client.stream.Username == s.config.GetAdminUsername() {
-		s.mu.RLock()
-		currentCfg := s.config
-		currentLoadedPath := s.config.LoadedPath
-		s.mu.RUnlock()
-
-		plan := validationPlanFromPatch(payload, currentCfg, &newCfg)
-		fieldErrors := s.validateConfigWithPlan(&newCfg, plan)
-		if len(fieldErrors) > 0 {
-			errorPayload, _ := json.Marshal(map[string]interface{}{
-				"status":  "error",
-				"message": "Validation failed",
-				"errors":  fieldErrors,
-			})
-			trySendWS(client, WSMessage{Type: "save_status", Payload: errorPayload})
-			return
-		}
-
-		config.CopyEnvOverridesFrom(currentCfg, &newCfg)
-
-		newCfg.AdminPasswordHash = currentCfg.AdminPasswordHash
-		newCfg.AdminToken = currentCfg.AdminToken
-		newCfg.AdminMustChangePassword = currentCfg.AdminMustChangePassword
-		newCfg.Streams = cloneStreamEntries(currentCfg.Streams)
-		indexerRenames := renamedNamesByIndex(currentCfg.Indexers, newCfg.Indexers, func(indexer config.IndexerConfig) string {
-			return indexer.Name
+	plan := validationPlanFromPatch(payload, currentCfg, newCfg)
+	fieldErrors := s.validateConfigWithPlan(newCfg, plan)
+	if len(fieldErrors) > 0 {
+		errorPayload, _ := json.Marshal(map[string]interface{}{
+			"status":  "error",
+			"message": "Validation failed",
+			"errors":  fieldErrors,
 		})
-		applyStreamNameRenames(newCfg.Streams, indexerRenames)
-		applyStreamAutoSelections(&newCfg)
-
-		if currentLoadedPath == "" {
-			currentLoadedPath = filepath.Join(paths.GetDataDir(), "config.json")
-		}
-		newCfg.LoadedPath = currentLoadedPath
-
-		s.mu.Lock()
-		s.config = &newCfg
-		s.mu.Unlock()
-
-		if err := s.config.Save(); err != nil {
-			trySendWS(client, WSMessage{Type: "save_status", Payload: json.RawMessage([]byte(fmt.Sprintf(`{"status":"error","message":"Failed to save config: %s"}`, err.Error())))})
-			return
-		}
-
-		if s.strmServer != nil {
-			s.strmServer.ClearSearchCaches()
-		}
-		s.reloadConfigAsync(&newCfg)
-
-		s.sendConfig(client)
-		s.sendIndexerCaps(client)
-		trySendWS(client, WSMessage{Type: "save_status", Payload: json.RawMessage(`{"status":"success","message":"Configuration saved and reloaded. Search cache cleared."}`)})
+		trySendWS(client, WSMessage{Type: "save_status", Payload: errorPayload})
 		return
 	}
 
-	trySendWS(client, WSMessage{Type: "save_status", Payload: json.RawMessage(`{"status":"error","message":"Only admin can save global configuration"}`)})
+	config.CopyEnvOverridesFrom(currentCfg, newCfg)
+	newCfg.AdminPasswordHash = currentCfg.AdminPasswordHash
+	newCfg.AdminSessionToken = currentCfg.AdminSessionToken
+	newCfg.AdminToken = currentCfg.AdminToken
+	newCfg.AdminMustChangePassword = currentCfg.AdminMustChangePassword
+	newCfg.Streams = cloneStreamEntries(currentCfg.Streams)
+	indexerRenames := renamedNamesByIndex(currentCfg.Indexers, newCfg.Indexers, func(indexer config.IndexerConfig) string {
+		return indexer.Name
+	})
+	applyStreamNameRenames(newCfg.Streams, indexerRenames)
+	applyStreamAutoSelections(newCfg)
+	if currentLoadedPath == "" {
+		currentLoadedPath = filepath.Join(paths.GetDataDir(), "config.json")
+	}
+	newCfg.LoadedPath = currentLoadedPath
+	if err := newCfg.Save(); err != nil {
+		errorPayload, _ := json.Marshal(map[string]string{"status": "error", "message": "Failed to save config: " + err.Error()})
+		trySendWS(client, WSMessage{Type: "save_status", Payload: errorPayload})
+		return
+	}
+	s.mu.Lock()
+	s.config = newCfg
+	s.mu.Unlock()
+	if s.strmServer != nil {
+		s.strmServer.ClearSearchCaches()
+	}
+	s.reloadConfigAsync(newCfg)
+	s.sendConfig(client)
+	s.sendIndexerCaps(client)
+	trySendWS(client, WSMessage{Type: "save_status", Payload: json.RawMessage(`{"status":"success","message":"Configuration saved and reloaded. Search cache cleared."}`)})
 }
 
 func (s *Server) reloadConfigAsync(newCfg *config.Config) {
 	go func() {
+		s.reloadMu.Lock()
+		defer s.reloadMu.Unlock()
 		if s.app != nil {
 			comp, fullReload, err := s.app.Reload(newCfg)
 			if err != nil {
@@ -351,7 +357,7 @@ func (s *Server) handleFetchCapsWS(client *Client) {
 
 func (s *Server) handleUpdatePasswordWS(client *Client, payload json.RawMessage) {
 
-	if client.stream == nil || client.stream.Username != s.config.GetAdminUsername() {
+	if !client.admin {
 		trySendWS(client, WSMessage{Type: "save_status", Payload: json.RawMessage(`{"status":"error","message":"Only admin can save stream configurations"}`)})
 		return
 	}
@@ -471,7 +477,20 @@ func changedIndexes[T any](current, next []T) map[int]bool {
 func pingIndexerWithTimeout(indexerCfg config.IndexerConfig) error {
 	pingTimeout := indexerCfg.EffectiveTimeout()
 	ping := func() error {
-		return newznab.NewClient(indexerCfg, nil).Ping()
+		if config.IsDefinitionIndexerType(indexerCfg.Type) {
+			catalog := initialization.TrackerCatalog(paths.GetDataDir())
+			client, err := cardigann.NewClient(catalog, indexerCfg.DefinitionID, indexerCfg.Name,
+				indexerCfg.URL, indexerCfg.DefinitionSettings, indexerCfg.EffectiveTimeout(), indexerCfg)
+			if err != nil {
+				return err
+			}
+			return client.Ping()
+		}
+		client, err := newznab.NewClientWithError(indexerCfg, nil)
+		if err != nil {
+			return err
+		}
+		return client.Ping()
 	}
 
 	errCh := make(chan error, 1)
@@ -506,7 +525,11 @@ func verifyGlobalIndexerProxy(cfg *config.Config) error {
 		if idx.Enabled != nil && !*idx.Enabled {
 			continue
 		}
-		if strings.TrimSpace(idx.URL) == "" || strings.Contains(idx.APIPath, "{indexer_id}") {
+		if config.IsDefinitionIndexerType(idx.Type) {
+			if strings.TrimSpace(idx.DefinitionID) == "" {
+				continue
+			}
+		} else if strings.TrimSpace(idx.URL) == "" || strings.Contains(idx.APIPath, "{indexer_id}") {
 			continue
 		}
 
@@ -698,13 +721,30 @@ func (s *Server) validateConfigWithPlan(cfg *config.Config, plan configValidatio
 				if indexerCfg.Enabled != nil && !*indexerCfg.Enabled {
 					return
 				}
-				if indexerCfg.URL == "" {
+				isDefinition := config.IsDefinitionIndexerType(indexerCfg.Type)
+				if err := indexerCfg.ValidateTLS(); err != nil {
+					mu.Lock()
+					field := fmt.Sprintf("indexers.%d.tls_ca_file", index)
+					if indexerCfg.TLSInsecureSkipVerify {
+						field = fmt.Sprintf("indexers.%d.tls_insecure_skip_verify", index)
+					}
+					errors[field] = err.Error()
+					mu.Unlock()
+					return
+				}
+				if isDefinition && strings.TrimSpace(indexerCfg.DefinitionID) == "" {
+					mu.Lock()
+					errors[fmt.Sprintf("indexers.%d.definition_id", index)] = "Definition is required"
+					mu.Unlock()
+					return
+				}
+				if !isDefinition && indexerCfg.URL == "" {
 					mu.Lock()
 					errors[fmt.Sprintf("indexers.%d.url", index)] = "URL is required"
 					mu.Unlock()
 					return
 				}
-				if strings.Contains(indexerCfg.APIPath, "{indexer_id}") {
+				if !isDefinition && strings.Contains(indexerCfg.APIPath, "{indexer_id}") {
 					mu.Lock()
 					errors[fmt.Sprintf("indexers.%d.api_path", index)] = "Replace {indexer_id} with the Prowlarr indexer ID (for example 1/api)"
 					mu.Unlock()
@@ -754,18 +794,29 @@ func (s *Server) handleStreamSearchWS(client *Client, payload json.RawMessage) {
 		if sent >= streamResultCap {
 			return false
 		}
+		select {
+		case <-client.context().Done():
+			return false
+		default:
+		}
 		payload, err := json.Marshal(stream)
 		if err != nil {
 			return true
 		}
-		trySendWS(client, WSMessage{Type: "stream_result", Payload: payload})
+		if !trySendWS(client, WSMessage{Type: "stream_result", Payload: payload}) {
+			return false
+		}
 		sent++
 		return sent < streamResultCap
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	parent := context.Background()
+	if client != nil {
+		parent = client.context()
+	}
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	ctx = stremio.WithStreamSink(ctx, sink)
 	go func() {
+		defer cancel()
 		defer func() {
 			donePayload, _ := json.Marshal(map[string]int{"count": sent})
 			trySendWS(client, WSMessage{Type: "stream_search_done", Payload: donePayload})

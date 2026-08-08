@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"seedstream/pkg/core/config"
 	"seedstream/pkg/core/logger"
 	"seedstream/pkg/indexer"
 )
@@ -20,12 +21,12 @@ type Client struct {
 }
 
 // NewClient builds an indexer client for a definition id from the catalog.
-func NewClient(cat *Catalog, definitionID, displayName, baseURLOverride string, settings map[string]string, timeout time.Duration) (*Client, error) {
+func NewClient(cat *Catalog, definitionID, displayName, baseURLOverride string, settings map[string]string, timeout time.Duration, indexerConfigs ...config.IndexerConfig) (*Client, error) {
 	def, ok := cat.Get(definitionID)
 	if !ok {
 		return nil, fmt.Errorf("tracker definition %q is not installed", definitionID)
 	}
-	eng, err := NewEngine(def, baseURLOverride, settings, timeout)
+	eng, err := NewEngine(def, baseURLOverride, settings, timeout, indexerConfigs...)
 	if err != nil {
 		return nil, err
 	}

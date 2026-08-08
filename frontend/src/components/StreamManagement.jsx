@@ -9,7 +9,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { ConfirmDialog } from "@/components/ConfirmDialog"
 import { apiFetch } from "@/api"
-import { ArrowUpDown, Check, ChevronDown, ChevronUp, Clipboard, Copy, Globe, GripVertical, Loader2, Plus, RefreshCw, Search, Server, Settings, Trash2 } from "lucide-react"
+import { ArrowUpDown, Check, ChevronDown, ChevronUp, Clipboard, Copy, GripVertical, Loader2, Plus, RefreshCw, Search, Server, Settings, Trash2 } from "lucide-react"
 
 const CACHE_CLEARED_SUFFIX = ' Search cache cleared.'
 
@@ -832,10 +832,6 @@ function StreamManagement({ globalConfig, movieSearchQueries = [], seriesSearchQ
   const [deleteTarget, setDeleteTarget] = useState('')
   const [regenerateTarget, setRegenerateTarget] = useState('')
   const [expandedStreams, setExpandedStreams] = useState({})
-  const [setPasswordTarget, setSetPasswordTarget] = useState('')
-  const [setPasswordValue, setSetPasswordValue] = useState('')
-  const [setPasswordSaving, setSetPasswordSaving] = useState(false)
-  const [setPasswordError, setSetPasswordError] = useState('')
 
   const indexerNames = useMemo(
     () => (globalConfig?.indexers || []).map((indexer) => indexer.name).filter(Boolean),
@@ -965,21 +961,27 @@ function StreamManagement({ globalConfig, movieSearchQueries = [], seriesSearchQ
     showStatus(null)
     let created = false
     let createdStream = null
+    let createdUsername = ''
     try {
       const payload = await apiFetch('/api/streams', {
         method: 'POST',
         body: JSON.stringify({ username: draft.username }),
       })
+      const returnedStream = payload?.user || payload?.stream || payload
+      createdUsername = (returnedStream?.username || '').trim()
+      if (!createdUsername || !returnedStream?.token) {
+        throw new Error('Create response did not include the canonical stream username and token.')
+      }
       created = true
-      createdStream = payload?.user || null
-      await saveStreamAssignments(draft.username, draft, draft)
+      createdStream = { username: createdUsername, token: returnedStream.token }
+      await saveStreamAssignments(createdUsername, draft, draft)
       setStreams((prev) => {
-        const next = prev.filter((stream) => stream.username !== draft.username)
-        next.push(buildStreamStateFromDraft(draft.username, createdStream?.token || '', draft, draft.indexer_overrides))
+        const next = prev.filter((stream) => stream.username !== createdUsername)
+        next.push(buildStreamStateFromDraft(createdUsername, createdStream.token, draft, draft.indexer_overrides))
         onStreamsChange?.(mapStreamsByUsername(next))
         return next
       })
-      const status = { type: 'success', message: `Stream "${draft.username}" created successfully.${CACHE_CLEARED_SUFFIX}` }
+      const status = { type: 'success', message: `Stream "${createdUsername}" created successfully.${CACHE_CLEARED_SUFFIX}` }
       showStatus(status)
       showFooterStatus(status)
       setAddDialogDraft(null)
@@ -987,7 +989,7 @@ function StreamManagement({ globalConfig, movieSearchQueries = [], seriesSearchQ
     } catch (err) {
       if (created) {
         try {
-          await apiFetch(`/api/streams/${encodeURIComponent(draft.username)}`, { method: 'DELETE' })
+          await apiFetch(`/api/streams/${encodeURIComponent(createdUsername)}`, { method: 'DELETE' })
         } catch {
           // Preserve the original create error below.
         }
@@ -1105,26 +1107,6 @@ function StreamManagement({ globalConfig, movieSearchQueries = [], seriesSearchQ
     }
   }
 
-  const handleSetStreamPassword = async (username, password) => {
-    setSetPasswordSaving(true)
-    setSetPasswordError('')
-    try {
-      await apiFetch(`/api/streams/${encodeURIComponent(username)}/set-password`, {
-        method: 'POST',
-        body: JSON.stringify({ password }),
-      })
-      const status = { type: 'success', message: `Password set for "${username}"` }
-      showStatus(status)
-      showFooterStatus(status)
-      setSetPasswordTarget('')
-      setSetPasswordValue('')
-    } catch (err) {
-      setSetPasswordError(err.message || 'Failed to set password')
-    } finally {
-      setSetPasswordSaving(false)
-    }
-  }
-
   const toggleExpandedStream = (username) => {
     setExpandedStreams((current) => ({
       ...current,
@@ -1182,22 +1164,6 @@ function StreamManagement({ globalConfig, movieSearchQueries = [], seriesSearchQ
                                 </Button>
                               </TooltipTrigger>
                               <TooltipContent>Edit stream</TooltipContent>
-                            </Tooltip>
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <Button
-                                  type="button"
-                                  variant="outline"
-                                  size="sm"
-                                  onClick={() => { setSetPasswordTarget(stream.username); setSetPasswordValue(''); setSetPasswordError('') }}
-                                  disabled={actionLoading !== null || loading}
-                                  className="h-9 px-2 text-xs"
-                                  aria-label={`Set password for ${stream.username}`}
-                                >
-                                  Set Password
-                                </Button>
-                              </TooltipTrigger>
-                              <TooltipContent>Set member login password</TooltipContent>
                             </Tooltip>
                             <Tooltip>
                               <TooltipTrigger asChild>
@@ -1419,44 +1385,6 @@ function StreamManagement({ globalConfig, movieSearchQueries = [], seriesSearchQ
           }
         }}
       />
-      <Dialog open={Boolean(setPasswordTarget)} onOpenChange={(nextOpen) => {
-        if (!nextOpen) { setSetPasswordTarget(''); setSetPasswordValue(''); setSetPasswordError('') }
-      }}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Set Password for {setPasswordTarget}</DialogTitle>
-            <DialogDescription>Set a login password for this member. They will use this to log into the web UI.</DialogDescription>
-          </DialogHeader>
-          <div className="space-y-3 py-2">
-            <div className="space-y-2">
-              <Label htmlFor="set-password-input">New Password</Label>
-              <Input
-                id="set-password-input"
-                type="password"
-                placeholder="At least 6 characters"
-                value={setPasswordValue}
-                onChange={e => setSetPasswordValue(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter' && setPasswordValue.trim().length >= 6) void handleSetStreamPassword(setPasswordTarget, setPasswordValue.trim()) }}
-                autoFocus
-              />
-            </div>
-            {setPasswordError && (
-              <div className="text-sm text-destructive">{setPasswordError}</div>
-            )}
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => { setSetPasswordTarget(''); setSetPasswordValue(''); setSetPasswordError('') }}>
-              Cancel
-            </Button>
-            <Button
-              onClick={() => void handleSetStreamPassword(setPasswordTarget, setPasswordValue.trim())}
-              disabled={setPasswordSaving || setPasswordValue.trim().length < 6}
-            >
-              {setPasswordSaving ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Saving...</> : 'Set Password'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </TooltipProvider>
   )
 }

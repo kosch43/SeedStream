@@ -10,6 +10,7 @@ import { StatisticsPage } from "@/components/StatisticsPage"
 import { LogsPage } from "@/components/LogsPage"
 import { CerberusPage } from "@/components/CerberusPage"
 import { ProfilePage } from "@/components/ProfilePage"
+import StreamManagement from './components/StreamManagement'
 import { getApiUrl, UNAUTHORIZED_EVENT } from './api'
 import { AlertCircle, Loader2 } from "lucide-react"
 
@@ -18,9 +19,8 @@ import { useAdminRuntime } from './hooks/useAdminRuntime'
 function App() {
   const [authChecked, setAuthChecked] = useState(false)
   const [authenticated, setAuthenticated] = useState(false)
-  const [isAdmin, setIsAdmin] = useState(true)
+  const [isAdmin, setIsAdmin] = useState(false)
   const [currentUser, setCurrentUser] = useState(null)
-  const [authToken, setAuthToken] = useState(localStorage.getItem('auth_token') || '')
   const [mustChangePassword, setMustChangePassword] = useState(false)
   const [theme, setTheme] = useState(localStorage.getItem('theme') || 'system')
   const hasLoggedOutRef = useRef(false)
@@ -46,7 +46,6 @@ function App() {
     sendCommand,
   } = useAdminRuntime({
     authenticated: shouldRunAdminRuntime,
-    authToken,
     hasLoggedOutRef,
     setAuthenticated,
     setCurrentUser,
@@ -60,47 +59,22 @@ function App() {
   }))
 
   useEffect(() => {
-    const token = localStorage.getItem('auth_token')
-    const pathParts = window.location.pathname.split('/').filter(p => p !== '')
-    const isLegacyPath = pathParts.length > 0 && pathParts[0] !== 'api'
-
-    if (!token && isLegacyPath) {
-      // Stremio token-in-URL path — no cookie/localStorage auth needed
-      hasLoggedOutRef.current = false
-      setAuthenticated(true)
-      setCurrentUser('legacy')
-      setAuthChecked(true)
-      return
-    }
-
-    // Verify the stored token against the server before showing the UI.
-    // This catches the case where the container was restarted and a new
-    // AdminToken was generated, making the stored cookie/token stale.
-    // We intentionally always check the server session cookie as well,
-    // so a valid cookie keeps the admin logged in even if localStorage
-    // was cleared or not yet populated.
+    // Dashboard authentication is cookie-only. Remove the pre-separation bearer
+    // token so it cannot be reused as an API or addon credential.
+    localStorage.removeItem('auth_token')
     fetch('/api/auth/check', {
       credentials: 'include',
-      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
     })
       .then(res => res.json().then(data => ({ ok: res.ok, data })))
       .then(({ ok, data }) => {
         if (ok && data.authenticated) {
-          const restoredToken = data.token || token || ''
           hasLoggedOutRef.current = false
-          setAuthToken(restoredToken)
           setAuthenticated(true)
           setCurrentUser(data.username)
           setIsAdmin(data.is_admin !== false)
           setMustChangePassword(data.must_change_password || false)
-          if (restoredToken) {
-            localStorage.setItem('auth_token', restoredToken)
-          }
         } else {
-          // Server rejected the token — clear stale state and show login
           setAuthenticated(false)
-          setAuthToken('')
-          if (token) localStorage.removeItem('auth_token')
         }
       })
       .catch(() => {
@@ -112,23 +86,19 @@ function App() {
       })
   }, [])
 
-  const handleLogin = (username, token, mustChange, isAdminFlag) => {
+  const handleLogin = (username, mustChange, isAdminFlag) => {
     hasLoggedOutRef.current = false
     setAuthenticated(true)
     setCurrentUser(username)
-    setAuthToken(token)
     setIsAdmin(isAdminFlag !== false)
     setMustChangePassword(mustChange)
-    localStorage.setItem('auth_token', token)
   }
 
   const clearAuthState = useCallback(() => {
     hasLoggedOutRef.current = true
     setAuthenticated(false)
     setCurrentUser(null)
-    setAuthToken('')
     setMustChangePassword(false)
-    localStorage.removeItem('auth_token')
     if (ws) {
       ws.close()
     }
@@ -241,6 +211,16 @@ function App() {
               <CerberusPage />
             </div>
           )}
+          {activePage === 'install' && (
+            <div className="pt-4 md:pt-5 pb-3 px-4 lg:px-5">
+              <StreamManagement
+                globalConfig={config}
+                movieSearchQueries={config?.movie_search_queries || []}
+                seriesSearchQueries={config?.series_search_queries || []}
+                initialStreamsByName={config?.streams || {}}
+              />
+            </div>
+          )}
           {activePage === 'logs' && (
             <LogsPage logs={logs} />
           )}
@@ -252,7 +232,6 @@ function App() {
                 sendCommand={sendCommand}
                 ws={ws}
                 onUsernameChanged={setCurrentUser}
-                addonToken={authToken}
               />
             </div>
           )}
@@ -264,7 +243,6 @@ function App() {
                 saveStatus={saveStatus}
                 clearSaveStatus={clearSaveStatus}
                 isSaving={isSaving}
-                adminToken={currentUser && currentUser !== 'legacy' ? authToken : null}
                 indexerCaps={indexerCaps}
                 stats={stats}
               />

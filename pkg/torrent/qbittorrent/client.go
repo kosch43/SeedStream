@@ -536,6 +536,22 @@ func (c *Client) SetForceStart(ctx context.Context, hash string, value bool) err
 	return err
 }
 
+// Pause stops a torrent. qBittorrent 5.0 renamed the endpoint from
+// /torrents/pause to /torrents/stop, so try the new name first and fall back to
+// the old one when the server predates the rename.
+func (c *Client) Pause(ctx context.Context, hash string) error {
+	if strings.TrimSpace(hash) == "" {
+		return nil
+	}
+	form := url.Values{}
+	form.Set("hashes", strings.ToLower(hash))
+	_, err := c.do(ctx, http.MethodPost, "/api/v2/torrents/stop", form)
+	if err != nil && strings.Contains(err.Error(), "HTTP 404") {
+		_, err = c.do(ctx, http.MethodPost, "/api/v2/torrents/pause", form)
+	}
+	return err
+}
+
 // Tracker announce states, re-exported from tclient.
 const (
 	TrackerDisabled     = tclient.TrackerDisabled

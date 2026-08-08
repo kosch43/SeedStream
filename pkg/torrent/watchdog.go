@@ -55,6 +55,7 @@ type Watchdog struct {
 	// lastRetentionReview paces the dry-run obligation report; obligations are
 	// measured in days so there is nothing to gain from reporting every tick.
 	lastRetentionReview time.Time
+	diskPressure        map[string]bool
 }
 
 // NewWatchdog creates a Watchdog. Returns nil when the torrent manager has no
@@ -66,7 +67,15 @@ func NewWatchdog(m *Manager, cer *cerberus.Client, idx indexer.Indexer, cfg *con
 	if m == nil || !m.Enabled() || cer == nil || idx == nil {
 		return nil
 	}
-	return &Watchdog{manager: m, cerberus: cer, indexer: idx, cfg: cfg, meter: meter, headWarned: make(map[string]bool)}
+	return &Watchdog{
+		manager:      m,
+		cerberus:     cer,
+		indexer:      idx,
+		cfg:          cfg,
+		meter:        meter,
+		headWarned:   make(map[string]bool),
+		diskPressure: make(map[string]bool),
+	}
 }
 
 // hnrRulesFor returns the H&R rules configured for the named indexer, or nil
@@ -246,6 +255,7 @@ func (w *Watchdog) check(ctx context.Context, stallThreshold time.Duration) {
 		logger.Warn("Cerberus watchdog: failed to list torrents", "err", err)
 		return
 	}
+	diskPressure := w.enforceDiskGuard(ctx, entries)
 
 	// Obligations heading toward a breach are worth knowing about promptly, so
 	// this runs every check rather than on the slower retention cadence.
@@ -263,6 +273,11 @@ func (w *Watchdog) check(ctx context.Context, stallThreshold time.Duration) {
 		// added it to keep seeding, so resume it. This runs regardless of
 		// progress and before the stall checks below.
 		if isPausedState(e.State) {
+			if diskPressure[e.ClientName] {
+				// The disk guard paused this torrent, so do not let the normal
+				// H&R safety resume path undo the emergency stop.
+				continue
+			}
 			w.handlePaused(ctx, e)
 			continue
 		}
@@ -395,6 +410,72 @@ func streamingHeadKey(clientName, hash string, fileIndex int) string {
 func headPieceMissing(firstPieceState, downloadedAfter int) bool {
 	return firstPieceState != tclient.PieceDownloaded &&
 		downloadedAfter >= streamingOrderMinDownloadedPieces
+}
+
+// enforceDiskGuard pauses only torrents belonging to a client whose local
+// SavePath is above the configured threshold. A five-point recovery buffer is
+// applied by the config layer so a full disk cannot cause pause/resume flapping.
+func (w *Watchdog) enforceDiskGuard(ctx context.Context, entries []TorrentHealthEntry) map[string]bool {
+	pressure := make(map[string]bool)
+	if w.cfg == nil {
+		w.diskPressure = pressure
+		return pressure
+	}
+	threshold := w.cfg.EffectiveDiskGuardThresholdPercent()
+	if threshold <= 0 {
+		w.diskPressure = pressure
+		return pressure
+	}
+	recovery := w.cfg.EffectiveDiskGuardRecoveryPercent()
+	byClient := make(map[string][]TorrentHealthEntry)
+	for _, e := range entries {
+		byClient[e.ClientName] = append(byClient[e.ClientName], e)
+	}
+	for _, client := range w.manager.clients {
+		path := strings.TrimSpace(client.cfg.SavePath)
+		if path == "" {
+			continue
+		}
+		used, err := diskUsagePercent(path)
+		if err != nil {
+			logger.Warn("Cerberus disk guard: could not inspect download filesystem",
+				"client", client.cfg.Name, "path", path, "err", err)
+			continue
+		}
+		wasPressure := w.diskPressure[client.cfg.Name]
+		isPressure := used >= threshold || (wasPressure && used > recovery)
+		if isPressure {
+			pressure[client.cfg.Name] = true
+		}
+		if isPressure != wasPressure {
+			if isPressure {
+				logger.Warn("Cerberus disk guard: download filesystem is full; pausing SeedStream torrents",
+					"client", client.cfg.Name, "path", path, "used_percent", used, "threshold_percent", threshold)
+			} else {
+				logger.Info("Cerberus disk guard: download filesystem recovered; torrents may resume",
+					"client", client.cfg.Name, "path", path, "used_percent", used, "recovery_percent", recovery)
+			}
+		}
+		if !isPressure {
+			continue
+		}
+		for _, e := range byClient[client.cfg.Name] {
+			// Completed torrents do not consume download space. Leave them
+			// seeding so an emergency disk stop cannot create a needless H&R risk.
+			if e.Progress >= 0.999 {
+				continue
+			}
+			if isPausedState(e.State) {
+				continue
+			}
+			if err := w.manager.Pause(ctx, e.ClientName, e.Hash); err != nil {
+				logger.Warn("Cerberus disk guard: failed to pause torrent",
+					"client", e.ClientName, "hash", e.Hash, "err", err)
+			}
+		}
+	}
+	w.diskPressure = pressure
+	return pressure
 }
 
 // syncUploadMeter folds the seedbox's BitTorrent upload into the monthly upload

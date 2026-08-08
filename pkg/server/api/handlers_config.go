@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -22,12 +23,36 @@ func configForAdminAPI(cfg *config.Config) config.Config {
 	}
 	out := *cfg
 	out.AdminPasswordHash = ""
+	out.AdminSessionToken = ""
 	out.AdminToken = ""
 	return out
 }
 
 func redactedConfigForViewer(cfg *config.Config) config.Config {
 	return cfg.RedactForAPI()
+}
+
+func mergeConfigPatch(current *config.Config, body []byte) (*config.Config, error) {
+	if current == nil {
+		return nil, fmt.Errorf("configuration unavailable")
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil || raw == nil {
+		return nil, fmt.Errorf("config payload must be a JSON object")
+	}
+	currentJSON, err := json.Marshal(current)
+	if err != nil {
+		return nil, fmt.Errorf("failed to prepare config update: %w", err)
+	}
+	var next config.Config
+	if err := json.Unmarshal(currentJSON, &next); err != nil {
+		return nil, fmt.Errorf("failed to prepare config update: %w", err)
+	}
+	if err := json.Unmarshal(body, &next); err != nil {
+		return nil, fmt.Errorf("invalid config data: %w", err)
+	}
+	next.LoadedPath = current.LoadedPath
+	return &next, nil
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
@@ -47,9 +72,12 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	stream, _ := auth.StreamFromContext(r)
+	if s.config == nil {
+		http.Error(w, "Configuration unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	var cfg config.Config
-	if stream != nil && stream.Username == s.config.GetAdminUsername() {
+	if auth.IsAdminContext(r) {
 		cfg = configForAdminAPI(s.config)
 	} else {
 		cfg = redactedConfigForViewer(s.config)
@@ -58,7 +86,7 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		cfg.AdminUsername = s.config.GetAdminUsername()
 	}
 	w.Header().Set("Content-Type", "application/json")
-	if stream != nil && stream.Username == s.config.GetAdminUsername() {
+	if auth.IsAdminContext(r) {
 		envKeys := config.GetEnvOverrideKeys()
 		json.NewEncoder(w).Encode(configPayload{Config: cfg, EnvOverrides: envKeys})
 	} else {
@@ -71,11 +99,12 @@ func (s *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	stream, _ := auth.StreamFromContext(r)
-	if stream == nil || stream.Username != s.config.GetAdminUsername() {
+	if !auth.IsAdminContext(r) {
 		http.Error(w, "Only admin can save global configuration", http.StatusForbidden)
 		return
 	}
+	s.configSaveMu.Lock()
+	defer s.configSaveMu.Unlock()
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		s.writeSaveStatus(w, "error", "Invalid config data", nil)
@@ -87,35 +116,28 @@ func (s *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	currentLoadedPath := s.config.LoadedPath
 	s.mu.RUnlock()
 
-	currentJSON, err := json.Marshal(currentCfg)
+	newCfg, err := mergeConfigPatch(currentCfg, body)
 	if err != nil {
-		s.writeSaveStatus(w, "error", "Failed to prepare config update", nil)
+		s.writeSaveStatus(w, "error", err.Error(), nil)
 		return
 	}
 
-	var newCfg config.Config
-	if err := json.Unmarshal(currentJSON, &newCfg); err != nil {
-		s.writeSaveStatus(w, "error", "Failed to prepare config update", nil)
-		return
-	}
-	if err := json.Unmarshal(body, &newCfg); err != nil {
-		s.writeSaveStatus(w, "error", "Invalid config data", nil)
-		return
-	}
-
-	plan := validationPlanFromPatch(body, currentCfg, &newCfg)
-	fieldErrors := s.validateConfigWithPlan(&newCfg, plan)
+	plan := validationPlanFromPatch(body, currentCfg, newCfg)
+	fieldErrors := s.validateConfigWithPlan(newCfg, plan)
 	if len(fieldErrors) > 0 {
 		s.writeSaveStatus(w, "error", "Validation failed", fieldErrors)
 		return
 	}
 
-	config.CopyEnvOverridesFrom(currentCfg, &newCfg)
+	config.CopyEnvOverridesFrom(currentCfg, newCfg)
+	// Authentication fields are server-managed and never accepted from API
+	// payloads, including redacted payloads.
 	newCfg.AdminPasswordHash = currentCfg.AdminPasswordHash
+	newCfg.AdminSessionToken = currentCfg.AdminSessionToken
 	newCfg.AdminToken = currentCfg.AdminToken
 	newCfg.AdminMustChangePassword = currentCfg.AdminMustChangePassword
 	newCfg.Streams = cloneStreamEntries(currentCfg.Streams)
-	applyStreamAutoSelections(&newCfg)
+	applyStreamAutoSelections(newCfg)
 	if newCfg.AdminUsername == "" {
 		newCfg.AdminUsername = currentCfg.GetAdminUsername()
 	}
@@ -123,17 +145,17 @@ func (s *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 		currentLoadedPath = filepath.Join(paths.GetDataDir(), "config.json")
 	}
 	newCfg.LoadedPath = currentLoadedPath
-	s.mu.Lock()
-	s.config = &newCfg
-	s.mu.Unlock()
-	if err := s.config.Save(); err != nil {
+	if err := newCfg.Save(); err != nil {
 		s.writeSaveStatus(w, "error", "Failed to save config: "+err.Error(), nil)
 		return
 	}
+	s.mu.Lock()
+	s.config = newCfg
+	s.mu.Unlock()
 	if s.strmServer != nil {
 		s.strmServer.ClearSearchCaches()
 	}
-	s.reloadConfigAsync(&newCfg)
+	s.reloadConfigAsync(newCfg)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":  "success",
@@ -158,8 +180,7 @@ func (s *Server) handleClearCache(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	stream, _ := auth.StreamFromContext(r)
-	if stream == nil || stream.Username != s.config.GetAdminUsername() {
+	if !auth.IsAdminContext(r) {
 		http.Error(w, "Only admin can clear caches", http.StatusForbidden)
 		return
 	}

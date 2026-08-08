@@ -174,11 +174,6 @@ func (dm *StreamManager) load() error {
 				dm.streams[k].IndexerOverrides = make(map[string]config.IndexerSearchConfig)
 			}
 		}
-		if _, exists := dm.streams["admin"]; exists {
-			delete(dm.streams, "admin")
-			dm.saveLocked()
-			logger.Info("Removed legacy admin from streams (admin is in config)")
-		}
 	} else {
 		dm.streams = make(map[string]*Stream)
 	}
@@ -219,11 +214,6 @@ func (dm *StreamManager) syncStreamsFromConfigLocked() bool {
 			MustChangePassword:  e.MustChangePassword,
 		}
 	}
-	if _, exists := dm.streams["admin"]; exists {
-		delete(dm.streams, "admin")
-		logger.Info("Removed legacy admin from streams (admin is in config)")
-		return true
-	}
 	return false
 }
 
@@ -256,7 +246,13 @@ func (dm *StreamManager) saveLocked() error {
 				MustChangePassword:  d.MustChangePassword,
 			}
 		}
+		if dm.saveFn != nil {
+			return dm.saveFn()
+		}
 		return dm.cfg.Save()
+	}
+	if dm.manager == nil {
+		return fmt.Errorf("persistence manager unavailable")
 	}
 	return dm.manager.Set("devices", dm.streams)
 }
@@ -288,6 +284,12 @@ func HashPassword(password string) string {
 	return string(hash)
 }
 
+// CheckPassword verifies a password against either the current bcrypt format or
+// the legacy SHA-256 format used by older SeedStream installations.
+func CheckPassword(password, hash string) bool {
+	return checkPassword(password, hash)
+}
+
 // checkPassword verifies password against hash. Handles both the legacy
 // unsalted SHA-256 format (hex string) and the current bcrypt format ($2a$/…).
 // On a successful legacy-format match the caller should re-hash with HashPassword
@@ -310,21 +312,22 @@ func GenerateToken() (string, error) {
 	return hex.EncodeToString(hash[:]), nil
 }
 
-func (dm *StreamManager) Authenticate(loginUsername, password, adminUsername, adminPasswordHash, adminToken string) (*Stream, error) {
+func (dm *StreamManager) Authenticate(loginUsername, password, adminUsername, adminPasswordHash string, _ ...string) (*Stream, error) {
 	if adminUsername == "" {
 		adminUsername = "admin"
 	}
 
-	if loginUsername == adminUsername {
-		if adminPasswordHash == "" || adminToken == "" {
+	if strings.EqualFold(strings.TrimSpace(loginUsername), strings.TrimSpace(adminUsername)) {
+		if adminPasswordHash == "" {
 			return nil, fmt.Errorf("invalid credentials")
 		}
 		if !checkPassword(password, adminPasswordHash) {
 			return nil, fmt.Errorf("invalid credentials")
 		}
+		// Admin credentials are for the dashboard only. Do not return an addon
+		// token from the password authentication path.
 		return &Stream{
 			Username:         adminUsername,
-			Token:            adminToken,
 			IndexerOverrides: nil,
 		}, nil
 	}
@@ -353,25 +356,43 @@ func (dm *StreamManager) Authenticate(loginUsername, password, adminUsername, ad
 	return &cp, nil
 }
 
-func (dm *StreamManager) AuthenticateToken(token string, adminUsername, adminToken string) (*Stream, error) {
+// AuthenticateToken resolves an addon stream token. The optional tokens are
+// the legacy AdminToken addon alias and AdminSessionToken respectively. The
+// latter is explicitly rejected here, and the legacy alias resolves to the
+// configured default stream rather than an admin principal.
+func (dm *StreamManager) AuthenticateToken(token string, adminUsername string, compatibilityTokens ...string) (*Stream, error) {
 	if adminUsername == "" {
 		adminUsername = "admin"
 	}
-	if adminToken != "" && token == adminToken {
-		return &Stream{
-			Username:         adminUsername,
-			Token:            adminToken,
-			IndexerOverrides: nil,
-		}, nil
+	legacyAddonToken := ""
+	adminSessionToken := ""
+	if len(compatibilityTokens) > 0 {
+		legacyAddonToken = compatibilityTokens[0]
 	}
-	if token != "" {
-		dm.mu.RLock()
-		defer dm.mu.RUnlock()
-		for _, stream := range dm.streams {
-			if stream != nil && stream.Token != "" && stream.Token == token {
-				cp := *stream
-				return &cp, nil
+	if len(compatibilityTokens) > 1 {
+		adminSessionToken = compatibilityTokens[1]
+	}
+	if token == "" || token == adminSessionToken || (dm.cfg != nil && token == dm.cfg.AdminSessionToken) {
+		return nil, fmt.Errorf("invalid token")
+	}
+
+	dm.mu.RLock()
+	defer dm.mu.RUnlock()
+	if legacyAddonToken != "" && token == legacyAddonToken {
+		_, stream, exists := dm.streamByUsernameLocked("default")
+		if exists && stream != nil {
+			cp := *stream
+			return &cp, nil
+		}
+		return nil, fmt.Errorf("invalid token")
+	}
+	for _, stream := range dm.streams {
+		if stream != nil && stream.Token != "" && stream.Token == token {
+			if dm.cfg != nil && token == dm.cfg.AdminSessionToken {
+				return nil, fmt.Errorf("invalid token")
 			}
+			cp := *stream
+			return &cp, nil
 		}
 	}
 	return nil, fmt.Errorf("invalid token")
@@ -384,15 +405,10 @@ func (dm *StreamManager) GetStream(username string, adminUsername string) (*Stre
 	if adminUsername == "" {
 		adminUsername = "admin"
 	}
-	if username == adminUsername {
-		return nil, fmt.Errorf("admin is not a regular stream")
-	}
-
-	stream, exists := dm.streams[username]
+	_, stream, exists := dm.streamByUsernameLocked(username)
 	if !exists {
 		return nil, fmt.Errorf("stream not found")
 	}
-
 	cp := *stream
 	return &cp, nil
 }
@@ -403,8 +419,7 @@ func (dm *StreamManager) GetAllStreams() []Stream {
 
 	streams := make([]Stream, 0, len(dm.streams))
 	for _, stream := range dm.streams {
-
-		if stream.Username == "admin" {
+		if stream == nil {
 			continue
 		}
 		streams = append(streams, Stream{
@@ -473,11 +488,12 @@ func (dm *StreamManager) CreateStream(username, password string, adminUsername s
 	if username == "" {
 		return nil, fmt.Errorf("username cannot be empty")
 	}
-	if username == adminUsername {
-		return nil, fmt.Errorf("cannot create admin stream via this method")
+	previousStreams := dm.streams
+	if dm.streams == nil {
+		dm.streams = make(map[string]*Stream)
 	}
 
-	if _, exists := dm.streams[username]; exists {
+	if _, _, exists := dm.streamByUsernameLocked(username); exists {
 		return nil, fmt.Errorf("stream already exists")
 	}
 
@@ -499,10 +515,15 @@ func (dm *StreamManager) CreateStream(username, password string, adminUsername s
 		SeriesSearchQueries: []string{},
 	}
 
+	previousConfigStreams := dm.configStreamsLocked()
 	dm.streams[username] = stream
 
 	if err := dm.saveLocked(); err != nil {
 		delete(dm.streams, username)
+		if previousStreams == nil {
+			dm.streams = nil
+		}
+		dm.restoreConfigStreamsLocked(previousConfigStreams)
 		return nil, fmt.Errorf("failed to save stream: %w", err)
 	}
 
@@ -514,7 +535,7 @@ func (dm *StreamManager) RegenerateToken(username string) (string, error) {
 	dm.mu.Lock()
 	defer dm.mu.Unlock()
 
-	stream, exists := dm.streams[username]
+	key, stream, exists := dm.streamByUsernameLocked(username)
 	if !exists {
 		return "", fmt.Errorf("stream not found")
 	}
@@ -524,13 +545,17 @@ func (dm *StreamManager) RegenerateToken(username string) (string, error) {
 		return "", fmt.Errorf("failed to generate token: %w", err)
 	}
 
+	previousToken := stream.Token
+	previousConfigStreams := dm.configStreamsLocked()
 	stream.Token = token
 
 	if err := dm.saveLocked(); err != nil {
+		stream.Token = previousToken
+		dm.restoreConfigStreamsLocked(previousConfigStreams)
 		return "", fmt.Errorf("failed to save stream: %w", err)
 	}
 
-	logger.Info("Regenerated token for stream", "username", username)
+	logger.Info("Regenerated token for stream", "username", key)
 	return token, nil
 }
 
@@ -538,18 +563,102 @@ func (dm *StreamManager) DeleteStream(username string) error {
 	dm.mu.Lock()
 	defer dm.mu.Unlock()
 
-	if _, exists := dm.streams[username]; !exists {
+	key, stream, exists := dm.streamByUsernameLocked(username)
+	if !exists {
 		return fmt.Errorf("stream not found")
 	}
 
-	delete(dm.streams, username)
+	previousConfigStreams := dm.configStreamsLocked()
+	delete(dm.streams, key)
 
 	if err := dm.saveLocked(); err != nil {
+		dm.streams[key] = stream
+		dm.restoreConfigStreamsLocked(previousConfigStreams)
 		return fmt.Errorf("failed to save stream: %w", err)
 	}
 
-	logger.Info("Deleted stream", "username", username)
+	logger.Info("Deleted stream", "username", key)
 	return nil
+}
+
+func (dm *StreamManager) streamByUsernameLocked(username string) (string, *Stream, bool) {
+	username = strings.TrimSpace(username)
+	if stream, exists := dm.streams[username]; exists {
+		return username, stream, stream != nil
+	}
+	lowerUsername := strings.ToLower(username)
+	for key, stream := range dm.streams {
+		if stream != nil && strings.EqualFold(stream.Username, username) {
+			return key, stream, true
+		}
+		if strings.EqualFold(key, lowerUsername) {
+			return key, stream, stream != nil
+		}
+	}
+	return "", nil, false
+}
+
+func (dm *StreamManager) configStreamsLocked() map[string]*config.StreamEntry {
+	if dm.cfg == nil {
+		return nil
+	}
+	return dm.cfg.Streams
+}
+
+func (dm *StreamManager) restoreConfigStreamsLocked(streams map[string]*config.StreamEntry) {
+	if dm.cfg != nil {
+		dm.cfg.Streams = streams
+	}
+}
+
+// UpdateStreamConfig updates only fields managed by the stream assignment UI.
+// Tokens, passwords, and per-stream service credentials are untouched.
+func (dm *StreamManager) UpdateStreamConfig(username string, streamConfig *Stream) error {
+	dm.mu.Lock()
+	defer dm.mu.Unlock()
+
+	stream, exists := dm.streams[username]
+	if !exists {
+		return fmt.Errorf("stream not found")
+	}
+	if streamConfig == nil {
+		return fmt.Errorf("stream config is required")
+	}
+
+	previous := *stream
+	previousConfigStreams := dm.configStreamsLocked()
+	stream.FilterSortingMode = strings.TrimSpace(streamConfig.FilterSortingMode)
+	stream.IndexerMode = strings.TrimSpace(streamConfig.IndexerMode)
+	stream.CombineResults = streamConfig.CombineResults
+	stream.EnableFailover = streamConfig.EnableFailover
+	stream.ResultsMode = strings.TrimSpace(streamConfig.ResultsMode)
+	stream.AutoAddIndexers = streamConfig.AutoAddIndexers
+	if streamConfig.IndexerOverrides == nil {
+		stream.IndexerOverrides = make(map[string]config.IndexerSearchConfig)
+	} else {
+		stream.IndexerOverrides = cloneIndexerSearchConfigs(streamConfig.IndexerOverrides)
+	}
+	stream.IndexerSelections = append([]string(nil), streamConfig.IndexerSelections...)
+	stream.MovieSearchQueries = append([]string(nil), streamConfig.MovieSearchQueries...)
+	stream.SeriesSearchQueries = append([]string(nil), streamConfig.SeriesSearchQueries...)
+
+	if err := dm.saveLocked(); err != nil {
+		*stream = previous
+		dm.restoreConfigStreamsLocked(previousConfigStreams)
+		return fmt.Errorf("failed to save stream assignments: %w", err)
+	}
+	return nil
+}
+
+func cloneIndexerSearchConfigs(overrides map[string]config.IndexerSearchConfig) map[string]config.IndexerSearchConfig {
+	if overrides == nil {
+		return nil
+	}
+	cloned := make(map[string]config.IndexerSearchConfig, len(overrides))
+	for name, override := range overrides {
+		cloned[name] = override
+	}
+	return cloned
 }
 
 func (dm *StreamManager) UpdateStreamIndexerConfig(username string, selections []string, overrides map[string]config.IndexerSearchConfig) error {
@@ -609,45 +718,6 @@ func (dm *StreamManager) UpdateStreamGeneralSettings(username, filterSortingMode
 
 	if err := dm.saveLocked(); err != nil {
 		return fmt.Errorf("failed to save stream general settings: %w", err)
-	}
-	return nil
-}
-
-// UpdateStreamConfig persists the full stream configuration in a single save.
-func (dm *StreamManager) UpdateStreamConfig(username string, streamConfig *Stream) error {
-	dm.mu.Lock()
-	defer dm.mu.Unlock()
-
-	stream, exists := dm.streams[username]
-	if !exists {
-		return fmt.Errorf("stream not found")
-	}
-	if streamConfig == nil {
-		return fmt.Errorf("stream config is required")
-	}
-
-	stream.FilterSortingMode = strings.TrimSpace(streamConfig.FilterSortingMode)
-	stream.IndexerMode = strings.TrimSpace(streamConfig.IndexerMode)
-	stream.CombineResults = streamConfig.CombineResults
-	stream.EnableFailover = streamConfig.EnableFailover
-	stream.ResultsMode = strings.TrimSpace(streamConfig.ResultsMode)
-	stream.AutoAddIndexers = streamConfig.AutoAddIndexers
-	if streamConfig.IndexerOverrides == nil {
-		stream.IndexerOverrides = make(map[string]config.IndexerSearchConfig)
-	} else {
-		stream.IndexerOverrides = streamConfig.IndexerOverrides
-	}
-	stream.IndexerSelections = append([]string(nil), streamConfig.IndexerSelections...)
-	stream.MovieSearchQueries = append([]string(nil), streamConfig.MovieSearchQueries...)
-	stream.SeriesSearchQueries = append([]string(nil), streamConfig.SeriesSearchQueries...)
-	stream.TorrentClient = streamConfig.TorrentClient
-	stream.ProwlarrURL = strings.TrimSpace(streamConfig.ProwlarrURL)
-	stream.ProwlarrAPIKey = strings.TrimSpace(streamConfig.ProwlarrAPIKey)
-	stream.PasswordHash = streamConfig.PasswordHash
-	stream.MustChangePassword = streamConfig.MustChangePassword
-
-	if err := dm.saveLocked(); err != nil {
-		return fmt.Errorf("failed to save stream config: %w", err)
 	}
 	return nil
 }

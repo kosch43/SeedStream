@@ -26,6 +26,7 @@ const ADVANCED_TAB_FIELDS = [
   'monthly_upload_cap_gb',
   'post_cap_upload_mbps',
   'upload_cap_reset_day',
+  'disk_guard_threshold_percent',
   'cerberus_base_url',
   'cerberus_api_key',
   'tmdb_api_key',
@@ -233,17 +234,18 @@ export function useSettingsState({
 
   const submitSettings = useCallback(async (overrides = null, sourceTab = activeTab) => {
     try {
-      const trimData = (obj) => {
+      const trimData = (obj, preserveStrings = false) => {
         if (typeof obj !== 'object' || obj === null) return obj
         if (Array.isArray(obj)) {
-          return obj.map((item) => trimData(item))
+          return obj.map((item) => trimData(item, preserveStrings))
         }
         const nextObj = {}
         for (const key in obj) {
-          if (typeof obj[key] === 'string') {
-            nextObj[key] = obj[key].trim()
+            if (typeof obj[key] === 'string') {
+            nextObj[key] = preserveStrings ? obj[key] : obj[key].trim()
           } else if (typeof obj[key] === 'object') {
-            nextObj[key] = trimData(obj[key])
+            const sensitive = /password|api[_-]?key|passkey|cookie|secret|token|credential|username|definition[_-]?settings|query[_-]?header|grab[_-]?header/i.test(key)
+            nextObj[key] = trimData(obj[key], preserveStrings || sensitive)
           } else {
             nextObj[key] = obj[key]
           }
@@ -251,9 +253,12 @@ export function useSettingsState({
         return nextObj
       }
 
+      const visibleIndexers = getValues('torznab_trackers')
+      const hiddenIndexers = (Array.isArray(configSnapshot.indexers) ? configSnapshot.indexers : [])
+        .filter((indexer) => !['torznab', 'torrent', 'cardigann'].includes(String(indexer?.type || '').trim().toLowerCase()))
       const baseValues = {
         ...configSnapshot,
-        indexers: getValues('torznab_trackers'),
+        indexers: [...visibleIndexers, ...hiddenIndexers],
         torrent_clients: getValues('torrent_clients'),
         movie_search_queries: getValues('movie_search_queries'),
         series_search_queries: getValues('series_search_queries'),

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"net"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/bcrypt"
 	coreenv "seedstream/pkg/core/env"
 )
 
@@ -221,11 +223,42 @@ func TestValidateIndexerProxyReachable(t *testing.T) {
 	}
 }
 
+func TestIndexerTLSConfigRequiresVerificationAndAcceptsOnlyReadablePEM(t *testing.T) {
+	if _, err := NewIndexerTLSConfig("", true); err == nil {
+		t.Fatal("expected insecure TLS bypass to be rejected")
+	}
+	if _, err := NewIndexerTLSConfig(filepath.Join(t.TempDir(), "missing.pem"), false); err == nil {
+		t.Fatal("expected unreadable CA file to be rejected")
+	}
+	malformed := filepath.Join(t.TempDir(), "malformed.pem")
+	if err := os.WriteFile(malformed, []byte("not PEM"), 0o600); err != nil {
+		t.Fatalf("write malformed CA: %v", err)
+	}
+	if _, err := NewIndexerTLSConfig(malformed, false); err == nil {
+		t.Fatal("expected malformed CA file to be rejected")
+	}
+	tlsConfig, err := NewIndexerTLSConfig("", false)
+	if err != nil {
+		t.Fatalf("default TLS config: %v", err)
+	}
+	if tlsConfig.InsecureSkipVerify {
+		t.Fatal("default TLS config must verify certificates")
+	}
+}
+
 func TestRedactProxyURLForAPI(t *testing.T) {
 	got := RedactProxyURLForAPI("http://user:secret@proxy:8888")
 	want := "http://proxy:8888"
 	if got != want {
 		t.Fatalf("RedactProxyURLForAPI = %q, want %q", got, want)
+	}
+}
+
+func TestRedactProxyURLForAPIRedactsTokenPathAndQuery(t *testing.T) {
+	token := strings.Repeat("a", 64)
+	got := RedactProxyURLForAPI("https://proxy.example/" + token + "/manifest.json?token=secret&ok=yes")
+	if strings.Contains(got, token) || strings.Contains(got, "secret") || !strings.Contains(got, "ok=yes") {
+		t.Fatalf("redacted URL = %q", got)
 	}
 }
 
@@ -292,6 +325,31 @@ func TestConfigEffectiveFailoverFastModeHonorsDisabledValue(t *testing.T) {
 	cfg := &Config{FailoverFastMode: false}
 	if cfg.EffectiveFailoverFastMode() {
 		t.Fatalf("EffectiveFailoverFastMode() = true, want false")
+	}
+}
+
+func TestConfigDiskGuardThreshold(t *testing.T) {
+	cases := []struct {
+		name      string
+		threshold int
+		want      int
+		recovery  int
+	}{
+		{name: "disabled", threshold: 0, want: 0, recovery: 0},
+		{name: "valid", threshold: 85, want: 85, recovery: 80},
+		{name: "too low", threshold: -1, want: 0, recovery: 0},
+		{name: "too high", threshold: 100, want: 0, recovery: 0},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{DiskGuardThresholdPercent: tt.threshold}
+			if got := cfg.EffectiveDiskGuardThresholdPercent(); got != tt.want {
+				t.Fatalf("threshold = %d, want %d", got, tt.want)
+			}
+			if got := cfg.EffectiveDiskGuardRecoveryPercent(); got != tt.recovery {
+				t.Fatalf("recovery = %d, want %d", got, tt.recovery)
+			}
+		})
 	}
 }
 
@@ -406,3 +464,150 @@ func TestSaveFileUpdatesLoadedPath(t *testing.T) {
 	}
 }
 
+func TestLoadFileRejectsMalformedJSONWithoutChangingConfig(t *testing.T) {
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.json")
+	if err := os.WriteFile(configPath, []byte("{malformed"), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg := &Config{AddonPort: 7001, LoadedPath: "old"}
+	if err := cfg.LoadFile(configPath); err == nil {
+		t.Fatal("expected malformed config to fail")
+	}
+	if cfg.AddonPort != 7001 || cfg.LoadedPath != "old" {
+		t.Fatalf("config changed after malformed load: %#v", cfg)
+	}
+}
+
+func TestSaveFileUsesPrivateAtomicFile(t *testing.T) {
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.json")
+	cfg := &Config{AddonPort: 7001}
+	if err := cfg.SaveFile(configPath); err != nil {
+		t.Fatalf("SaveFile: %v", err)
+	}
+	info, err := os.Stat(configPath)
+	if err != nil {
+		t.Fatalf("stat config: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0600 {
+		t.Fatalf("config mode = %o, want 600", got)
+	}
+	var decoded Config
+	data, _ := os.ReadFile(configPath)
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("saved config is invalid JSON: %v", err)
+	}
+}
+
+func TestSaveFileRefusesToReplaceMalformedConfig(t *testing.T) {
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.json")
+	original := []byte("{malformed")
+	if err := os.WriteFile(configPath, original, 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := (&Config{AddonPort: 7001}).SaveFile(configPath); err == nil {
+		t.Fatal("expected SaveFile to reject malformed existing config")
+	}
+	got, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if string(got) != string(original) {
+		t.Fatalf("malformed config was changed from %q to %q", original, got)
+	}
+}
+
+func TestRedactForAPIRedactsNestedSecrets(t *testing.T) {
+	cfg := &Config{
+		AdminPasswordHash:  "hash",
+		AdminSessionToken:  "session",
+		AdminToken:         "addon",
+		TMDBAPIKey:         "tmdb",
+		TVDBAPIKey:         "tvdb",
+		CerberusAPIKey:     "cerberus",
+		IndexerQueryHeader: "secret-header",
+		Indexers: []IndexerConfig{{
+			APIKey: "indexer-key", Username: "user", Password: "password",
+			DefinitionSettings: map[string]string{"cookie": "secret"},
+		}},
+		TorrentClients: []TorrentClientConfig{{Username: "user", Password: "password"}},
+		Streams: map[string]*StreamEntry{"default": {
+			Token: "stream-token", ProwlarrAPIKey: "prowlarr-key",
+			TorrentClient: &TorrentClientConfig{Username: "user", Password: "password"},
+		}},
+	}
+	out := cfg.RedactForAPI()
+	if out.AdminPasswordHash != "" || out.AdminSessionToken != "" || out.AdminToken != "" || out.TMDBAPIKey != "" || out.TVDBAPIKey != "" || out.CerberusAPIKey != "" || out.IndexerQueryHeader != "" {
+		t.Fatalf("top-level secret survived redaction: %#v", out)
+	}
+	if out.Indexers[0].APIKey != "" || out.Indexers[0].Username != "" || out.Indexers[0].Password != "" || out.Indexers[0].DefinitionSettings != nil {
+		t.Fatalf("indexer secret survived redaction: %#v", out.Indexers[0])
+	}
+	if out.TorrentClients[0].Username != "" || out.TorrentClients[0].Password != "" || out.Streams["default"].Token != "" || out.Streams["default"].ProwlarrAPIKey != "" || out.Streams["default"].TorrentClient.Username != "" {
+		t.Fatalf("nested secret survived redaction: %#v", out)
+	}
+}
+
+func TestDefaultAdminPasswordHashIsRecognized(t *testing.T) {
+	if !isDefaultAdminPasswordHash(defaultAdminPasswordHash) {
+		t.Fatal("legacy default admin hash was not recognized")
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(defaultAdminPassword), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("hash default password: %v", err)
+	}
+	if !isDefaultAdminPasswordHash(string(hash)) {
+		t.Fatal("bcrypt default admin password was not recognized")
+	}
+}
+
+func TestEnsureBootstrapAdminPasswordGeneratesPrivateCredential(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := &Config{LoadedPath: filepath.Join(tempDir, "config.json")}
+	changed, err := cfg.EnsureBootstrapAdminPassword()
+	if err != nil {
+		t.Fatalf("EnsureBootstrapAdminPassword: %v", err)
+	}
+	if !changed || !cfg.AdminMustChangePassword {
+		t.Fatalf("bootstrap state = changed %v, must_change %v", changed, cfg.AdminMustChangePassword)
+	}
+	if cfg.AdminPasswordHash == "" || !strings.HasPrefix(cfg.AdminPasswordHash, "$2") {
+		t.Fatalf("expected bcrypt hash, got %q", cfg.AdminPasswordHash)
+	}
+	passwordPath := filepath.Join(tempDir, bootstrapAdminPasswordFile)
+	info, err := os.Stat(passwordPath)
+	if err != nil {
+		t.Fatalf("stat bootstrap password: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0600 {
+		t.Fatalf("bootstrap password mode = %o, want 600", got)
+	}
+	password, err := os.ReadFile(passwordPath)
+	if err != nil {
+		t.Fatalf("read bootstrap password: %v", err)
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(cfg.AdminPasswordHash), []byte(strings.TrimSpace(string(password)))); err != nil {
+		t.Fatalf("bootstrap password does not match hash: %v", err)
+	}
+}
+
+func TestEnsureBootstrapAdminPasswordPreservesNonDefaultHash(t *testing.T) {
+	tempDir := t.TempDir()
+	hash, err := bcrypt.GenerateFromPassword([]byte("already-secure"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	cfg := &Config{LoadedPath: filepath.Join(tempDir, "config.json"), AdminPasswordHash: string(hash)}
+	changed, err := cfg.EnsureBootstrapAdminPassword()
+	if err != nil {
+		t.Fatalf("EnsureBootstrapAdminPassword: %v", err)
+	}
+	if changed || cfg.AdminPasswordHash != string(hash) {
+		t.Fatalf("non-default hash changed: changed=%v hash=%q", changed, cfg.AdminPasswordHash)
+	}
+	if _, err := os.Stat(filepath.Join(tempDir, bootstrapAdminPasswordFile)); !os.IsNotExist(err) {
+		t.Fatalf("unexpected bootstrap file for non-default hash, err=%v", err)
+	}
+}

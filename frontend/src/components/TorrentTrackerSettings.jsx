@@ -25,7 +25,9 @@ function normalizeName(value) {
 
 function normalizeTrackerDraft(draft) {
   const v = draft || {}
+  const { id: _rhfId, ...raw } = v
   return {
+    ...raw,
     name: (v.name || '').trim(),
     url: (v.url || '').trim(),
     api_path: v.api_path || '/api',
@@ -37,9 +39,9 @@ function normalizeTrackerDraft(draft) {
     // A definition-driven tracker scrapes the tracker's own site using a bundled
     // definition, so it needs no Torznab service. Its URL is optional and, when
     // set, overrides the definition's address for when a tracker changes domain.
-    type: v.definition_id ? 'cardigann' : 'torznab',
+    type: v.definition_id ? 'cardigann' : (v.type || 'torznab'),
     definition_id: v.definition_id || '',
-    definition_settings: v.definition_settings || {},
+    definition_settings: { ...(v.definition_settings || {}) },
     api_hits_day: Number(v.api_hits_day || 0),
     rate_limit_rps: Number(v.rate_limit_rps || 0),
     timeout_seconds: Number(v.timeout_seconds || 0),
@@ -48,6 +50,7 @@ function normalizeTrackerDraft(draft) {
     hnr_min_seed_hours: Number(v.hnr_min_seed_hours || 0),
     hnr_min_ratio: Number(v.hnr_min_ratio || 0),
     hnr_mode: v.hnr_mode || 'any',
+    tls_ca_file: v.tls_ca_file || '',
   }
 }
 
@@ -205,6 +208,7 @@ function TrackerDialog({ open, onOpenChange, initialValue, onSave, onClearStatus
         else if (path.includes('.api_hits_day')) nextErrors.api_hits_day = message
         else if (path.includes('.rate_limit_rps')) nextErrors.rate_limit_rps = message
         else if (path.includes('.proxy_url')) nextErrors.proxy_url = message
+        else if (path.includes('.tls_ca_file')) nextErrors.tls_ca_file = message
       })
       setFieldErrors(nextErrors)
       setSaveError(firstFieldErrorMessage(nextErrors, error?.message || 'Save failed'))
@@ -420,6 +424,18 @@ function TrackerDialog({ open, onOpenChange, initialValue, onSave, onClearStatus
                 </div>
                 <div className={controlWideClass}>
                   <Input className={`h-9 ${fieldClass('proxy_url')}`} value={draft.proxy_url} onChange={(e) => update('proxy_url', e.target.value)} placeholder="http://proxy:8888" autoComplete="off" />
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-md border border-border/60 p-3">
+              <div className={rowClass}>
+                <div className={labelClass}>
+                  <Label className="text-sm font-medium">Custom CA file</Label>
+                  <p className="mt-1 text-xs text-muted-foreground">Optional PEM CA bundle path inside the SeedStream container for private tracker certificates. Certificate verification stays enabled.</p>
+                </div>
+                <div className={controlWideClass}>
+                  <Input className={`h-9 ${fieldClass('tls_ca_file')}`} value={draft.tls_ca_file} onChange={(e) => update('tls_ca_file', e.target.value)} placeholder="/app/data/tracker-ca.pem" autoComplete="off" />
                 </div>
               </div>
             </div>

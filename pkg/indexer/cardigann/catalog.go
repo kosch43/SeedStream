@@ -155,7 +155,7 @@ func (c *Catalog) Search(query string, limit int) []CatalogEntry {
 			Description: d.Description,
 			Language:    d.Language,
 			Type:        d.Type,
-			Links:       d.Links,
+			Links:       d.LinkURLs(),
 			Settings:    d.Credentials(),
 			NeedsCookie: d.NeedsCaptcha(),
 			Source:      src,
