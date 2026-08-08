@@ -2,6 +2,8 @@ package newznab
 
 import (
 	"context"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"log/slog"
@@ -9,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"seedstream/pkg/core/config"
 	"seedstream/pkg/core/logger"
 	"seedstream/pkg/core/persistence"
@@ -17,6 +20,16 @@ import (
 	"testing"
 	"time"
 )
+
+func writeServerCertificate(t *testing.T, server *httptest.Server) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "tracker-ca.pem")
+	data := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write CA file: %v", err)
+	}
+	return path
+}
 
 func init() {
 	logger.Log = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -276,6 +289,76 @@ func TestNewznabPing(t *testing.T) {
 	}
 	if gotUserAgent != "Prowlarr/2.3.0.5236" {
 		t.Fatalf("User-Agent = %q, want %q", gotUserAgent, "Prowlarr/2.3.0.5236")
+	}
+}
+
+func TestNewznabTLSVerifiesByDefaultAndAcceptsCustomCA(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	defaultClient := NewClient(config.IndexerConfig{Name: "TLS default", URL: server.URL}, nil)
+	transport, ok := defaultClient.client.Transport.(*http.Transport)
+	if !ok || transport.TLSClientConfig == nil {
+		t.Fatalf("expected an explicit TLS client config")
+	}
+	if transport.TLSClientConfig.InsecureSkipVerify {
+		t.Fatal("outbound TLS must verify certificates by default")
+	}
+	if err := defaultClient.Ping(); err == nil {
+		t.Fatal("self-signed HTTPS tracker must not be trusted without a custom CA")
+	}
+
+	caPath := writeServerCertificate(t, server)
+	trustedClient, err := NewClientWithError(config.IndexerConfig{
+		Name:      "TLS custom CA",
+		URL:       server.URL,
+		TLSCAFile: caPath,
+	}, nil)
+	if err != nil {
+		t.Fatalf("NewClientWithError() = %v", err)
+	}
+	if err := trustedClient.Ping(); err != nil {
+		t.Fatalf("custom CA should trust the tracker certificate: %v", err)
+	}
+	if roots := trustedClient.client.Transport.(*http.Transport).TLSClientConfig.RootCAs; roots == nil {
+		t.Fatal("custom CA should configure a root pool")
+	}
+	if _, err := x509.SystemCertPool(); err != nil {
+		t.Logf("system certificate pool unavailable in test environment: %v", err)
+	}
+}
+
+func TestNewznabRejectsMalformedUnreadableOrInsecureTLSConfig(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  config.IndexerConfig
+	}{
+		{
+			name: "missing CA",
+			cfg:  config.IndexerConfig{TLSCAFile: filepath.Join(t.TempDir(), "missing.pem")},
+		},
+		{
+			name: "malformed CA",
+			cfg:  config.IndexerConfig{TLSCAFile: filepath.Join(t.TempDir(), "bad.pem")},
+		},
+		{
+			name: "insecure bypass",
+			cfg:  config.IndexerConfig{TLSInsecureSkipVerify: true},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.name == "malformed CA" {
+				if err := os.WriteFile(tc.cfg.TLSCAFile, []byte("not a certificate"), 0o600); err != nil {
+					t.Fatalf("write malformed CA: %v", err)
+				}
+			}
+			if _, err := NewClientWithError(tc.cfg, nil); err == nil {
+				t.Fatal("expected invalid TLS configuration to fail")
+			}
+		})
 	}
 }
 

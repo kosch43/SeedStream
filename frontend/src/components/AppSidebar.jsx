@@ -30,6 +30,7 @@ const navMain = [
   { id: "statistics", title: "Statistics", icon: ChartColumn },
   { id: "cerberus", title: "Cerberus", icon: ShieldCheck },
   { id: "logs", title: "Logs", icon: FileText },
+  { id: "install", title: "Streams", icon: Zap },
   { id: "settings", title: "Settings", icon: Settings },
 ]
 

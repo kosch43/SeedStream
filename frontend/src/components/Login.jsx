@@ -29,11 +29,7 @@ export default function Login({ onLogin, version }) {
       const data = await response.json()
 
       if (data.success) {
-        // Store token in localStorage for API calls
-        if (data.token) {
-          localStorage.setItem('auth_token', data.token)
-        }
-        onLogin(data.user, data.token, data.must_change_password || false, data.is_admin !== false)
+        onLogin(data.user, data.must_change_password || false, data.is_admin !== false)
       } else {
         setError(data.error || 'Login failed')
       }

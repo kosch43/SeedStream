@@ -4,7 +4,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { PasswordInput } from "@/components/ui/password-input"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { AlertCircle, AlertTriangle, Check, Copy, Loader2, Save, User } from "lucide-react"
+import { AlertCircle, AlertTriangle, Loader2, Save, User } from "lucide-react"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 
@@ -30,22 +30,9 @@ export function ProfilePage({
   sendCommand,
   onUsernameChanged,
   onPasswordChanged,
-  addonToken,
 }) {
   const envOverrides = config?.env_overrides ?? []
   const currentUsername = config?.admin_username || currentUser || 'admin'
-
-  const addonBaseURL = config?.addon_base_url || window.location.origin
-  const manifestURL = addonToken ? `${addonBaseURL}/${addonToken}/manifest.json` : ''
-  const [urlCopied, setUrlCopied] = useState(false)
-
-  const handleCopyURL = () => {
-    if (!manifestURL) return
-    navigator.clipboard.writeText(manifestURL).then(() => {
-      setUrlCopied(true)
-      setTimeout(() => setUrlCopied(false), 2000)
-    })
-  }
 
   const [username, setUsername] = useState(currentUsername)
   const [usernameSaving, setUsernameSaving] = useState(false)
@@ -111,19 +98,6 @@ export function ProfilePage({
 
     setPasswordLoading(true)
     try {
-      const loginRes = await fetch('/api/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ username: currentUser, password: currentPassword }),
-      })
-      const loginData = await loginRes.json()
-      if (!loginData.success) {
-        setPasswordError('Current password is incorrect')
-        setPasswordLoading(false)
-        return
-      }
-
       window.passwordChangeCallback = (payload) => {
         setPasswordLoading(false)
         if (payload.error) {
@@ -136,7 +110,7 @@ export function ProfilePage({
         }
         delete window.passwordChangeCallback
       }
-      if (!sendCommand('update_password', { username: currentUser, password: newPassword })) {
+      if (!sendCommand('update_password', { username: currentUser, current_password: currentPassword, password: newPassword })) {
         setPasswordError('Failed to send update request')
         setPasswordLoading(false)
         delete window.passwordChangeCallback
@@ -165,41 +139,10 @@ export function ProfilePage({
         <div>
           <h2 className="text-2xl font-semibold tracking-tight">Profile</h2>
           <p className="text-sm text-muted-foreground mt-1">
-            Your Stremio addon URL and account settings.
+            Manage your dashboard username and password.
           </p>
         </div>
       </div>
-
-      {manifestURL && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Stremio Addon URL</CardTitle>
-            <CardDescription>
-              Add this URL to Stremio or AIOStreams to start streaming.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="flex items-center gap-2">
-              <Input
-                readOnly
-                value={manifestURL}
-                className="h-9 font-mono text-xs"
-                onClick={(e) => e.target.select()}
-              />
-              <Button
-                type="button"
-                variant="outline"
-                size="icon"
-                className="h-9 w-9 shrink-0"
-                onClick={handleCopyURL}
-                aria-label="Copy addon URL"
-              >
-                {urlCopied ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-      )}
 
       <form onSubmit={handleSaveUsername}>
         <Card>

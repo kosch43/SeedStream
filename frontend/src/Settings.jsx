@@ -24,7 +24,7 @@ const TABS = [
 
 function isTorrentIndexerType(type) {
   const t = (type || '').trim().toLowerCase()
-  return t === 'torznab' || t === 'torrent'
+  return t === 'torznab' || t === 'torrent' || t === 'cardigann'
 }
 
 const ACTIVE_TAB_STORAGE_KEY = 'seedstream.settings.activeTab'
@@ -79,8 +79,6 @@ function Settings({
   saveStatus,
   clearSaveStatus,
   isSaving,
-  indexerCaps,
-  stats,
 }) {
   const [activeTab, setActiveTab] = useState(() => {
     if (typeof window === 'undefined') return 'network'
@@ -142,11 +140,12 @@ function Settings({
         extra_search_terms: initialConfig.extra_search_terms ?? '',
         memory_limit_mb: Number(initialConfig.memory_limit_mb || 0),
         keep_log_files: Number(initialConfig.keep_log_files ?? 9) || 9,
+        disk_guard_threshold_percent: Number(initialConfig.disk_guard_threshold_percent || 0),
         session_ttl_minutes: initialConfig.session_ttl_minutes == null ? 30 : Number(initialConfig.session_ttl_minutes),
         session_post_playback_ttl_minutes: initialConfig.session_post_playback_ttl_minutes == null ? 240 : Number(initialConfig.session_post_playback_ttl_minutes),
         torznab_trackers: initialConfig.indexers?.filter(idx => isTorrentIndexerType(idx.type))?.map(idx => ({
           ...idx,
-          type: 'torznab',
+          type: idx.type || (idx.definition_id ? 'cardigann' : 'torznab'),
           enabled: idx.enabled != null ? idx.enabled : true,
           api_path: idx.api_path || '/api',
           api_hits_day: Number(idx.api_hits_day || 0),

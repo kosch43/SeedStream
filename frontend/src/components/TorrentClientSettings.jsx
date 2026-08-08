@@ -80,7 +80,7 @@ function TorrentClientDialog({ open, onOpenChange, initialValue, onSave, title, 
       setDraft(normalizeDraft(initialValue))
       setError('')
     }
-  }, [open])
+  }, [open, initialValue])
 
   const update = (patch) => setDraft((d) => ({ ...d, ...patch }))
   const kind = clientType(draft.type)
@@ -186,7 +186,7 @@ function TorrentClientDialog({ open, onOpenChange, initialValue, onSave, title, 
   )
 }
 
-export function TorrentClientSettings({ fields, append, update, remove, replace, onPersist, onStatus, onClearStatus }) {
+export function TorrentClientSettings({ fields, replace, onPersist, onStatus, onClearStatus }) {
   const [addOpen, setAddOpen] = useState(false)
   const [editIndex, setEditIndex] = useState(-1)
   const [deleteIndex, setDeleteIndex] = useState(-1)

@@ -7,7 +7,6 @@ const MAX_HISTORY = 60
 
 export function useAdminRuntime({
   authenticated,
-  authToken,
   hasLoggedOutRef,
   setAuthenticated,
   setCurrentUser,
@@ -86,9 +85,6 @@ export function useAdminRuntime({
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
       const wsEndpoint = new URL(getApiUrl('/api/ws'), window.location.origin)
       wsEndpoint.protocol = protocol
-      if (authToken) {
-        wsEndpoint.searchParams.set('token', authToken)
-      }
       const socket = new WebSocket(wsEndpoint.toString())
       activeSocketRef.current = socket
 
@@ -208,7 +204,7 @@ export function useAdminRuntime({
         socket.close()
       }
     }
-  }, [authenticated, authToken, hasLoggedOutRef, resetRuntime, setAuthenticated, setCurrentUser, setMustChangePassword])
+  }, [authenticated, hasLoggedOutRef, resetRuntime, setAuthenticated, setCurrentUser, setMustChangePassword])
 
   const sendCommand = useCallback((type, payload) => {
     if (type === 'save_config') {
@@ -264,7 +260,11 @@ export function useAdminRuntime({
       return apiFetch('/api/auth/change-password', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: payload?.username, password: payload?.password }),
+        body: JSON.stringify({
+          username: payload?.username,
+          current_password: payload?.current_password,
+          password: payload?.password,
+        }),
       })
         .then(() => {
           if (window.passwordChangeCallback) window.passwordChangeCallback({})

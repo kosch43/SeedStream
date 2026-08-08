@@ -261,13 +261,28 @@ func Parse(data []byte) (*Definition, error) {
 	if strings.TrimSpace(d.Name) == "" {
 		d.Name = d.ID
 	}
-	if len(d.Links) == 0 {
+	if len(d.LinkURLs()) == 0 {
 		return nil, fmt.Errorf("definition %q has no links", d.ID)
 	}
 	if strings.TrimSpace(d.Search.Rows.Selector) == "" && !d.isJSON() {
 		return nil, fmt.Errorf("definition %q has no search row selector", d.ID)
 	}
 	return &d, nil
+}
+
+// LinkURLs returns the preferred published links, falling back to legacy links
+// when a definition no longer has a current link.
+func (d *Definition) LinkURLs() []string {
+	if d == nil {
+		return nil
+	}
+	links := make([]string, 0, len(d.Links)+len(d.LegacyLinks))
+	for _, link := range append(append([]string(nil), d.Links...), d.LegacyLinks...) {
+		if link = strings.TrimSpace(link); link != "" {
+			links = append(links, link)
+		}
+	}
+	return links
 }
 
 // isJSON reports whether the search returns JSON rather than HTML.
@@ -287,8 +302,8 @@ func (d *Definition) BaseURL(override string) string {
 	if o := strings.TrimSpace(override); o != "" {
 		return strings.TrimRight(o, "/") + "/"
 	}
-	if len(d.Links) > 0 {
-		return strings.TrimRight(strings.TrimSpace(d.Links[0]), "/") + "/"
+	if links := d.LinkURLs(); len(links) > 0 {
+		return strings.TrimRight(links[0], "/") + "/"
 	}
 	return ""
 }

@@ -27,24 +27,13 @@ export default function ChangePassword({ username, onPasswordChanged, requireCur
     setLoading(true)
     try {
       if (requireCurrentPassword) {
-        const loginRes = await fetch('/api/login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'include',
-          body: JSON.stringify({ username, password: currentPassword }),
-        })
-        const loginData = await loginRes.json().catch(() => ({}))
-        if (!loginData.success) {
-          setError('Current password is incorrect')
-          setLoading(false)
-          return
-        }
-        if (loginData.token) localStorage.setItem('auth_token', loginData.token)
+        // The server validates the current password while the existing cookie
+        // authenticates the dashboard session.
       }
       await apiFetch('/api/auth/change-password', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password: newPassword }),
+        body: JSON.stringify({ username, current_password: currentPassword, password: newPassword }),
       })
       onPasswordChanged()
     } catch (err) {
