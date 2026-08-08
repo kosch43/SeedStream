@@ -483,16 +483,30 @@ func normalizeIMDbID(id string) string {
 	return strings.TrimPrefix(strings.TrimSpace(id), "tt")
 }
 
+func isStandardMovieIDParam(param string) bool {
+	return param == "imdbid" || param == "tmdbid"
+}
+
 func supportsMovieIDParam(caps *indexer.Caps, param string) bool {
-	if caps == nil || len(caps.Searching.MovieSearchSupportedParams) == 0 {
-		return param == "imdbid" || param == "tmdbid"
+	if isStandardMovieIDParam(param) {
+		return true
+	}
+	if caps == nil {
+		return false
 	}
 	return caps.Searching.MovieSearchSupportedParams[param]
 }
 
+func isStandardTVIDParam(param string) bool {
+	return param == "tvdbid" || param == "tmdbid" || param == "imdbid"
+}
+
 func supportsTVIDParam(caps *indexer.Caps, param string) bool {
-	if caps == nil || len(caps.Searching.TVSearchSupportedParams) == 0 {
-		return param == "tvdbid" || param == "tmdbid" || param == "imdbid"
+	if isStandardTVIDParam(param) {
+		return true
+	}
+	if caps == nil {
+		return false
 	}
 	return caps.Searching.TVSearchSupportedParams[param]
 }
