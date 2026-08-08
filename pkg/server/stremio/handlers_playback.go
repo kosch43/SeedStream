@@ -816,8 +816,8 @@ func (s *Server) handlePlay(w http.ResponseWriter, r *http.Request, streamConfig
 		// film — two 59 GB remuxes competing for the same bandwidth, so the one
 		// the viewer is waiting for gets slower. Return and let the player retry
 		// this slot, which resumes a download already part-finished.
-		if errors.Is(lastErr, torrent.ErrStillBuffering) {
-			logger.Info("Play: still buffering, keeping this release rather than starting another",
+		if torrent.KeepReleaseOnRetry(lastErr) {
+			logger.Info("Play: keeping this release rather than starting another",
 				"session", sessionID, "attempt", attempt+1, "reason", lastErr)
 			break
 		}
