@@ -1265,7 +1265,7 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 					// for the file IS waiting for the head, and both arrive at the
 					// same moment. Saying otherwise sends an operator hunting for a
 					// fault in piece ordering that is not there.
-					fast, remain := nearingCompletion(ctx, c, info.Hash)
+					fast, remain := nearingCompletion(ctx, c, info.Hash, deadline)
 					fastFinish = fast
 					if fast {
 						fragmentedHead = false
@@ -1442,7 +1442,7 @@ func (m *Manager) reviseHead(ctx context.Context, c tclient.Client, hash string,
 // Deliberately conservative: an unreadable torrent, an unknown size, or a
 // download rate of zero all report false, so the ordinary path is what runs
 // whenever this cannot be established.
-func nearingCompletion(ctx context.Context, c tclient.Client, hash string) (bool, time.Duration) {
+func nearingCompletion(ctx context.Context, c tclient.Client, hash string, deadline time.Time) (bool, time.Duration) {
 	info, err := c.Get(ctx, hash)
 	if err != nil || info == nil || info.Size <= 0 || info.DlSpeed <= 0 {
 		return false, 0
@@ -1452,7 +1452,15 @@ func nearingCompletion(ctx context.Context, c tclient.Client, hash string) (bool
 		return true, 0
 	}
 	eta := time.Duration(float64(remaining) / float64(info.DlSpeed) * float64(time.Second))
-	return eta <= fastCompletionWindow, eta
+	if eta <= fastCompletionWindow {
+		return true, eta
+	}
+	if !deadline.IsZero() {
+		if budgetLeft := time.Until(deadline); budgetLeft > 0 && eta <= budgetLeft {
+			return true, eta
+		}
+	}
+	return false, eta
 }
 
 // categoryHashes returns the set of info hashes currently in this client's

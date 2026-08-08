@@ -91,8 +91,8 @@ func BuildComponents(cfg *config.Config) (*InitializedComponents, error) {
 		// Definition-driven trackers scrape the tracker's own site using a
 		// bundled definition, so they need no Torznab service in front of them.
 		if config.IsDefinitionIndexerType(idxCfg.Type) {
-			client, err := cardigann.NewClient(catalog, idxCfg.DefinitionID, idxCfg.Name,
-				idxCfg.URL, idxCfg.DefinitionSettings, idxCfg.EffectiveTimeout(), effectiveCfg)
+		client, err := cardigann.NewClient(catalog, idxCfg.DefinitionID, idxCfg.Name,
+			idxCfg.URL, idxCfg.DefinitionSettings, idxCfg.EffectiveTimeout(), usageMgr, effectiveCfg)
 			if err != nil {
 				logger.Warn("Skipping tracker: definition unavailable",
 					"name", idxCfg.Name, "definition", idxCfg.DefinitionID, "err", err)

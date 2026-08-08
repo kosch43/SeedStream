@@ -5,23 +5,29 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"seedstream/pkg/core/config"
 	"seedstream/pkg/core/logger"
 	"seedstream/pkg/indexer"
+	"seedstream/pkg/stats"
 )
 
 // Client adapts a tracker definition to SeedStream's Indexer interface, so a
 // scraped tracker is indistinguishable from a Torznab one everywhere else in the
 // application — search, ranking, playback and the watchdog all work unchanged.
 type Client struct {
-	engine *Engine
-	name   string
+	engine        *Engine
+	name          string
+	usageManager  *indexer.UsageManager
+	searchesCount   int
+	totalResponseMS int64
+	mu              sync.Mutex
 }
 
 // NewClient builds an indexer client for a definition id from the catalog.
-func NewClient(cat *Catalog, definitionID, displayName, baseURLOverride string, settings map[string]string, timeout time.Duration, indexerConfigs ...config.IndexerConfig) (*Client, error) {
+func NewClient(cat *Catalog, definitionID, displayName, baseURLOverride string, settings map[string]string, timeout time.Duration, um *indexer.UsageManager, indexerConfigs ...config.IndexerConfig) (*Client, error) {
 	def, ok := cat.Get(definitionID)
 	if !ok {
 		return nil, fmt.Errorf("tracker definition %q is not installed", definitionID)
@@ -34,7 +40,11 @@ func NewClient(cat *Catalog, definitionID, displayName, baseURLOverride string, 
 	if name == "" {
 		name = def.Name
 	}
-	return &Client{engine: eng, name: name}, nil
+	client := &Client{engine: eng, name: name, usageManager: um}
+	if um != nil {
+		_ = um.GetIndexerUsage(name)
+	}
+	return client, nil
 }
 
 // Name identifies this tracker in logs, stats and the stream list.
@@ -53,9 +63,24 @@ func (c *Client) Ping() error {
 	return c.engine.Login(ctx)
 }
 
-// GetUsage reports API budget. Scraped trackers have no published quota, so this
-// is reported as unlimited rather than inventing a number.
-func (c *Client) GetUsage() indexer.Usage { return indexer.Usage{} }
+// GetUsage reports API budget and download counts, persisted across restarts.
+func (c *Client) GetUsage() indexer.Usage {
+	var u indexer.Usage
+	c.mu.Lock()
+	u.SearchesCount = c.searchesCount
+	if c.searchesCount > 0 {
+		u.AvgResponseMS = float64(c.totalResponseMS) / float64(c.searchesCount)
+	}
+	c.mu.Unlock()
+	if c.usageManager != nil {
+		ud := c.usageManager.GetIndexerUsage(c.name)
+		u.APIHitsUsed = ud.APIHitsUsed
+		u.DownloadsUsed = ud.DownloadsUsed
+		u.AllTimeAPIHitsUsed = ud.AllTimeAPIHitsUsed
+		u.AllTimeDownloadsUsed = ud.AllTimeDownloadsUsed
+	}
+	return u
+}
 
 // DownloadNZB exists to satisfy the interface. These are torrent trackers, so
 // there is never an NZB to fetch.
@@ -66,6 +91,26 @@ func (c *Client) DownloadNZB(ctx context.Context, url string) ([]byte, error) {
 // Search runs the query against the tracker and returns results in the same
 // shape a Torznab indexer would.
 func (c *Client) Search(req indexer.SearchRequest) (*indexer.SearchResponse, error) {
+	startedAt := time.Now()
+	resp, err := c.search(req)
+	elapsedMS := time.Since(startedAt).Milliseconds()
+	success := err == nil
+	resultCount := 0
+	if resp != nil {
+		resultCount = len(resp.Channel.Items)
+	}
+	c.mu.Lock()
+	c.searchesCount++
+	c.totalResponseMS += elapsedMS
+	c.mu.Unlock()
+	stats.Default().RecordIndexerSearch(c.Name(), success, elapsedMS, resultCount)
+	if c.usageManager != nil {
+		c.usageManager.IncrementUsed(c.name, 1, 0)
+	}
+	return resp, err
+}
+
+func (c *Client) search(req indexer.SearchRequest) (*indexer.SearchResponse, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -95,6 +140,9 @@ func (c *Client) Search(req indexer.SearchRequest) (*indexer.SearchResponse, err
 	resp := &indexer.SearchResponse{}
 	for _, r := range results {
 		resp.Channel.Items = append(resp.Channel.Items, c.toItem(r))
+	}
+	for i := range resp.Channel.Items {
+		resp.Channel.Items[i].SourceIndexer = c
 	}
 	logger.Debug("cardigann: search complete", "tracker", c.name, "results", len(resp.Channel.Items))
 	if req.Limit > 0 && len(resp.Channel.Items) > req.Limit {

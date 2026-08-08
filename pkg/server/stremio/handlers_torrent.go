@@ -15,8 +15,10 @@ import (
 
 	"seedstream/pkg/auth"
 	"seedstream/pkg/core/logger"
+	"seedstream/pkg/indexer"
 	"seedstream/pkg/services/cerberus"
 	"seedstream/pkg/session"
+	"seedstream/pkg/stats"
 	"seedstream/pkg/torrent"
 )
 
@@ -140,6 +142,22 @@ func (s *Server) serveTorrent(w http.ResponseWriter, r *http.Request, sess *sess
 		return fmt.Errorf("torrent still preparing: %w", err)
 	}
 	defer s.torrentManager.ReleasePlayback(res)
+
+	indexerName := strings.TrimSpace(playRelease.Indexer)
+	if indexerName != "" {
+		inSearch := playRelease.IndexersInSearch
+		withResult := playRelease.IndexersWithResult
+		if inSearch < 1 {
+			inSearch = 1
+		}
+		if withResult < 1 {
+			withResult = 1
+		}
+		stats.Default().RecordIndexerDownload(indexerName, true, inSearch, withResult)
+		if usageMgr, err := indexer.GetUsageManager(nil); err == nil && usageMgr != nil {
+			usageMgr.IncrementUsed(indexerName, 0, 1)
+		}
+	}
 
 	// Register the torrent with Cerberus so the watchdog can correlate stalled
 	// hashes back to their content IDs, and so a later viewing of this title can
