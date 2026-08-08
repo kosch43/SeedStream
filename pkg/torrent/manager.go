@@ -713,9 +713,15 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 				}
 				if headReady {
 					abs := absFilePath(remotePath, c.SavePath(), info, f.Name)
+					// The transmission client reports the on-disk name while a
+					// file is incomplete (".part" suffix, renamed on completion).
+					// The file we open must match the disk, but the name served
+					// to the player drives content-type detection, so the suffix
+					// is stripped for the display name only.
+					displayName := strings.TrimSuffix(filepath.Base(f.Name), ".part")
 					return &PrepareResult{
 						AbsPath:    abs,
-						Name:       filepath.Base(f.Name),
+						Name:       displayName,
 						Size:       f.Size,
 						Hash:       info.Hash,
 						FileIndex:  f.Index,
@@ -946,6 +952,7 @@ func (m *Manager) resolveAdded(ctx context.Context, c tclient.Client, hash strin
 // after their folder and carry no extension, which is why only single-file
 // releases — most TV episodes — were affected.
 func stripVideoExt(name string) string {
+	name = strings.TrimSuffix(name, ".part")
 	ext := filepath.Ext(name)
 	if ext == "" {
 		return name
@@ -1082,7 +1089,10 @@ func pickVideoFile(files []qbittorrent.FileInfo, season, episode int) *qbittorre
 }
 
 func isVideo(name string) bool {
-	_, ok := videoExts[strings.ToLower(filepath.Ext(name))]
+	// The transmission client reports incomplete files with a trailing
+	// ".part" (renamed on completion); the extension check must see past it.
+	clean := strings.TrimSuffix(name, ".part")
+	_, ok := videoExts[strings.ToLower(filepath.Ext(clean))]
 	return ok
 }
 

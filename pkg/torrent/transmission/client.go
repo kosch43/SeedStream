@@ -382,8 +382,12 @@ func (c *Client) Add(ctx context.Context, opts tclient.AddOptions) error {
 	if strings.TrimSpace(opts.URL) == "" {
 		return fmt.Errorf("transmission add: empty URL/magnet")
 	}
+	filename, err := c.resolveAddURL(ctx, opts.URL)
+	if err != nil {
+		return fmt.Errorf("transmission add: %w", err)
+	}
 	args := map[string]any{
-		"filename": opts.URL,
+		"filename": filename,
 		"labels":   []string{c.category},
 		"paused":   false,
 	}
@@ -394,7 +398,7 @@ func (c *Client) Add(ctx context.Context, opts tclient.AddOptions) error {
 		args["sequential_download"] = true
 		args["sequential_download_from_piece"] = 0
 	}
-	err := c.call(ctx, "torrent-add", args, nil)
+	err = c.call(ctx, "torrent-add", args, nil)
 	if err != nil && opts.Sequential && isUnknownArgument(err) {
 		// Pre-4.1 daemon: no sequential download at all. Adding without it is
 		// far better than not adding, and the caller learns the truth from the
@@ -404,6 +408,51 @@ func (c *Client) Add(ctx context.Context, opts tclient.AddOptions) error {
 		return c.call(ctx, "torrent-add", args, nil)
 	}
 	return err
+}
+
+// resolveAddURL turns a torrent URL into something Transmission can add.
+//
+// Torznab download endpoints commonly answer an HTTP redirect to a magnet
+// link (Prowlarr does this for The Pirate Bay). Transmission's own fetcher
+// rejects redirect responses, so the URL is resolved here: redirects are
+// followed and when the final target is a magnet, that magnet is what gets
+// handed to the daemon. Anything else is passed through untouched — a plain
+// .torrent URL is exactly what the daemon knows how to fetch.
+func (c *Client) resolveAddURL(ctx context.Context, raw string) (string, error) {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(raw)), "magnet:") {
+		return raw, nil
+	}
+	// Copy the client's HTTP client: redirect policy is per-request state and
+	// the shared client must stay immutable for concurrent use.
+	fetcher := *c.http
+	var magnetURL string
+	fetcher.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if loc := req.URL.String(); strings.HasPrefix(strings.ToLower(loc), "magnet:") {
+			magnetURL = loc
+			return http.ErrUseLastResponse
+		}
+		return nil
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, raw, nil)
+	if err != nil {
+		return raw, nil // let the daemon try; it reports the real failure
+	}
+	resp, err := fetcher.Do(req)
+	if err != nil {
+		return raw, nil
+	}
+	defer resp.Body.Close()
+	if magnetURL != "" {
+		return magnetURL, nil
+	}
+	// A redirect the client declined to follow (e.g. a non-http scheme) arrives
+	// as the redirect response itself, with the target in Location.
+	if loc := resp.Header.Get("Location"); loc != "" && resp.Request != nil {
+		if u, err := resp.Request.URL.Parse(loc); err == nil && strings.HasPrefix(strings.ToLower(u.String()), "magnet:") {
+			return u.String(), nil
+		}
+	}
+	return raw, nil
 }
 
 // isUnknownArgument reports whether an RPC error looks like the daemon
@@ -441,9 +490,18 @@ func (c *Client) Files(ctx context.Context, hash string) ([]tclient.FileInfo, er
 		if f.Length > 0 {
 			progress = float64(done) / float64(f.Length)
 		}
+		// Transmission writes incomplete files under a trailing ".part" name
+		// and renames them to their final name once complete. The name SeedStream
+		// opens must match what is actually on disk, so the suffix is reported
+		// while the file is still downloading — qBittorrent has no such suffix,
+		// which is why the rest of the streaming path does not know about it.
+		name := f.Name
+		if done < f.Length {
+			name = f.Name + ".part"
+		}
 		fi := tclient.FileInfo{
 			Index:    i,
-			Name:     f.Name,
+			Name:     name,
 			Size:     f.Length,
 			Progress: progress,
 		}
