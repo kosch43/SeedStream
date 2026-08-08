@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"runtime"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -109,7 +110,7 @@ func (s *Session) Position() (PlaybackPosition, bool) {
 // closed it from the dashboard). Use with the request context so playback
 // aborts when either the client disconnects or the session is closed.
 func (s *Session) Done() <-chan struct{} {
-	if s == nil {
+	if s == nil || s.ctx == nil {
 		return nil
 	}
 	return s.ctx.Done()
@@ -194,7 +195,7 @@ func (s *Session) SelectedPlaybackFile() string {
 }
 
 func (s *Session) Close() {
-	if s == nil {
+	if s == nil || s.cancel == nil {
 		return
 	}
 	s.cancel()
@@ -311,12 +312,54 @@ func (m *Manager) CreateDeferredSession(sessionID string, rel *release.Release, 
 	if rel == nil {
 		return nil, "", fmt.Errorf("release is required")
 	}
+	streamName = strings.TrimSpace(streamName)
+	if streamName == "" {
+		streamName = "default"
+	}
+	originalID := sessionID
+	canonicalID, err := canonicalSessionIDForStream(originalID, streamName)
+	if err != nil {
+		return nil, "", err
+	}
+	sessionID = canonicalID
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if existing, ok := m.sessions[sessionID]; ok && existing != nil {
+	existing, ok := m.sessions[sessionID]
+	if !ok {
+		legacyID := ""
+		if sessionID != originalID {
+			legacyID = originalID
+		} else {
+			legacyID = legacyOwnerlessSlotID(originalID, streamName)
+		}
+		if legacyID != "" {
+			if legacy, found := m.sessions[legacyID]; found && legacy != nil {
+				legacy.mu.Lock()
+				legacyOwner := legacy.StreamName
+				if legacyOwner != "" && legacyOwner != "default" && legacyOwner != streamName {
+					legacy.mu.Unlock()
+					return nil, "", fmt.Errorf("session belongs to another stream")
+				}
+				legacy.ID = sessionID
+				legacy.StreamName = streamName
+				legacy.mu.Unlock()
+				delete(m.sessions, legacyID)
+				m.sessions[sessionID] = legacy
+				existing, ok = legacy, true
+			}
+		}
+	}
+	if ok && existing != nil {
 		existing.mu.Lock()
+		if existing.StreamName != "" && existing.StreamName != streamName {
+			existing.mu.Unlock()
+			return nil, "", fmt.Errorf("session belongs to another stream")
+		}
+		if existing.StreamName == "" {
+			existing.StreamName = streamName
+		}
 		sameRelease := existing.Release != nil && existing.Release.Link == rel.Link && existing.Release.Title == rel.Title
 		busy := existing.ActivePlays > 0 || existing.playbackStarting > 0 ||
 			time.Since(existing.LastAccess) < deferredSessionReplaceGrace
@@ -351,6 +394,108 @@ func (m *Manager) GetSession(sessionID string) (*Session, error) {
 	session.mu.Unlock()
 
 	return session, nil
+}
+
+// GetSessionForStream returns a session only when it belongs to streamName.
+// Slot IDs are externally supplied, so callers serving an addon request must
+// use this lookup instead of GetSession to prevent one stream from reusing
+// another stream's playback session.
+func (m *Manager) GetSessionForStream(sessionID, streamName string) (*Session, error) {
+	streamName = strings.TrimSpace(streamName)
+	if streamName == "" {
+		return nil, fmt.Errorf("stream owner is required")
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	requestedID := sessionID
+	canonicalID := canonicalOwnerlessSlotID(sessionID, streamName)
+	if canonicalID != "" {
+		requestedID = canonicalID
+	}
+	sess, ok := m.sessions[requestedID]
+	if !ok {
+		legacyID := sessionID
+		if canonicalID == "" {
+			legacyID = legacyOwnerlessSlotID(sessionID, streamName)
+		}
+		if legacyID != "" {
+			sess, ok = m.sessions[legacyID]
+			if ok && sess != nil {
+				sess.mu.Lock()
+				legacyOwner := sess.StreamName
+				if legacyOwner != "" && legacyOwner != "default" && legacyOwner != streamName {
+					sess.mu.Unlock()
+					ok = false
+				} else {
+					sess.ID = requestedID
+					sess.StreamName = streamName
+					sess.mu.Unlock()
+					delete(m.sessions, legacyID)
+					m.sessions[requestedID] = sess
+				}
+			}
+		}
+	}
+	if !ok || sess == nil {
+		return nil, fmt.Errorf("session not found: %s", sessionID)
+	}
+
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	if sess.StreamName != streamName {
+		return nil, fmt.Errorf("session not found: %s", sessionID)
+	}
+	sess.LastAccess = time.Now()
+	return sess, nil
+}
+
+func canonicalOwnerlessSlotID(sessionID, streamName string) string {
+	const prefix = "stream:"
+	if !strings.HasPrefix(sessionID, prefix) || streamName == "" {
+		return ""
+	}
+	rest := strings.TrimPrefix(sessionID, prefix)
+	if !strings.HasPrefix(rest, "movie:") && !strings.HasPrefix(rest, "series:") {
+		return ""
+	}
+	return prefix + streamName + ":" + rest
+}
+
+func canonicalSessionIDForStream(sessionID, streamName string) (string, error) {
+	const prefix = "stream:"
+	if !strings.HasPrefix(sessionID, prefix) {
+		return sessionID, nil
+	}
+	if canonicalID := canonicalOwnerlessSlotID(sessionID, streamName); canonicalID != "" {
+		return canonicalID, nil
+	}
+	rest := strings.TrimPrefix(sessionID, prefix)
+	parts := strings.Split(rest, ":")
+	if len(parts) >= 3 && (parts[1] == "movie" || parts[1] == "series") {
+		if parts[0] != streamName {
+			return "", fmt.Errorf("session slot belongs to another stream")
+		}
+	}
+	return sessionID, nil
+}
+
+func legacyOwnerlessSlotID(sessionID, streamName string) string {
+	const prefix = "stream:"
+	if !strings.HasPrefix(sessionID, prefix) {
+		return ""
+	}
+	rest := strings.TrimPrefix(sessionID, prefix)
+	ownerPrefix := streamName + ":"
+	if !strings.HasPrefix(rest, ownerPrefix) {
+		return ""
+	}
+	legacyRest := strings.TrimPrefix(rest, ownerPrefix)
+	if len(strings.Split(legacyRest, ":")) < 3 {
+		return ""
+	}
+	return prefix + legacyRest
 }
 
 func (m *Manager) DeleteSession(sessionID string) {
@@ -475,6 +620,24 @@ func (m *Manager) SetStreamFailoverOrder(streamToken, streamKey string, order []
 	})
 }
 
+func ownerFailoverOrderMapKey(streamToken, streamName, streamKey string) string {
+	return "owner|" + streamName + "|" + streamToken + "|" + streamKey
+}
+
+// SetStreamFailoverOrderForStream stores failover order under the authenticated
+// stream as well as the legacy token/key namespace.
+func (m *Manager) SetStreamFailoverOrderForStream(streamToken, streamName, streamKey string, order []string) {
+	streamName = strings.TrimSpace(streamName)
+	if streamName == "" || len(order) == 0 {
+		return
+	}
+	cp := append([]string(nil), order...)
+	m.failoverOrder.Store(ownerFailoverOrderMapKey(streamToken, streamName, streamKey), &failoverOrderEntry{
+		order:     cp,
+		expiresAt: time.Now().Add(FailoverOrderTTL),
+	})
+}
+
 // GetStreamFailoverOrder returns the stored failover order for this stream token
 // and stream key. It tries key-specific storage first, then falls back to
 // token-only (legacy). Returns nil if the entry is missing or expired.
@@ -496,6 +659,28 @@ func (m *Manager) GetStreamFailoverOrder(streamToken, streamKey string) []string
 		return nil
 	}
 	return ent.order
+}
+
+// GetStreamFailoverOrderForStream prefers owner-qualified state and falls back
+// to the token-only methods for legacy clients that posted ownerless slots.
+func (m *Manager) GetStreamFailoverOrderForStream(streamToken, streamName, streamKey string) []string {
+	streamName = strings.TrimSpace(streamName)
+	if streamName != "" {
+		if val, ok := m.failoverOrder.Load(ownerFailoverOrderMapKey(streamToken, streamName, streamKey)); ok && val != nil {
+			if ent, ok := val.(*failoverOrderEntry); ok && ent != nil && time.Now().Before(ent.expiresAt) {
+				return append([]string(nil), ent.order...)
+			}
+		}
+	}
+	if order := m.GetStreamFailoverOrder(streamToken, streamKey); len(order) > 0 {
+		return order
+	}
+	legacyKeyPrefix := streamName + ":"
+	if streamName != "default" && strings.HasPrefix(streamKey, legacyKeyPrefix) {
+		legacyKey := "default:" + strings.TrimPrefix(streamKey, legacyKeyPrefix)
+		return m.GetStreamFailoverOrder(streamToken, legacyKey)
+	}
+	return nil
 }
 
 // SetSlotFailedDuringPlayback marks the slot as having failed during playback.
@@ -526,6 +711,28 @@ func (m *Manager) ClearSlotFailedDuringPlayback(slotPath string) {
 		return
 	}
 	m.slotFailedDuringPlayback.Delete(slotPath)
+}
+
+// GetSlotFailedDuringPlaybackForStream also checks the pre-stream-qualified
+// slot namespace and migrates a legacy failure to the canonical owner path.
+func (m *Manager) GetSlotFailedDuringPlaybackForStream(slotPath, streamName string) bool {
+	if m.GetSlotFailedDuringPlayback(slotPath) {
+		return true
+	}
+	legacyID := legacyOwnerlessSlotID(slotPath, strings.TrimSpace(streamName))
+	if legacyID == "" || !m.GetSlotFailedDuringPlayback(legacyID) {
+		return false
+	}
+	m.SetSlotFailedDuringPlayback(slotPath)
+	m.slotFailedDuringPlayback.Delete(legacyID)
+	return true
+}
+
+func (m *Manager) ClearSlotFailedDuringPlaybackForStream(slotPath, streamName string) {
+	m.ClearSlotFailedDuringPlayback(slotPath)
+	if legacyID := legacyOwnerlessSlotID(slotPath, strings.TrimSpace(streamName)); legacyID != "" {
+		m.ClearSlotFailedDuringPlayback(legacyID)
+	}
 }
 
 // ActiveSessionInfo is the dashboard view of one actively-playing session.

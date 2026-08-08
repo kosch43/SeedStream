@@ -3,6 +3,7 @@ package stremio
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -44,7 +45,7 @@ func (s *Server) SetupRoutes(mux *http.ServeMux) {
 			token := parts[0]
 
 			if streamManager != nil {
-				stream, err := streamManager.AuthenticateToken(token, s.config.GetAdminUsername(), s.config.AdminToken)
+				stream, err := streamManager.AuthenticateToken(token, s.config.GetAdminUsername(), s.config.AdminToken, s.config.AdminSessionToken)
 				if err == nil && stream != nil {
 					authenticatedStream = stream
 
@@ -118,10 +119,7 @@ func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request) {
 	manifest := s.manifest
 	s.mu.RUnlock()
 
-	stream, _ := auth.StreamFromContext(r)
-	isAdmin := stream != nil && stream.Username == s.config.GetAdminUsername()
-
-	data, err := manifest.ToJSONForDevice(isAdmin)
+	data, err := manifest.ToJSONForDevice(false)
 	if err != nil {
 		http.Error(w, "Failed to generate manifest", http.StatusInternalServerError)
 		return
@@ -248,10 +246,15 @@ func (s *Server) handleFailoverOrder(w http.ResponseWriter, r *http.Request, str
 		if !strings.HasPrefix(slotPath, streamSlotPrefix) {
 			continue
 		}
-		if _, _, _, _, ok := parseStreamSlotID(slotPath); !ok {
+		canonicalPath, canonicalErr := canonicalizeStreamSlotID(slotPath, stream)
+		if canonicalErr != nil {
+			if errors.Is(canonicalErr, errForeignStreamSlot) {
+				http.Error(w, canonicalErr.Error(), http.StatusForbidden)
+				return
+			}
 			continue
 		}
-		order = append(order, slotPath)
+		order = append(order, canonicalPath)
 	}
 	if len(order) == 0 {
 		var firstNonEmptyRaw string
@@ -279,7 +282,7 @@ func (s *Server) handleFailoverOrder(w http.ResponseWriter, r *http.Request, str
 			if sid, contentType, id, _, ok := parseStreamSlotID(entry); ok {
 				sk := StreamSlotKey{StreamID: sid, ContentType: contentType, ID: id}
 				if sk.StreamID == "" {
-					sk.StreamID = defaultStreamID
+					sk.StreamID = streamID(stream)
 				}
 				streamKey = sk.CacheKey()
 				isAIOStreams = streamUsesAIOStreamsProfile(stream)
@@ -293,7 +296,7 @@ func (s *Server) handleFailoverOrder(w http.ResponseWriter, r *http.Request, str
 		return
 	}
 	token := streamToken(stream)
-	s.sessionManager.SetStreamFailoverOrder(token, streamKey, order)
+	s.sessionManager.SetStreamFailoverOrderForStream(token, streamID(stream), streamKey, order)
 	sample := ""
 	if len(order) > 0 {
 		sample = order[0]

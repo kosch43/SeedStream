@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -14,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/crypto/bcrypt"
+
 	"seedstream/pkg/core/env"
 	"seedstream/pkg/core/logger"
 	"seedstream/pkg/core/paths"
@@ -21,6 +24,8 @@ import (
 
 const (
 	defaultAdminPasswordHash               = "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918"
+	defaultAdminPassword                   = "admin"
+	bootstrapAdminPasswordFile             = "bootstrap-admin-password"
 	DefaultInternalIndexerTimeoutSeconds   = 5
 	DefaultAggregatorIndexerTimeoutSeconds = 10
 	DefaultPlaybackStartupTimeoutSeconds   = 5
@@ -132,6 +137,12 @@ type IndexerConfig struct {
 	// ProxyURL is an optional HTTP or HTTPS proxy for this indexer (http://host:port or https://...).
 	// When empty, HTTP_PROXY / HTTPS_PROXY / NO_PROXY apply via the default proxy resolution.
 	ProxyURL string `json:"proxy_url,omitempty"`
+	// TLSCAFile is an optional PEM file containing additional CA certificates for
+	// this indexer. The system trust store is always retained.
+	TLSCAFile string `json:"tls_ca_file,omitempty"`
+	// TLSInsecureSkipVerify is intentionally unsupported. Keeping the field lets
+	// config validation reject unsafe payloads instead of silently accepting them.
+	TLSInsecureSkipVerify bool `json:"tls_insecure_skip_verify,omitempty"`
 
 	// QueryHeader overrides the global indexer_query_header for search and capability requests to this indexer.
 	// Some indexers (e.g. SceneNZBs) gate content by User-Agent; leave empty to use the global setting.
@@ -228,7 +239,35 @@ func RedactProxyURLForAPI(raw string) string {
 		return ""
 	}
 	u.User = nil
+	query := u.Query()
+	for key := range query {
+		normalized := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(key, "-", ""), "_", ""))
+		if strings.Contains(normalized, "apikey") || strings.Contains(normalized, "password") || strings.Contains(normalized, "passwd") || strings.Contains(normalized, "secret") || strings.Contains(normalized, "token") || strings.Contains(normalized, "username") || strings.Contains(normalized, "credential") || normalized == "user" || normalized == "login" || normalized == "auth" || normalized == "key" {
+			query.Del(key)
+		}
+	}
+	u.RawQuery = query.Encode()
+	u.Fragment = ""
+	pathParts := strings.Split(u.Path, "/")
+	for i, part := range pathParts {
+		if isCanonicalTokenSegment(part) {
+			pathParts[i] = "[REDACTED]"
+		}
+	}
+	u.Path = strings.Join(pathParts, "/")
 	return u.String()
+}
+
+func isCanonicalTokenSegment(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, r := range value {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+			return false
+		}
+	}
+	return true
 }
 
 func (ic IndexerConfig) EffectiveTimeoutSeconds() int {
@@ -243,6 +282,48 @@ func (ic IndexerConfig) EffectiveTimeoutSeconds() int {
 
 func (ic IndexerConfig) EffectiveTimeout() time.Duration {
 	return time.Duration(ic.EffectiveTimeoutSeconds()) * time.Second
+}
+
+// NewIndexerTLSConfig returns the TLS policy used for outbound indexer
+// requests. Verification is always enabled; a custom CA extends the system
+// roots and never disables normal certificate or hostname checks.
+func NewIndexerTLSConfig(caFile string, insecureSkipVerify bool) (*tls.Config, error) {
+	if insecureSkipVerify {
+		return nil, fmt.Errorf("insecure TLS certificate verification is not supported")
+	}
+
+	tlsConfig := &tls.Config{}
+	path := strings.TrimSpace(caFile)
+	if path == "" {
+		return tlsConfig, nil
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("TLS CA file is not readable: %w", err)
+	}
+
+	roots, err := x509.SystemCertPool()
+	if err != nil || roots == nil {
+		roots = x509.NewCertPool()
+	}
+	if !roots.AppendCertsFromPEM(data) {
+		return nil, fmt.Errorf("TLS CA file contains no valid PEM certificates")
+	}
+	tlsConfig.RootCAs = roots
+	return tlsConfig, nil
+}
+
+// TLSClientConfig builds a fresh outbound TLS configuration for this indexer.
+func (ic IndexerConfig) TLSClientConfig() (*tls.Config, error) {
+	return NewIndexerTLSConfig(ic.TLSCAFile, ic.TLSInsecureSkipVerify)
+}
+
+// ValidateTLS checks the per-indexer outbound TLS settings without creating a
+// network connection.
+func (ic IndexerConfig) ValidateTLS() error {
+	_, err := ic.TLSClientConfig()
+	return err
 }
 
 func normalizePlaybackStartupTimeoutSeconds(timeout int) int {
@@ -534,7 +615,12 @@ type Config struct {
 	AdminUsername           string `json:"admin_username"`
 	AdminPasswordHash       string `json:"admin_password_hash"`
 	AdminMustChangePassword bool   `json:"admin_must_change_password"`
-	AdminToken              string `json:"admin_token"`
+	// AdminSessionToken authenticates dashboard/API requests only. It must never
+	// be emitted in addon URLs or accepted as a stream credential.
+	AdminSessionToken string `json:"admin_session_token"`
+	// AdminToken is retained as a legacy addon alias. It is not an admin session
+	// credential and is resolved only to the configured default stream.
+	AdminToken string `json:"admin_token"`
 
 	// TorrentClients are download clients (qBittorrent) that receive torrent
 	// picks and keep them seeding on a seedbox. One entry per seedbox/member.
@@ -842,7 +928,7 @@ func Load() (*Config, error) {
 	dataDir := paths.GetDataDir()
 	configPath := filepath.Join(dataDir, "config.json")
 
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
+	if err := os.MkdirAll(dataDir, 0700); err != nil {
 		logger.Warn("Failed to create data directory", "dir", dataDir, "err", err)
 	}
 
@@ -864,7 +950,7 @@ func Load() (*Config, error) {
 		if os.IsNotExist(err) {
 			logger.Info("No config found, creating new one", "path", configPath)
 		} else {
-			logger.Warn("Failed to load config, using defaults", "path", configPath, "err", err)
+			return nil, fmt.Errorf("failed to load existing config %q: %w", configPath, err)
 		}
 	} else {
 		logger.Info("Loaded configuration", "path", configPath)
@@ -878,7 +964,6 @@ func Load() (*Config, error) {
 			logger.Info("Applying stream-model upgrade defaults", "from_version", cfg.ConfigVersion, "to_version", CurrentConfigVersion)
 		}
 		cfg.Streams = make(map[string]*StreamEntry)
-		cfg.ResetLegacyStreamState = true
 		needSave = true
 	}
 	if cfg.ConfigVersion < CurrentConfigVersion {
@@ -916,29 +1001,142 @@ func Load() (*Config, error) {
 	}
 
 	if cfg.AdminToken == "" {
-		bytes := make([]byte, 32)
-		if _, err := rand.Read(bytes); err == nil {
-			hash := sha256.Sum256(bytes)
-			cfg.AdminToken = hex.EncodeToString(hash[:])
-			needSave = true
+		token, err := generateConfigToken()
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate legacy addon token: %w", err)
 		}
+		cfg.AdminToken = token
+		needSave = true
 	}
-	if cfg.AdminPasswordHash == "" {
-		cfg.AdminPasswordHash = defaultAdminPasswordHash
-		cfg.AdminMustChangePassword = true
+	if adminSessionTokenConflicts(cfg) {
+		token, err := generateConfigToken()
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate admin session token: %w", err)
+		}
+		cfg.AdminSessionToken = token
+		needSave = true
+	}
+	if changed, err := cfg.EnsureBootstrapAdminPassword(); err != nil {
+		return nil, err
+	} else if changed {
 		needSave = true
 	}
 	if needSave {
-		logger.Info("Set default admin token/password in config")
+		logger.Info("Updated generated authentication credentials in config")
 	}
 
 	if err := cfg.Save(); err != nil {
-		logger.Warn("Failed to save config on startup", "err", err)
-	} else {
-		logger.Info("Saved merged configuration", "path", configPath)
+		return nil, fmt.Errorf("failed to save configuration on startup: %w", err)
 	}
+	logger.Info("Saved merged configuration", "path", configPath)
 
 	return cfg, nil
+}
+
+func adminSessionTokenConflicts(cfg *Config) bool {
+	if cfg == nil || strings.TrimSpace(cfg.AdminSessionToken) == "" || cfg.AdminSessionToken == cfg.AdminToken {
+		return true
+	}
+	for _, stream := range cfg.Streams {
+		if stream != nil && stream.Token != "" && stream.Token == cfg.AdminSessionToken {
+			return true
+		}
+	}
+	return false
+}
+
+// EnsureBootstrapAdminPassword replaces a missing or known default admin
+// password with a fresh bcrypt credential and writes the one-time retrieval
+// file beside config.json. It leaves every non-default password hash intact.
+func (c *Config) EnsureBootstrapAdminPassword() (bool, error) {
+	if c == nil || (!isDefaultAdminPasswordHash(c.AdminPasswordHash) && c.AdminPasswordHash != "") {
+		return false, nil
+	}
+	dir := filepath.Dir(c.LoadedPath)
+	if dir == "" || dir == "." {
+		dir = paths.GetDataDir()
+	}
+	path := filepath.Join(dir, bootstrapAdminPasswordFile)
+	password, err := readBootstrapAdminPassword(path)
+	if err != nil {
+		password, err = writeBootstrapAdminPassword(path)
+		if err != nil {
+			return false, fmt.Errorf("failed to create bootstrap admin password: %w", err)
+		}
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return false, fmt.Errorf("failed to hash bootstrap admin password: %w", err)
+	}
+	c.AdminPasswordHash = string(hash)
+	c.AdminMustChangePassword = true
+	logger.Info("Generated bootstrap admin password", "path", path, "instruction", "retrieve the password from this file and remove it after changing the admin password")
+	return true, nil
+}
+
+// RemoveBootstrapAdminPassword removes the one-time bootstrap secret after a
+// successful password change. A missing file is already-clean state.
+func (c *Config) RemoveBootstrapAdminPassword() error {
+	if c == nil {
+		return nil
+	}
+	dir := filepath.Dir(c.LoadedPath)
+	if dir == "" || dir == "." {
+		dir = paths.GetDataDir()
+	}
+	err := os.Remove(filepath.Join(dir, bootstrapAdminPasswordFile))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
+}
+
+func readBootstrapAdminPassword(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	password := strings.TrimSpace(string(data))
+	if password == "" {
+		return "", fmt.Errorf("bootstrap password file is empty")
+	}
+	return password, nil
+}
+
+func isDefaultAdminPasswordHash(hash string) bool {
+	hash = strings.TrimSpace(hash)
+	if hash == "" || hash == defaultAdminPasswordHash || hash == defaultAdminPassword {
+		return true
+	}
+	return strings.HasPrefix(hash, "$2") && bcrypt.CompareHashAndPassword([]byte(hash), []byte(defaultAdminPassword)) == nil
+}
+
+func writeBootstrapAdminPassword(path string) (string, error) {
+	random := make([]byte, 24)
+	if _, err := rand.Read(random); err != nil {
+		return "", err
+	}
+	password := hex.EncodeToString(random)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return "", err
+	}
+	if err := file.Chmod(0600); err != nil {
+		_ = file.Close()
+		return "", err
+	}
+	if _, err := file.WriteString(password + "\n"); err != nil {
+		_ = file.Close()
+		return "", err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return "", err
+	}
+	if err := file.Close(); err != nil {
+		return "", err
+	}
+	return password, nil
 }
 
 func (c *Config) applyStreamModelUpgradeDefaults() bool {
@@ -1157,6 +1355,13 @@ func (c *Config) LoadFile(path string) error {
 	}
 
 	type configAlias Config
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(data, &object); err != nil {
+		return err
+	}
+	if object == nil {
+		return fmt.Errorf("configuration must be a JSON object")
+	}
 	var raw struct {
 		configAlias
 		LegacyDevices map[string]*StreamEntry `json:"devices"`
@@ -1194,19 +1399,88 @@ func (c *Config) Save() error {
 }
 
 func (c *Config) SaveFile(path string) error {
-	file, err := os.Create(path)
+	if existing, err := existingConfigForSave(path); err != nil {
+		return err
+	} else if existing != nil {
+		// Config update payloads intentionally omit authentication secrets. Keep
+		// the on-disk values when a caller saves such a payload directly.
+		if c.AdminPasswordHash == "" {
+			c.AdminPasswordHash = existing.AdminPasswordHash
+		}
+		if c.AdminSessionToken == "" {
+			c.AdminSessionToken = existing.AdminSessionToken
+		}
+		if c.AdminToken == "" {
+			c.AdminToken = existing.AdminToken
+		}
+	}
+	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	data = append(data, '\n')
 
-	encoder := json.NewEncoder(file)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(c); err != nil {
+	dir := filepath.Dir(path)
+	if dir == "" {
+		dir = "."
+	}
+	temp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
 		return err
+	}
+	tempPath := temp.Name()
+	removeTemp := true
+	defer func() {
+		if removeTemp {
+			_ = os.Remove(tempPath)
+		}
+	}()
+	if err := temp.Chmod(0600); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if _, err := temp.Write(data); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if err := temp.Sync(); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tempPath, path); err != nil {
+		return err
+	}
+	removeTemp = false
+	directory, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	if syncErr := directory.Sync(); syncErr != nil {
+		_ = directory.Close()
+		return syncErr
+	}
+	if closeErr := directory.Close(); closeErr != nil {
+		return closeErr
 	}
 	c.LoadedPath = path
 	return nil
+}
+
+func existingConfigForSave(path string) (*Config, error) {
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var existing Config
+	if err := existing.LoadFile(path); err != nil {
+		return nil, fmt.Errorf("refusing to replace malformed existing config %q: %w", path, err)
+	}
+	return &existing, nil
 }
 
 func keySet(list []string, s string) bool {
@@ -1272,21 +1546,34 @@ func GetEnvOverrideKeys() []string {
 }
 
 func (c *Config) RedactForAPI() Config {
+	if c == nil {
+		return Config{}
+	}
 	out := *c
 	out.AdminPasswordHash = ""
+	out.AdminSessionToken = ""
 	out.AdminToken = ""
 	out.IndexerQueryHeader = ""
 	out.IndexerGrabHeader = ""
 	out.IndexerProxyURL = RedactProxyURLForAPI(c.IndexerProxyURL)
+	out.AddonBaseURL = RedactProxyURLForAPI(c.AddonBaseURL)
 	out.TMDBAPIKey = ""
 	out.TVDBAPIKey = ""
+	out.CerberusAPIKey = ""
+	out.CerberusBaseURL = RedactProxyURLForAPI(c.CerberusBaseURL)
+	out.TLSCertFile = ""
+	out.TLSKeyFile = ""
 	out.Indexers = make([]IndexerConfig, len(c.Indexers))
 	for i, indexer := range c.Indexers {
 		redactedIndexer := indexer
 		redactedIndexer.APIKey = ""
 		redactedIndexer.Username = ""
 		redactedIndexer.Password = ""
+		redactedIndexer.URL = RedactProxyURLForAPI(indexer.URL)
 		redactedIndexer.ProxyURL = RedactProxyURLForAPI(indexer.ProxyURL)
+		redactedIndexer.QueryHeader = ""
+		redactedIndexer.GrabHeader = ""
+		redactedIndexer.DefinitionSettings = nil
 		out.Indexers[i] = redactedIndexer
 	}
 	out.TorrentClients = make([]TorrentClientConfig, len(c.TorrentClients))
@@ -1294,7 +1581,38 @@ func (c *Config) RedactForAPI() Config {
 		redacted := tc
 		redacted.Username = ""
 		redacted.Password = ""
+		redacted.URL = RedactProxyURLForAPI(tc.URL)
 		out.TorrentClients[i] = redacted
+	}
+	if c.Streams != nil {
+		out.Streams = make(map[string]*StreamEntry, len(c.Streams))
+		for key, entry := range c.Streams {
+			if entry == nil {
+				continue
+			}
+			redacted := *entry
+			redacted.Token = ""
+			redacted.ProwlarrAPIKey = ""
+			redacted.PasswordHash = ""
+			redacted.ProwlarrURL = RedactProxyURLForAPI(entry.ProwlarrURL)
+			if entry.TorrentClient != nil {
+				torrentClient := *entry.TorrentClient
+				torrentClient.Username = ""
+				torrentClient.Password = ""
+				torrentClient.URL = RedactProxyURLForAPI(entry.TorrentClient.URL)
+				redacted.TorrentClient = &torrentClient
+			}
+			if entry.IndexerOverrides != nil {
+				redacted.IndexerOverrides = make(map[string]IndexerSearchConfig, len(entry.IndexerOverrides))
+				for name, override := range entry.IndexerOverrides {
+					redacted.IndexerOverrides[name] = override
+				}
+			}
+			redacted.IndexerSelections = append([]string(nil), entry.IndexerSelections...)
+			redacted.MovieSearchQueries = append([]string(nil), entry.MovieSearchQueries...)
+			redacted.SeriesSearchQueries = append([]string(nil), entry.SeriesSearchQueries...)
+			out.Streams[key] = &redacted
+		}
 	}
 	return out
 }

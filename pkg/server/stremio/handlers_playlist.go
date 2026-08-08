@@ -87,6 +87,9 @@ func filterPlaylistByOrder(list *playlistResult, key StreamSlotKey, order []stri
 		if sid != "" && sid != key.StreamID {
 			continue
 		}
+		if sid == "" {
+			entry = key.SlotPath(idx)
+		}
 		filtered = append(filtered, list.Candidates[idx])
 		paths = append(paths, entry)
 	}
@@ -104,8 +107,11 @@ func filterPlaylistByOrder(list *playlistResult, key StreamSlotKey, order []stri
 // Raw search and play list are both cached by the stable stream slot key.
 // Relevant config changes clear these caches centrally after successful saves.
 func (s *Server) buildPlaylist(ctx context.Context, key StreamSlotKey, isAIOStreams bool, stream *auth.Stream) (*playlistResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if key.StreamID == "" {
-		key.StreamID = defaultStreamID
+		key.StreamID = streamID(stream)
 	}
 	cacheKey := key.CacheKey()
 	if v, ok := s.playlistCache.Load(cacheKey); ok {
@@ -123,11 +129,17 @@ func (s *Server) buildPlaylist(ctx context.Context, key StreamSlotKey, isAIOStre
 	if err != nil || list == nil {
 		return list, err
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	s.playlistCache.Store(cacheKey, &playlistCacheEntry{result: list, until: time.Now().Add(playlistCacheTTL)})
 	return list, nil
 }
 
 func (s *Server) buildPlaylistUncached(ctx context.Context, key StreamSlotKey, isAIOStreams bool, stream *auth.Stream) (*playlistResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	raw, err := s.getOrBuildRawSearchResult(ctx, key.ContentType, key.ID, stream)
 	if err != nil || raw == nil {
 		return nil, err
@@ -136,6 +148,9 @@ func (s *Server) buildPlaylistUncached(ctx context.Context, key StreamSlotKey, i
 }
 
 func (s *Server) getOrBuildRawSearchResult(ctx context.Context, contentType, id string, stream *auth.Stream) (*rawSearchResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	rawKey := streamID(stream) + ":" + contentType + ":" + id
 	if v, ok := s.rawSearchCache.Load(rawKey); ok {
 		if ent, _ := v.(*rawSearchCacheEntry); ent != nil && time.Now().Before(ent.until) {
@@ -150,6 +165,9 @@ func (s *Server) getOrBuildRawSearchResult(ctx context.Context, contentType, id 
 	logger.Debug("Playback candidate cache miss", "key", rawKey)
 	raw, err := s.buildRawSearchResult(ctx, contentType, id, stream)
 	if err != nil || raw == nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	s.rawSearchCache.Store(rawKey, &rawSearchCacheEntry{raw: raw, until: time.Now().Add(playlistCacheTTL)})

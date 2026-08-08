@@ -14,15 +14,21 @@ func newTokenTestManager() *StreamManager {
 	}
 }
 
-// TestAuthenticateTokenAcceptsAdminToken keeps the pre-existing admin path working.
-func TestAuthenticateTokenAcceptsAdminToken(t *testing.T) {
+func TestAuthenticateTokenMapsLegacyAdminTokenToDefaultStream(t *testing.T) {
 	dm := newTokenTestManager()
-	stream, err := dm.AuthenticateToken("admin-token", "admin", "admin-token")
+	stream, err := dm.AuthenticateToken("admin-token", "admin", "admin-token", "admin-session-token")
 	if err != nil {
-		t.Fatalf("admin token should authenticate: %v", err)
+		t.Fatalf("legacy addon token should authenticate: %v", err)
 	}
-	if stream.Username != "admin" {
-		t.Fatalf("expected admin stream, got %q", stream.Username)
+	if stream.Username != "default" {
+		t.Fatalf("expected default stream, got %q", stream.Username)
+	}
+}
+
+func TestAuthenticateTokenRejectsAdminSessionToken(t *testing.T) {
+	dm := newTokenTestManager()
+	if _, err := dm.AuthenticateToken("admin-session-token", "admin", "admin-token", "admin-session-token"); err == nil {
+		t.Fatal("admin session token must not authenticate as an addon stream")
 	}
 }
 

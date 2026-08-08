@@ -51,15 +51,6 @@ func BuildComponents(cfg *config.Config) (*InitializedComponents, error) {
 		// search/download events via stats.Default() without plumbing.
 		stats.SetDefault(stats.NewSQLiteRecorder(stateMgr))
 	}
-	if stateMgr != nil && cfg.ResetLegacyStreamState {
-		if err := stateMgr.Delete("devices"); err != nil {
-			logger.Warn("Failed to clear legacy devices state during stream-model upgrade", "err", err)
-		}
-		if err := stateMgr.Delete("users"); err != nil {
-			logger.Warn("Failed to clear legacy users state during stream-model upgrade", "err", err)
-		}
-		logger.Info("Cleared legacy persisted device state for stream-model upgrade")
-	}
 
 	usageMgr, err := indexer.GetUsageManager(stateMgr)
 	if err != nil {
@@ -87,11 +78,21 @@ func BuildComponents(cfg *config.Config) (*InitializedComponents, error) {
 			continue
 		}
 
+		effectiveCfg := idxCfg
+		effectiveProxyURL := strings.TrimSpace(idxCfg.ProxyURL)
+		if effectiveProxyURL == "" {
+			effectiveProxyURL = strings.TrimSpace(cfg.IndexerProxyURL)
+		}
+		effectiveCfg.ProxyURL = effectiveProxyURL
+		if err := effectiveCfg.ValidateTLS(); err != nil {
+			return nil, fmt.Errorf("invalid TLS configuration for indexer %q: %w", idxCfg.Name, err)
+		}
+
 		// Definition-driven trackers scrape the tracker's own site using a
 		// bundled definition, so they need no Torznab service in front of them.
 		if config.IsDefinitionIndexerType(idxCfg.Type) {
 			client, err := cardigann.NewClient(catalog, idxCfg.DefinitionID, idxCfg.Name,
-				idxCfg.URL, idxCfg.DefinitionSettings, idxCfg.EffectiveTimeout())
+				idxCfg.URL, idxCfg.DefinitionSettings, idxCfg.EffectiveTimeout(), effectiveCfg)
 			if err != nil {
 				logger.Warn("Skipping tracker: definition unavailable",
 					"name", idxCfg.Name, "definition", idxCfg.DefinitionID, "err", err)
@@ -103,12 +104,6 @@ func BuildComponents(cfg *config.Config) (*InitializedComponents, error) {
 			continue
 		}
 
-		effectiveCfg := idxCfg
-		effectiveProxyURL := strings.TrimSpace(idxCfg.ProxyURL)
-		if effectiveProxyURL == "" {
-			effectiveProxyURL = strings.TrimSpace(cfg.IndexerProxyURL)
-		}
-		effectiveCfg.ProxyURL = effectiveProxyURL
 		client := newznab.NewClient(effectiveCfg, usageMgr)
 		indexers = append(indexers, client)
 		logger.Info("Initialized Torznab tracker", "name", idxCfg.Name, "url", idxCfg.URL)

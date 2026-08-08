@@ -189,6 +189,9 @@ func (s *Server) serveTorrent(w http.ResponseWriter, r *http.Request, sess *sess
 		return fmt.Errorf("torrent file not readable by SeedStream (check that the qBittorrent save path is mounted and readable): %w", err)
 	}
 	defer f.Close()
+	if reader, ok := f.(interface{ SetContext(context.Context) }); ok {
+		reader.SetContext(prepCtx)
+	}
 
 	stat, err := os.Stat(res.AbsPath)
 	if err != nil {

@@ -2,7 +2,6 @@ package newznab
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -29,6 +28,7 @@ type Client struct {
 	name    string
 	client  *http.Client
 	cfg     config.IndexerConfig
+	initErr error
 	caps    *indexer.Caps
 
 	apiLimit          int
@@ -188,12 +188,36 @@ func (c *Client) recordSearchDuration(elapsed time.Duration) {
 }
 
 func NewClient(cfg config.IndexerConfig, um *indexer.UsageManager) *Client {
+	client, err := newClient(cfg, um)
+	if err != nil {
+		// Keep the historical constructor usable for callers that do not need
+		// eager validation. Requests still fail with the initialization error;
+		// startup and API validation use NewClientWithError below.
+		return &Client{
+			name:    cfg.Name,
+			cfg:     cfg,
+			initErr: err,
+			client:  &http.Client{Timeout: cfg.EffectiveTimeout()},
+		}
+	}
+	return client
+}
+
+// NewClientWithError constructs a client and rejects invalid outbound TLS
+// configuration before any request can be made.
+func NewClientWithError(cfg config.IndexerConfig, um *indexer.UsageManager) (*Client, error) {
+	return newClient(cfg, um)
+}
+
+func newClient(cfg config.IndexerConfig, um *indexer.UsageManager) (*Client, error) {
+	tlsConfig, err := cfg.TLSClientConfig()
+	if err != nil {
+		return nil, err
+	}
 
 	transport := &http.Transport{
-		Proxy: httpproxy.IndexerProxy(cfg.ProxyURL),
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true,
-		},
+		Proxy:               httpproxy.IndexerProxy(cfg.ProxyURL),
+		TLSClientConfig:     tlsConfig,
 		MaxIdleConns:        100,
 		MaxIdleConnsPerHost: 100,
 		MaxConnsPerHost:     100,
@@ -245,7 +269,7 @@ func NewClient(cfg config.IndexerConfig, um *indexer.UsageManager) *Client {
 		}
 	}
 
-	return c
+	return c, nil
 }
 
 func (c *Client) effectiveQueryHeader() string {
@@ -344,6 +368,9 @@ func (c *Client) waitForRateLimit(ctx context.Context) error {
 }
 
 func (c *Client) Ping() error {
+	if c.initErr != nil {
+		return c.initErr
+	}
 	ctx, cancel := c.requestContext(context.Background())
 	defer cancel()
 	if err := c.waitForRateLimit(ctx); err != nil {
@@ -368,6 +395,9 @@ func (c *Client) Ping() error {
 }
 
 func (c *Client) GetCaps() (*indexer.Caps, error) {
+	if c.initErr != nil {
+		return nil, c.initErr
+	}
 	ctx, cancel := c.requestContext(context.Background())
 	defer cancel()
 	if err := c.waitForRateLimit(ctx); err != nil {
@@ -506,6 +536,9 @@ func (c *Client) Search(req indexer.SearchRequest) (*indexer.SearchResponse, err
 }
 
 func (c *Client) search(req indexer.SearchRequest) (*indexer.SearchResponse, error) {
+	if c.initErr != nil {
+		return nil, c.initErr
+	}
 	if err := c.checkAPILimit(); err != nil {
 		return nil, err
 	}
@@ -772,6 +805,9 @@ func (c *Client) search(req indexer.SearchRequest) (*indexer.SearchResponse, err
 }
 
 func (c *Client) DownloadNZB(ctx context.Context, nzbURL string) ([]byte, error) {
+	if c.initErr != nil {
+		return nil, c.initErr
+	}
 	if err := c.checkDownloadLimit(); err != nil {
 		logger.Warn("Download limit reached for indexer", "indexer", c.Name())
 		return nil, err

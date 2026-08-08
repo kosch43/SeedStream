@@ -202,6 +202,29 @@ function TimeBarChart({ data }) {
 const PRIMARY = 'hsl(var(--primary))'
 const MUTED   = 'hsl(var(--muted-foreground))'
 
+function HighlightBar({ data, unit = '', title }) {
+  const h = Math.max(100, data.length * 28)
+  const chartConfig = { value: { label: 'Value', color: PRIMARY } }
+  return (
+    <div>
+      <div className="mb-1 text-xs font-medium text-muted-foreground">{title}</div>
+      <ChartContainer config={chartConfig} className="w-full" style={{ height: `${h}px` }}>
+        <BarChart data={data} layout="vertical" margin={{ top: 2, right: 8, left: 4, bottom: 2 }}>
+          <CartesianGrid horizontal={false} />
+          <XAxis type="number" tick={{ fontSize: 10 }} unit={unit} />
+          <YAxis type="category" dataKey="name" width={120} tick={{ fontSize: 10 }} />
+          <ChartTooltip content={<ChartTooltipContent />} />
+          <Bar dataKey="value" radius={2} name="value">
+            {data.map((entry) => (
+              <Cell key={entry.name} fill={entry.highlight ? PRIMARY : MUTED} fillOpacity={entry.highlight ? 1 : 0.35} />
+            ))}
+          </Bar>
+        </BarChart>
+      </ChartContainer>
+    </div>
+  )
+}
+
 function IndexerDetailPanel({ row, allRows, winAvgMs }) {
   // Response time comparison chart — highlight this indexer
   const respData = useMemo(() =>
@@ -227,31 +250,6 @@ function IndexerDetailPanel({ row, allRows, winAvgMs }) {
 
   const delta = winAvgMs > 0 && row.avgResponseMs > 0
     ? Math.round(row.avgResponseMs - winAvgMs) : null
-
-  const chartHeight = (n) => Math.max(100, n * 28)
-  const chartConfig = { value: { label: 'Value', color: PRIMARY } }
-
-  function HighlightBar({ data, unit = '', title }) {
-    const h = chartHeight(data.length)
-    return (
-      <div>
-        <div className="mb-1 text-xs font-medium text-muted-foreground">{title}</div>
-        <ChartContainer config={chartConfig} className="w-full" style={{ height: `${h}px` }}>
-          <BarChart data={data} layout="vertical" margin={{ top: 2, right: 8, left: 4, bottom: 2 }}>
-            <CartesianGrid horizontal={false} />
-            <XAxis type="number" tick={{ fontSize: 10 }} unit={unit} />
-            <YAxis type="category" dataKey="name" width={120} tick={{ fontSize: 10 }} />
-            <ChartTooltip content={<ChartTooltipContent />} />
-            <Bar dataKey="value" radius={2} name="value">
-              {data.map((entry) => (
-                <Cell key={entry.name} fill={entry.highlight ? PRIMARY : MUTED} fillOpacity={entry.highlight ? 1 : 0.35} />
-              ))}
-            </Bar>
-          </BarChart>
-        </ChartContainer>
-      </div>
-    )
-  }
 
   return (
     <tr>

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 	"time"
 
 	"seedstream/pkg/core/logger"
@@ -35,6 +36,8 @@ type SeekableFileReader struct {
 	avail    *fileAvailability
 	fileSize int64
 	pos      int64
+	ctxMu    sync.RWMutex
+	ctx      context.Context
 
 	// playhead, when set, is updated as bytes are served so the rest of
 	// SeedStream can see where the viewer is. Nil is fine.
@@ -61,7 +64,37 @@ func newSeekableFileReader(f *os.File, avail *fileAvailability, fileSize int64, 
 		avail:    avail,
 		fileSize: fileSize,
 		playhead: ph,
+		ctx:      context.Background(),
 	}
+}
+
+// SetContext binds reads to the request/session lifecycle. It is called before
+// the reader is handed to http.ServeContent; a canceled context interrupts a
+// wait for missing torrent pieces instead of leaving the connection blocked
+// until seekWaitTimeout.
+func (r *SeekableFileReader) SetContext(ctx context.Context) {
+	if r == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	r.ctxMu.Lock()
+	r.ctx = ctx
+	r.ctxMu.Unlock()
+}
+
+func (r *SeekableFileReader) readContext() context.Context {
+	if r == nil {
+		return context.Background()
+	}
+	r.ctxMu.RLock()
+	ctx := r.ctx
+	r.ctxMu.RUnlock()
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
 }
 
 // Playhead returns the position tracker, or nil when this reader has none.
@@ -78,7 +111,7 @@ func (r *SeekableFileReader) trackRunway() {
 	}
 	r.lastRunwayAt = time.Now()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(r.readContext(), 10*time.Second)
 	defer cancel()
 	end := r.avail.ContiguousEnd(ctx, r.pos)
 	r.playhead.noteFrontier(end)
@@ -121,6 +154,11 @@ func (r *SeekableFileReader) Read(p []byte) (int, error) {
 	}
 	deadline := time.Now().Add(seekWaitTimeout)
 	for {
+		select {
+		case <-r.readContext().Done():
+			return 0, r.readContext().Err()
+		default:
+		}
 		if err := r.waitForBytes(r.pos, int64(len(p))); err != nil {
 			return 0, err
 		}
@@ -152,7 +190,18 @@ func (r *SeekableFileReader) Read(p []byte) (int, error) {
 		if time.Now().After(deadline) {
 			return 0, fmt.Errorf("timeout waiting for torrent data at offset %d of %d", r.pos, r.fileSize)
 		}
-		time.Sleep(seekPollInterval)
+		timer := time.NewTimer(seekPollInterval)
+		select {
+		case <-r.readContext().Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return 0, r.readContext().Err()
+		case <-timer.C:
+		}
 	}
 }
 
@@ -193,7 +242,7 @@ func (r *SeekableFileReader) Close() error { return r.f.Close() }
 // only on timeout — an available region returns immediately, usually from
 // the checker's cache without any network I/O.
 func (r *SeekableFileReader) waitForBytes(startByte, length int64) error {
-	ctx, cancel := context.WithTimeout(context.Background(), seekWaitTimeout)
+	ctx, cancel := context.WithTimeout(r.readContext(), seekWaitTimeout)
 	defer cancel()
 
 	for {
@@ -202,6 +251,9 @@ func (r *SeekableFileReader) waitForBytes(startByte, length int64) error {
 		}
 		select {
 		case <-ctx.Done():
+			if err := r.readContext().Err(); err != nil {
+				return err
+			}
 			return fmt.Errorf("timeout waiting for torrent data at offset %d", startByte)
 		case <-time.After(seekPollInterval):
 		}

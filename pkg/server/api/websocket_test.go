@@ -1,16 +1,71 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"seedstream/pkg/core/config"
 )
+
+func TestClientLifecycleIsIdempotentAndCancelsWork(t *testing.T) {
+	parent, parentCancel := context.WithCancel(context.Background())
+	defer parentCancel()
+	client := &Client{send: make(chan WSMessage, 1), ctx: parent}
+	server := &Server{clients: make(map[*Client]bool)}
+
+	server.AddClient(client)
+	server.RemoveClient(client)
+	server.RemoveClient(client)
+
+	select {
+	case <-client.done:
+	default:
+		t.Fatal("expected client done channel to close")
+	}
+	if err := client.ctx.Err(); err != context.Canceled {
+		t.Fatalf("client context error = %v, want %v", err, context.Canceled)
+	}
+	if trySendWS(client, WSMessage{Type: "after_close"}) {
+		t.Fatal("send after client close should be rejected")
+	}
+}
+
+func TestClientSendAndRemoveAreSafeConcurrently(t *testing.T) {
+	client := &Client{send: make(chan WSMessage, 256)}
+	server := &Server{clients: make(map[*Client]bool)}
+	server.AddClient(client)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				trySendWS(client, WSMessage{Type: "log_entry"})
+			}
+		}()
+	}
+	server.RemoveClient(client)
+	server.RemoveClient(client)
+	wg.Wait()
+}
+
+func TestWebSocketRequiresExplicitAdminPrincipal(t *testing.T) {
+	s := &Server{}
+	req := httptest.NewRequest(http.MethodGet, "/api/ws", nil)
+	rec := httptest.NewRecorder()
+	s.handleWebSocket(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
 
 func TestValidateConfigRejectsUnresolvedProwlarrIndexerPlaceholder(t *testing.T) {
 	enabled := true
@@ -32,6 +87,46 @@ func TestValidateConfigRejectsUnresolvedProwlarrIndexerPlaceholder(t *testing.T)
 	}
 	if got := errs["indexers.0.url"]; got != "" {
 		t.Fatalf("expected placeholder validation to stop ping before url validation, got url error %q", got)
+	}
+}
+
+func TestValidateConfigDispatchesCardigannWithoutTorznabURL(t *testing.T) {
+	enabled := true
+	s := &Server{}
+
+	errs := s.validateConfigWithPlan(&config.Config{
+		Indexers: []config.IndexerConfig{{
+			Enabled:      &enabled,
+			Name:         "Bundled definition",
+			Type:         "cardigann",
+			DefinitionID: "missing-cardigann-definition",
+		}},
+	}, configValidationPlan{validateIndexers: true})
+
+	if errs["indexers.0.url"] == "URL is required" {
+		t.Fatalf("Cardigann validation must not require a Torznab URL: %#v", errs)
+	}
+	if !strings.Contains(errs["indexers.0.url"], "tracker definition") {
+		t.Fatalf("expected Cardigann definition lookup error, got %#v", errs)
+	}
+}
+
+func TestValidateConfigRejectsIndexerTLSBypassOrBadCA(t *testing.T) {
+	enabled := true
+	s := &Server{}
+
+	errs := s.validateConfigWithPlan(&config.Config{
+		Indexers: []config.IndexerConfig{{
+			Enabled:               &enabled,
+			Name:                  "Bad TLS",
+			Type:                  "torznab",
+			URL:                   "https://tracker.example",
+			TLSInsecureSkipVerify: true,
+		}},
+	}, configValidationPlan{validateIndexers: true})
+
+	if errs["indexers.0.tls_insecure_skip_verify"] == "" {
+		t.Fatalf("expected insecure TLS setting to be rejected, got %#v", errs)
 	}
 }
 
