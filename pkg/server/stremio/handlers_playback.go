@@ -265,9 +265,17 @@ func streamCombinesResults(stream *auth.Stream) bool {
 	return *stream.CombineResults
 }
 
+// streamFailoverEnabled reports whether a failed release may be swapped for a
+// different one inside the same play request.
+//
+// Off unless asked for. Each fallback attempt adds another torrent to the
+// seedbox, so a title whose first candidate cannot work quietly becomes several
+// downloads for one film — and the viewer never chose any of them. Failing
+// visibly leaves the choice where it started: the stream list is still there,
+// and picking the next entry is one click.
 func streamFailoverEnabled(stream *auth.Stream) bool {
 	if stream == nil || stream.EnableFailover == nil {
-		return true
+		return false
 	}
 	return *stream.EnableFailover
 }
@@ -822,13 +830,23 @@ func (s *Server) handlePlay(w http.ResponseWriter, r *http.Request, streamConfig
 			break
 		}
 
-		// Preparation failed before any response bytes were written: mark the
-		// slot failed and try the next fallback slot within the same request.
-		logger.Warn("Torrent playback failed, trying next fallback",
-			"session", sessionID, "attempt", attempt+1, "err", lastErr)
+		// Preparation failed before any response bytes were written, and this
+		// release genuinely cannot work. Mark the slot so the rebuilt list does
+		// not lead straight back to it.
 		s.sessionManager.SetSlotFailedDuringPlayback(sessionID)
 
-		if !streamFailoverEnabled(streamConfig) || attempt+1 >= maxPlayFallbackAttempts {
+		if !streamFailoverEnabled(streamConfig) {
+			// Failing here rather than reaching for another candidate: swapping
+			// releases adds a second torrent for the same film, and the viewer
+			// chose neither. They keep the choice — the stream list is still in
+			// front of them.
+			logger.Warn("Torrent playback failed; failover is off, so this release is not swapped for another",
+				"session", sessionID, "err", lastErr)
+			break
+		}
+		logger.Warn("Torrent playback failed, trying next fallback",
+			"session", sessionID, "attempt", attempt+1, "err", lastErr)
+		if attempt+1 >= maxPlayFallbackAttempts {
 			break
 		}
 		nextID, deriveErr := s.deriveNextSlotID(r.Context(), sessionID, streamConfig)
