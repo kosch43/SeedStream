@@ -371,6 +371,34 @@ func (c *Config) EffectiveUploadCapResetDay() int {
 	return c.UploadCapResetDay
 }
 
+// DiskGuardEnabled reports whether the integrated Cerberus disk guard is active.
+func (c *Config) DiskGuardEnabled() bool {
+	return c != nil && c.DiskGuardThresholdPercent > 0
+}
+
+// EffectiveDiskGuardThresholdPercent returns a safe filesystem usage threshold.
+// Values outside 1..99 disable the guard rather than risking an unexpected
+// pause storm from a malformed configuration.
+func (c *Config) EffectiveDiskGuardThresholdPercent() int {
+	if c == nil || c.DiskGuardThresholdPercent < 1 || c.DiskGuardThresholdPercent > 99 {
+		return 0
+	}
+	return c.DiskGuardThresholdPercent
+}
+
+// EffectiveDiskGuardRecoveryPercent leaves a five-point buffer below the stop
+// threshold so torrents do not flap around the configured limit.
+func (c *Config) EffectiveDiskGuardRecoveryPercent() int {
+	threshold := c.EffectiveDiskGuardThresholdPercent()
+	if threshold <= 0 {
+		return 0
+	}
+	if threshold <= 5 {
+		return 0
+	}
+	return threshold - 5
+}
+
 func normalizeSessionTTLMinutes(ttl int) int {
 	if ttl < MinSessionTTLMinutes || ttl > MaxSessionTTLMinutes {
 		return DefaultSessionTTLMinutes
@@ -606,6 +634,10 @@ type Config struct {
 	// UploadCapResetDay is the day of the month (1..28) the upload allowance
 	// resets. Default 1.
 	UploadCapResetDay int `json:"upload_cap_reset_day,omitempty"`
+	// DiskGuardThresholdPercent pauses SeedStream torrents when the local
+	// download filesystem reaches this usage percentage. 0 disables the guard.
+	// The path is taken from each torrent client's SavePath.
+	DiskGuardThresholdPercent int `json:"disk_guard_threshold_percent,omitempty"`
 
 	LoadedPath string `json:"-"`
 
