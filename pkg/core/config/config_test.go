@@ -295,6 +295,31 @@ func TestConfigEffectiveFailoverFastModeHonorsDisabledValue(t *testing.T) {
 	}
 }
 
+func TestConfigDiskGuardThreshold(t *testing.T) {
+	cases := []struct {
+		name      string
+		threshold int
+		want      int
+		recovery  int
+	}{
+		{name: "disabled", threshold: 0, want: 0, recovery: 0},
+		{name: "valid", threshold: 85, want: 85, recovery: 80},
+		{name: "too low", threshold: -1, want: 0, recovery: 0},
+		{name: "too high", threshold: 100, want: 0, recovery: 0},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{DiskGuardThresholdPercent: tt.threshold}
+			if got := cfg.EffectiveDiskGuardThresholdPercent(); got != tt.want {
+				t.Fatalf("threshold = %d, want %d", got, tt.want)
+			}
+			if got := cfg.EffectiveDiskGuardRecoveryPercent(); got != tt.recovery {
+				t.Fatalf("recovery = %d, want %d", got, tt.recovery)
+			}
+		})
+	}
+}
+
 func TestApplyEnvOverridesForcesAdminPasswordResetPrompt(t *testing.T) {
 	t.Setenv(coreenv.AdminForcePasswordResetEnv, "true")
 	o, keys := coreenv.ReadConfigOverrides()

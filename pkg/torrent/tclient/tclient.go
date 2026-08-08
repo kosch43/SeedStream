@@ -178,6 +178,8 @@ type Client interface {
 
 	// Resume starts a paused or stopped torrent.
 	Resume(ctx context.Context, hash string) error
+	// Pause stops a torrent without deleting it or its downloaded data.
+	Pause(ctx context.Context, hash string) error
 	// Reannounce asks the client to re-contact all trackers for a torrent.
 	Reannounce(ctx context.Context, hash string) error
 	// Delete removes torrents, optionally with their data.

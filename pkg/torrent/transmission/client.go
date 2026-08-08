@@ -700,6 +700,16 @@ func (c *Client) Resume(ctx context.Context, hash string) error {
 	}, nil)
 }
 
+// Pause stops a torrent without removing it or its downloaded data.
+func (c *Client) Pause(ctx context.Context, hash string) error {
+	if strings.TrimSpace(hash) == "" {
+		return nil
+	}
+	return c.call(ctx, "torrent-stop", map[string]any{
+		"ids": []string{strings.ToLower(hash)},
+	}, nil)
+}
+
 // Reannounce asks the daemon to re-contact all trackers for a torrent.
 func (c *Client) Reannounce(ctx context.Context, hash string) error {
 	if strings.TrimSpace(hash) == "" {

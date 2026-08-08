@@ -322,6 +322,16 @@ func (m *Manager) Resume(ctx context.Context, clientName, hash string) error {
 	return c.Resume(ctx, hash)
 }
 
+// Pause stops a torrent on the named client without deleting its data. The
+// Cerberus disk guard uses this when the download filesystem is full.
+func (m *Manager) Pause(ctx context.Context, clientName, hash string) error {
+	c := m.clientByName(clientName)
+	if c == nil {
+		return fmt.Errorf("torrent client %q not found", clientName)
+	}
+	return c.Pause(ctx, hash)
+}
+
 // SeedingUploadTotals returns each configured client's current session upload
 // counter (qBittorrent up_info_data), keyed by client name. Used by the upload
 // guard to fold BitTorrent seeding into the monthly total. Unreachable clients

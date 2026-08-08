@@ -50,6 +50,7 @@ type resumeTrackingQBit struct {
 	progress    float64
 	resumeCalls int64
 	startCalls  int64
+	stopCalls   int64
 }
 
 func (q *resumeTrackingQBit) server(t *testing.T) *httptest.Server {
@@ -69,6 +70,10 @@ func (q *resumeTrackingQBit) server(t *testing.T) *httptest.Server {
 	})
 	mux.HandleFunc("/api/v2/torrents/resume", func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&q.resumeCalls, 1)
+		fmt.Fprint(w, "Ok.")
+	})
+	mux.HandleFunc("/api/v2/torrents/stop", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&q.stopCalls, 1)
 		fmt.Fprint(w, "Ok.")
 	})
 	srv := httptest.NewServer(mux)
@@ -138,5 +143,48 @@ func TestWatchdogLeavesSeedingTorrentAlone(t *testing.T) {
 
 	if got := atomic.LoadInt64(&q.startCalls) + atomic.LoadInt64(&q.resumeCalls); got != 0 {
 		t.Fatalf("a seeding torrent must not be resumed, got %d calls", got)
+	}
+}
+
+func TestWatchdogDiskGuardPausesAndRespectsRecoveryBuffer(t *testing.T) {
+	q := &resumeTrackingQBit{state: "downloading", progress: 0.5}
+	srv := q.server(t)
+	mgr := NewManager([]config.TorrentClientConfig{{
+		Name: "seedbox", Type: "qbittorrent", URL: srv.URL, Category: "seedstream", SavePath: t.TempDir(),
+	}})
+	store, err := persistence.GetManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("state manager: %v", err)
+	}
+	cfg := &config.Config{DiskGuardThresholdPercent: 85}
+	wd := NewWatchdog(mgr, cerberus.New(store), stubIndexer{}, cfg, nil)
+	if wd == nil {
+		t.Fatal("watchdog is nil")
+	}
+
+	oldUsage := diskUsagePercent
+	t.Cleanup(func() { diskUsagePercent = oldUsage })
+	usage := 90
+	diskUsagePercent = func(string) (int, error) { return usage, nil }
+
+	wd.check(context.Background(), 10*time.Minute)
+	if got := atomic.LoadInt64(&q.stopCalls); got != 1 {
+		t.Fatalf("expected one disk-guard stop call, got %d", got)
+	}
+	if got := atomic.LoadInt64(&q.startCalls); got != 0 {
+		t.Fatalf("disk-guard pause must not be immediately undone, got %d starts", got)
+	}
+
+	q.state = "stoppedUP"
+	usage = 82 // Still above the 80% recovery point.
+	wd.check(context.Background(), 10*time.Minute)
+	if got := atomic.LoadInt64(&q.startCalls); got != 0 {
+		t.Fatalf("torrent resumed before recovery buffer, got %d starts", got)
+	}
+
+	usage = 79
+	wd.check(context.Background(), 10*time.Minute)
+	if got := atomic.LoadInt64(&q.startCalls); got != 1 {
+		t.Fatalf("expected resume after recovery, got %d starts", got)
 	}
 }

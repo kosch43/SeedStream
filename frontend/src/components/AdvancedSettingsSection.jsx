@@ -16,7 +16,7 @@ const CARD_FIELDS = {
   memory: ['memory_limit_mb'],
   playback: ['playback_startup_timeout_seconds', 'failover_fast_mode', 'session_ttl_minutes', 'session_post_playback_ttl_minutes'],
   metadata: ['tmdb_api_key', 'tvdb_api_key'],
-  cerberus: ['min_seeders', 'cerberus_base_url', 'cerberus_api_key'],
+  cerberus: ['min_seeders', 'disk_guard_threshold_percent', 'cerberus_base_url', 'cerberus_api_key'],
   uploadGuard: ['monthly_upload_cap_gb', 'post_cap_upload_mbps', 'upload_cap_reset_day'],
 }
 
@@ -35,6 +35,7 @@ function pickInitialValues(values = {}) {
     keep_log_files: Number(values.keep_log_files ?? 9) || 9,
     memory_limit_mb: Number(values.memory_limit_mb ?? 512),
     min_seeders: values.min_seeders == null ? 10 : Number(values.min_seeders),
+    disk_guard_threshold_percent: Number(values.disk_guard_threshold_percent ?? 0) || 0,
     playback_startup_timeout_seconds: Number.isFinite(parsedPlaybackStartupTimeout) ? parsedPlaybackStartupTimeout : 5,
     session_ttl_minutes: Number.isFinite(parsedSessionTtl) ? parsedSessionTtl : 30,
     session_post_playback_ttl_minutes: Number.isFinite(parsedSessionPostPlaybackTtl) ? parsedSessionPostPlaybackTtl : 240,
@@ -446,6 +447,17 @@ export const AdvancedSettingsSection = forwardRef(function AdvancedSettingsSecti
                   <FormDescription className="mt-3">
                     A torrent needs at least this many seeders before SeedStream will offer or play it — a thinner swarm downloads slower than playback consumes it, which is what causes stalling and buffering. Enforced in three places: under-seeded releases are hidden from the stream list, refused at play time so failover picks a healthier one, and the watchdog acts on an under-seeded torrent at half the usual stall threshold. Only applies to trackers that report a seeder count, and it will never empty your stream list. Default 10; set to 0 to disable.
                   </FormDescription>
+                  <FormMessage />
+                </FormItem>
+               )} />
+              <FormField control={control} name="disk_guard_threshold_percent" render={({ field }) => (
+                <FormItem className="relative rounded-none border-0 p-3">
+                  <div className="absolute left-3 right-3 top-0 border-t border-border/60" />
+                  <div className={stackedFieldRowClass}>
+                    <FormLabel className={cn(labelClass, 'sm:flex-1')}>Disk guard threshold (%)</FormLabel>
+                    <FormControl><Input type="number" min={0} max={99} className={fieldClassName('disk_guard_threshold_percent', `h-9 ${controlMediumClass}`)} {...field} value={field.value ?? 0} onChange={e => { const v = e.target.value; field.onChange(v === '' ? 0 : Math.min(99, Math.max(0, Number(v) || 0))) }} /></FormControl>
+                  </div>
+                  <FormDescription className="mt-3">Cerberus pauses SeedStream torrents when the filesystem containing a torrent client's local save path reaches this usage. It resumes normal watchdog behavior after usage falls five points below the threshold. Set to 0 to disable. Remote seedbox filesystems cannot be inspected from this host.</FormDescription>
                   <FormMessage />
                 </FormItem>
               )} />
