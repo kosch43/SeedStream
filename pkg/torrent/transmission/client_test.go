@@ -225,6 +225,63 @@ func TestFilesDeriveAPieceRange(t *testing.T) {
 	if files[1].Progress < 0.32 || files[1].Progress > 0.34 {
 		t.Errorf("video progress %.3f, want ~0.333", files[1].Progress)
 	}
+	if files[1].Priority != 1 {
+		t.Errorf("normal Transmission priority translated to %d, want shared priority 1", files[1].Priority)
+	}
+}
+
+func TestFilePriorityUsesSharedVocabulary(t *testing.T) {
+	tor := baseTorrent()
+	tor["files"] = []any{map[string]any{"name": "video.mkv", "length": 16 << 20, "bytesCompleted": 0}}
+	tor["fileStats"] = []any{map[string]any{"bytesCompleted": 0, "wanted": true, "priority": 1}}
+	d := &mockDaemon{torrent: tor}
+	c := d.client(t)
+
+	files, err := c.Files(context.Background(), testHash)
+	if err != nil {
+		t.Fatalf("Files: %v", err)
+	}
+	if len(files) != 1 || files[0].Priority != 7 {
+		t.Fatalf("high Transmission priority should translate to shared priority 7, got %+v", files)
+	}
+
+	if err := c.SetFilePriority(context.Background(), testHash, 0, 1); err != nil {
+		t.Fatalf("SetFilePriority normal: %v", err)
+	}
+	args := d.argsFor("torrent-set")
+	if _, ok := args["priority-normal"]; !ok {
+		t.Fatalf("shared priority 1 must map to Transmission priority-normal, got keys %v", keys(args))
+	}
+}
+
+func TestListCategoryReadsSequentialState(t *testing.T) {
+	tor := baseTorrent()
+	tor["sequential_download"] = true
+	d := &mockDaemon{torrent: tor}
+	c := d.client(t)
+
+	list, err := c.ListCategory(context.Background())
+	if err != nil {
+		t.Fatalf("ListCategory: %v", err)
+	}
+	if len(list) != 1 || !list[0].SequentialDL {
+		t.Fatalf("ListCategory lost sequential state: %+v", list)
+	}
+	if !list[0].StreamingOrderSupported {
+		t.Fatal("Transmission 4.1 sequential support should be reported")
+	}
+	args := d.argsFor("torrent-get")
+	fields, _ := args["fields"].([]any)
+	found := false
+	for _, field := range fields {
+		if field == "sequential_download" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("ListCategory did not request sequential_download, fields=%v", fields)
+	}
 }
 
 // TestSwarmSeedersComeFromTheTracker: the seeder floor is judged on the swarm
@@ -305,6 +362,16 @@ func TestOlderDaemonStillWorks(t *testing.T) {
 	}
 	if info.SequentialDL {
 		t.Error("a daemon that does not support sequential download must not report it as on")
+	}
+	if info.StreamingOrderSupported {
+		t.Error("a pre-4.1 daemon must report streaming order as unsupported")
+	}
+	list, err := c.ListCategory(context.Background())
+	if err != nil || len(list) != 1 {
+		t.Fatalf("pre-4.1 ListCategory: list=%+v err=%v", list, err)
+	}
+	if list[0].StreamingOrderSupported {
+		t.Error("pre-4.1 category entries must suppress unsupported-order repairs")
 	}
 }
 

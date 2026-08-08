@@ -48,13 +48,14 @@ const DefaultPrepareTimeout = 90 * time.Second
 const StreamableHeadFraction = 0.10
 
 // requiredHeadBytes is how much continuous data must sit at the front of the
-// file before playback starts: the requested buffer, capped at a tenth of the
-// file, and never more than the file itself.
+// file before playback starts: the requested buffer, normally capped at a
+// tenth of the file, and never more than the file itself. For small files the
+// minimum runway wins over the fractional cap.
 func requiredHeadBytes(want, fileSize int64) int64 {
 	if fileSize <= 0 {
 		return want
 	}
-	if ceiling := int64(float64(fileSize) * StreamableHeadFraction); want > ceiling && ceiling > 0 {
+	if ceiling := int64(float64(fileSize) * StreamableHeadFraction); want > ceiling && ceiling >= MinHeadBytes {
 		want = ceiling
 	}
 	if want > fileSize {
@@ -209,6 +210,15 @@ type TorrentHealthEntry struct {
 	// so far. They are the client's view, not the tracker's.
 	SeedingHours float64
 	Ratio        float64
+	// SequentialDL and FirstLastPiecePrio are the client's own streaming flags
+	// read back from the API. Together they are what makes the head of the file
+	// arrive first instead of scattered: sequential download orders the piece
+	// requests, and first/last-piece priority raises each wanted file's boundary
+	// pieces. Both can be missing on a torrent the add call did not create
+	// (re-adds discard the flags), so the watchdog re-reads them every check.
+	SequentialDL            bool
+	FirstLastPiecePrio      bool
+	StreamingOrderSupported bool
 }
 
 // ListAll returns all SeedStream-category torrents across every configured
@@ -224,19 +234,22 @@ func (m *Manager) ListAll(ctx context.Context) ([]TorrentHealthEntry, error) {
 		for _, t := range list {
 			swarm, swarmKnown := t.SwarmSeeders()
 			out = append(out, TorrentHealthEntry{
-				ClientName:   e.cfg.Name,
-				Hash:         t.Hash,
-				Name:         t.Name,
-				State:        t.State,
-				Progress:     t.Progress,
-				LastActivity: time.Unix(t.LastActivity, 0),
-				AddedAt:      time.Unix(t.AddedOn, 0),
-				NumSeeds:     t.NumSeeds,
-				SwarmSeeds:   swarm,
-				SwarmKnown:   swarmKnown,
-				CompletedAt:  time.Unix(t.CompletionOn, 0),
-				SeedingHours: float64(t.SeedingTime) / 3600,
-				Ratio:        t.Ratio,
+				ClientName:              e.cfg.Name,
+				Hash:                    t.Hash,
+				Name:                    t.Name,
+				State:                   t.State,
+				Progress:                t.Progress,
+				LastActivity:            time.Unix(t.LastActivity, 0),
+				AddedAt:                 time.Unix(t.AddedOn, 0),
+				NumSeeds:                t.NumSeeds,
+				SwarmSeeds:              swarm,
+				SwarmKnown:              swarmKnown,
+				CompletedAt:             time.Unix(t.CompletionOn, 0),
+				SeedingHours:            float64(t.SeedingTime) / 3600,
+				Ratio:                   t.Ratio,
+				SequentialDL:            t.SequentialDL,
+				FirstLastPiecePrio:      t.FirstLastPiecePrio,
+				StreamingOrderSupported: t.StreamingOrderSupported,
 			})
 		}
 	}
@@ -309,6 +322,415 @@ func (m *Manager) ProtectSeeding(ctx context.Context, clientName, hash string) {
 	}
 	logger.Debug("share limits pinned: qBittorrent will not stop seeding this torrent",
 		"client", clientName, "hash", shortHash(hash))
+}
+
+// EnsureStreamingOrder makes the named client's torrent download from the
+// front: sequential download on, first/last-piece priority on. The current
+// state is read back from the API first and only what is missing is enabled,
+// so calling it on a torrent that is already ordered correctly is a no-op.
+// Used by the watchdog to repair torrents whose add-time flags were discarded
+// (a re-add of a magnet the client already holds) or that were flipped later.
+func (m *Manager) EnsureStreamingOrder(ctx context.Context, clientName, hash string) error {
+	c := m.clientByName(clientName)
+	if c == nil {
+		return fmt.Errorf("torrent client %q not found", clientName)
+	}
+	info, err := c.Get(ctx, hash)
+	if err != nil {
+		return err
+	}
+	if info == nil {
+		return nil // not present on this client; nothing to order
+	}
+	return c.EnsureStreamingOrder(ctx, info)
+}
+
+// PieceStates returns the per-piece download state of a torrent on the named
+// client. This is the only API view of WHERE downloaded bytes are, so it is
+// how the watchdog verifies that streaming order is not just enabled but
+// actually working for the selected file's piece range.
+func (m *Manager) PieceStates(ctx context.Context, clientName, hash string) ([]int, error) {
+	c := m.clientByName(clientName)
+	if c == nil {
+		return nil, fmt.Errorf("torrent client %q not found", clientName)
+	}
+	return c.PieceStates(ctx, hash)
+}
+
+// StreamingHeadStatus identifies the selected video's first torrent piece and
+// how much of that file has already landed after it. Piece indexes are global
+// to the torrent, so the first piece is not necessarily piece 0 in a season
+// pack.
+type StreamingHeadStatus struct {
+	FileIndex             int
+	FileName              string
+	FirstPiece            int
+	FirstPieceState       int
+	DownloadedPiecesAfter int
+}
+
+type filePriorityLockEntry struct {
+	gate chan struct{}
+	refs int
+}
+
+var filePriorityLocks = struct {
+	sync.Mutex
+	entries map[string]*filePriorityLockEntry
+}{entries: make(map[string]*filePriorityLockEntry)} // client name + hash
+
+var playbackSelections = struct {
+	sync.Mutex
+	active map[string]map[int]int // client/hash -> file index -> active stream count
+}{active: make(map[string]map[int]int)}
+
+var managedFilePriorities = struct {
+	sync.Mutex
+	original map[string]map[int]int // client/hash -> file index -> prior priority
+}{original: make(map[string]map[int]int)}
+
+const playbackPriorityGrace = 30 * time.Second
+
+type forceStartLease struct {
+	active  int
+	restore bool
+	setter  forceSetter
+	hash    string
+}
+
+var forceStartLeases = struct {
+	sync.Mutex
+	leases map[string]*forceStartLease
+}{leases: make(map[string]*forceStartLease)}
+
+func acquireFilePriorityLock(ctx context.Context, key string) (func(), error) {
+	filePriorityLocks.Lock()
+	entry := filePriorityLocks.entries[key]
+	if entry == nil {
+		entry = &filePriorityLockEntry{gate: make(chan struct{}, 1)}
+		filePriorityLocks.entries[key] = entry
+	}
+	entry.refs++
+	filePriorityLocks.Unlock()
+	select {
+	case entry.gate <- struct{}{}:
+		return func() {
+			<-entry.gate
+			filePriorityLocks.Lock()
+			entry.refs--
+			if entry.refs == 0 {
+				delete(filePriorityLocks.entries, key)
+			}
+			filePriorityLocks.Unlock()
+		}, nil
+	case <-ctx.Done():
+		filePriorityLocks.Lock()
+		entry.refs--
+		if entry.refs == 0 {
+			delete(filePriorityLocks.entries, key)
+		}
+		filePriorityLocks.Unlock()
+		return nil, ctx.Err()
+	}
+}
+
+func playbackSelectionKey(clientIdentity, hash string) string {
+	return strings.TrimSpace(clientIdentity) + "\x00" + strings.ToLower(strings.TrimSpace(hash))
+}
+
+func (m *Manager) beginPlaybackSelection(key string, fileIndex int) func() {
+	playbackSelections.Lock()
+	files := playbackSelections.active[key]
+	if files == nil {
+		files = make(map[int]int)
+		playbackSelections.active[key] = files
+	}
+	files[fileIndex]++
+	playbackSelections.Unlock()
+
+	return func() {
+		playbackSelections.Lock()
+		defer playbackSelections.Unlock()
+		files := playbackSelections.active[key]
+		if files == nil {
+			return
+		}
+		if files[fileIndex] <= 1 {
+			delete(files, fileIndex)
+		} else {
+			files[fileIndex]--
+		}
+		if len(files) == 0 {
+			delete(playbackSelections.active, key)
+		}
+	}
+}
+
+func (m *Manager) activePlaybackSelections(key string) map[int]bool {
+	playbackSelections.Lock()
+	defer playbackSelections.Unlock()
+	active := make(map[int]bool, len(playbackSelections.active[key]))
+	for fileIndex := range playbackSelections.active[key] {
+		active[fileIndex] = true
+	}
+	return active
+}
+
+func rememberManagedPriority(key string, fileIndex, priority int) {
+	managedFilePriorities.Lock()
+	defer managedFilePriorities.Unlock()
+	files := managedFilePriorities.original[key]
+	if files == nil {
+		files = make(map[int]int)
+		managedFilePriorities.original[key] = files
+	}
+	if _, exists := files[fileIndex]; !exists {
+		files[fileIndex] = priority
+	}
+}
+
+func managedPriority(key string, fileIndex int) (int, bool) {
+	managedFilePriorities.Lock()
+	defer managedFilePriorities.Unlock()
+	priority, ok := managedFilePriorities.original[key][fileIndex]
+	return priority, ok
+}
+
+func forgetManagedPriority(key string, fileIndex int) {
+	managedFilePriorities.Lock()
+	defer managedFilePriorities.Unlock()
+	files := managedFilePriorities.original[key]
+	if files == nil {
+		return
+	}
+	delete(files, fileIndex)
+	if len(files) == 0 {
+		delete(managedFilePriorities.original, key)
+	}
+}
+
+// prioritizeActiveVideoFiles gives every actively streamed file maximum
+// priority and returns previously selected, now inactive videos to normal.
+// Nothing is disabled, so the torrent still completes for seeding. The current
+// file list and active set are read while holding a process-wide client/hash
+// lock, keeping concurrent playback requests from demoting each other.
+func (m *Manager) prioritizeActiveVideoFiles(ctx context.Context, c tclient.Client, key, hash string) error {
+	release, err := acquireFilePriorityLock(ctx, key)
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	files, err := c.Files(ctx, hash)
+	if err != nil {
+		return err
+	}
+	active := m.activePlaybackSelections(key)
+	found := make(map[int]bool, len(active))
+	for _, f := range files {
+		if !active[f.Index] {
+			continue
+		}
+		found[f.Index] = true
+		if f.Priority != 7 {
+			rememberManagedPriority(key, f.Index, f.Priority)
+			if err := c.SetFilePriority(ctx, hash, f.Index, 7); err != nil {
+				return fmt.Errorf("raise active file %d priority: %w", f.Index, err)
+			}
+		}
+	}
+	for fileIndex := range active {
+		if !found[fileIndex] {
+			return fmt.Errorf("active file %d no longer exists", fileIndex)
+		}
+	}
+	for _, f := range files {
+		original, managed := managedPriority(key, f.Index)
+		if active[f.Index] || !managed || !isVideo(f.Name) {
+			continue
+		}
+		if f.Priority != 7 {
+			forgetManagedPriority(key, f.Index)
+			continue
+		}
+		if err := c.SetFilePriority(ctx, hash, f.Index, original); err != nil {
+			return fmt.Errorf("normalize previous video file %d priority: %w", f.Index, err)
+		}
+		forgetManagedPriority(key, f.Index)
+	}
+	return nil
+}
+
+func (m *Manager) finishPlaybackSelection(c tclient.Client, key, hash string, release func()) {
+	if release == nil {
+		return
+	}
+	time.AfterFunc(playbackPriorityGrace, func() {
+		release()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := m.prioritizeActiveVideoFiles(ctx, c, key, hash); err != nil {
+			logger.Debug("torrent playback: could not normalize file priorities after stream ended",
+				"hash", shortHash(hash), "err", err)
+		}
+	})
+}
+
+func (m *Manager) releasePlaybackSelectionNow(c tclient.Client, key, hash string, release func()) {
+	if release == nil {
+		return
+	}
+	release()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := m.prioritizeActiveVideoFiles(ctx, c, key, hash); err != nil {
+		logger.Debug("torrent playback: could not normalize file priorities after failed prepare",
+			"hash", shortHash(hash), "err", err)
+	}
+}
+
+// StreamingHeads returns the real first-piece state for whichever video files
+// the download client currently identifies as playback priorities. A single
+// video is unambiguous; in a multi-file torrent, priority 7 is the selection
+// made by PrepareForPlayback. Cerberus deliberately observes this live state
+// instead of choosing from its persisted content record, which may describe an
+// earlier episode from the same season pack while a new one is still buffering.
+func (m *Manager) StreamingHeads(ctx context.Context, clientName, hash string) ([]StreamingHeadStatus, error) {
+	c := m.clientByName(clientName)
+	if c == nil {
+		return nil, fmt.Errorf("torrent client %q not found", clientName)
+	}
+	files, err := c.Files(ctx, hash)
+	if err != nil {
+		return nil, err
+	}
+	videos := make([]tclient.FileInfo, 0, len(files))
+	for _, f := range files {
+		if isVideo(f.Name) {
+			videos = append(videos, f)
+		}
+	}
+	if len(videos) == 0 {
+		return nil, nil
+	}
+	selected := make([]tclient.FileInfo, 0, len(videos))
+	if len(videos) == 1 {
+		selected = append(selected, videos[0])
+	} else {
+		for _, f := range videos {
+			if f.Priority == 7 {
+				selected = append(selected, f)
+			}
+		}
+	}
+	if len(selected) == 0 {
+		return nil, nil
+	}
+	states, err := c.PieceStates(ctx, hash)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]StreamingHeadStatus, 0, len(selected))
+	for _, f := range selected {
+		if len(f.PieceRange) < 2 || f.PieceRange[0] < 0 || f.PieceRange[1] < f.PieceRange[0] {
+			return nil, fmt.Errorf("torrent client did not report a valid piece range for file %d", f.Index)
+		}
+		first, last := f.PieceRange[0], f.PieceRange[1]
+		if len(states) <= last {
+			return nil, fmt.Errorf("piece-state bitmap has %d entries but selected file ends at piece %d", len(states), last)
+		}
+		downloadedAfter := 0
+		for i := first + 1; i <= last; i++ {
+			if states[i] == tclient.PieceDownloaded {
+				downloadedAfter++
+			}
+		}
+		out = append(out, StreamingHeadStatus{
+			FileIndex:             f.Index,
+			FileName:              f.Name,
+			FirstPiece:            first,
+			FirstPieceState:       states[first],
+			DownloadedPiecesAfter: downloadedAfter,
+		})
+	}
+	return out, nil
+}
+
+type forceSetter interface {
+	SetForceStart(context.Context, string, bool) error
+}
+
+func acquireForceStartLease(ctx context.Context, key, hash string, setter forceSetter, restore bool) (func(), error) {
+	forceStartLeases.Lock()
+	lease := forceStartLeases.leases[key]
+	if lease == nil {
+		lease = &forceStartLease{setter: setter, hash: hash, restore: restore}
+		forceStartLeases.leases[key] = lease
+	}
+	lease.active++
+	forceStartLeases.Unlock()
+	return func() {
+		// beginForceStartLease and this release share the same lifecycle rules.
+		forceStartLeases.Lock()
+		current := forceStartLeases.leases[key]
+		if current == nil {
+			forceStartLeases.Unlock()
+			return
+		}
+		current.active--
+		if current.active > 0 {
+			forceStartLeases.Unlock()
+			return
+		}
+		setter, hash, restore := current.setter, current.hash, current.restore
+		if !restore {
+			delete(forceStartLeases.leases, key)
+			forceStartLeases.Unlock()
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := restoreForceStart(ctx, setter, hash)
+		cancel()
+		delete(forceStartLeases.leases, key)
+		forceStartLeases.Unlock()
+		if err != nil {
+			logger.Debug("torrent playback: could not restore qBittorrent force-start",
+				"hash", shortHash(hash), "err", err)
+		}
+	}, nil
+}
+
+func restoreForceStart(ctx context.Context, setter forceSetter, hash string) error {
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := setter.SetForceStart(ctx, hash, false); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		if attempt == 2 {
+			break
+		}
+		timer := time.NewTimer(200 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return lastErr
+}
+
+func forceStartLeaseActive(key string) bool {
+	forceStartLeases.Lock()
+	defer forceStartLeases.Unlock()
+	lease := forceStartLeases.leases[key]
+	return lease != nil && lease.active > 0
+}
+
+func isQueuedDownloadState(state string) bool {
+	return strings.EqualFold(strings.TrimSpace(state), "queuedDL")
 }
 
 // Resume starts a paused/stopped torrent on the named client. Used by the
@@ -463,7 +885,7 @@ func (m *Manager) clientByName(name string) tclient.Client {
 // wrapped too, with a checker that answers from its latch and never touches the
 // network: position tracking should not depend on whether the download happened
 // to finish.
-func (m *Manager) OpenForPlayback(res *PrepareResult, ph *Playhead) (io.ReadSeekCloser, error) {
+func (m *Manager) OpenForPlayback(ctx context.Context, res *PrepareResult, ph *Playhead) (io.ReadSeekCloser, error) {
 	f, err := os.Open(res.AbsPath)
 	if err != nil {
 		return nil, err
@@ -476,7 +898,7 @@ func (m *Manager) OpenForPlayback(res *PrepareResult, ph *Playhead) (io.ReadSeek
 		// be proven about which are. Either way there is nothing to wait for.
 		avail = completedAvailability(res.Size)
 	}
-	return newSeekableFileReader(f, avail, res.Size, ph), nil
+	return newSeekableFileReaderWithContext(ctx, f, avail, res.Size, ph), nil
 }
 
 // PrepareResult describes a torrent file ready (or buffering) for playback.
@@ -490,6 +912,18 @@ type PrepareResult struct {
 	FileIndex  int     // file index within the torrent
 	ClientName string  // name of the qBittorrent client that holds this torrent
 	Progress   float64 // download progress at prepare time (0..1)
+
+	releaseSelection func()
+}
+
+// ReleasePlayback releases the selected-file priority ownership acquired by
+// PrepareForPlayback after a short grace period. Stremio issues several range
+// requests per playback, so releasing on one HTTP response would demote the
+// file between requests and make qBittorrent churn priorities.
+func (m *Manager) ReleasePlayback(res *PrepareResult) {
+	if res != nil && res.releaseSelection != nil {
+		res.releaseSelection()
+	}
 }
 
 // PrepareForPlayback ensures the release's torrent is present in a seedbox
@@ -521,12 +955,37 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 	if timeout <= 0 {
 		timeout = m.PrepareTimeout
 	}
+	var releaseSelection func()
+	var successReleases []func()
+	var abortReleases []func()
+	var releaseOnce sync.Once
+	addPlaybackLease := func(onSuccess, onAbort func()) {
+		successReleases = append(successReleases, onSuccess)
+		abortReleases = append(abortReleases, onAbort)
+		if releaseSelection == nil {
+			releaseSelection = func() {
+				releaseOnce.Do(func() {
+					for _, release := range successReleases {
+						release()
+					}
+				})
+			}
+		}
+	}
+	selectionTransferred := false
+	defer func() {
+		if !selectionTransferred && releaseSelection != nil {
+			for _, release := range abortReleases {
+				release()
+			}
+		}
+	}()
 
 	// Resolve which qBittorrent client to use: prefer the stream-level override
 	// so each member can point to their own seedbox, fall back to the first
 	// globally configured client.
 	var c tclient.Client
-	var clientName, remotePath string
+	var clientName, clientIdentity, remotePath string
 	if clientOverride != nil && strings.TrimSpace(clientOverride.URL) != "" {
 		c = qbittorrent.New(qbittorrent.Options{
 			BaseURL:  clientOverride.URL,
@@ -536,6 +995,7 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 			SavePath: clientOverride.SavePath,
 		})
 		clientName = strings.TrimSpace(clientOverride.Name)
+		clientIdentity = config.NormalizeTorrentClientType(clientOverride.Type) + ":" + strings.TrimRight(strings.TrimSpace(clientOverride.URL), "/")
 		remotePath = strings.TrimSpace(clientOverride.RemotePath)
 	} else {
 		if !m.Enabled() {
@@ -543,6 +1003,7 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 		}
 		c = m.clients[0].client
 		clientName = m.clients[0].cfg.Name
+		clientIdentity = config.NormalizeTorrentClientType(m.clients[0].cfg.Type) + ":" + strings.TrimRight(strings.TrimSpace(m.clients[0].cfg.URL), "/")
 		remotePath = m.clients[0].cfg.RemotePath
 	}
 
@@ -584,19 +1045,77 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 		}
 	}
 
-	// Whatever route this torrent took into qBittorrent, make it download from
-	// the front. A torrent the client already held ignores the streaming flags
-	// on the add that "created" it, so without this a re-watch — or anything the
-	// user grabbed by hand — fills in rarest-first and never presents a
-	// continuous head, no matter how much of it is downloaded. Best-effort: a
-	// failure here costs ordering, not playback.
-	if err := c.EnsureStreamingOrder(ctx, info); err != nil {
-		logger.Debug("could not enable sequential download for streaming",
-			"hash", shortHash(info.Hash), "err", err)
+	// A complete torrent has no playback ordering work left to do. This also
+	// avoids mutating a finished torrent solely to repair flags that no longer
+	// affect its data layout.
+	if info.Progress < 0.999 && info.StreamingOrderSupported {
+		// Whatever route this torrent took into qBittorrent, make it download from
+		// the front. A torrent the client already held ignores the streaming flags
+		// on the add that "created" it, so without this a re-watch — or anything the
+		// user grabbed by hand — fills in rarest-first and never presents a
+		// continuous head, no matter how much of it is downloaded. Best-effort: a
+		// failure here means the requested streaming invariant cannot be proven, so
+		// do not start a player on a potentially sparse file.
+		if err := c.EnsureStreamingOrder(ctx, info); err != nil {
+			return nil, fmt.Errorf("enable streaming order: %w", err)
+		}
+	}
+	forceLeaseAcquired := false
+	ensurePlaybackStarted := func(current *qbittorrent.TorrentInfo) error {
+		if current == nil || current.Progress >= 0.999 || forceLeaseAcquired {
+			return nil
+		}
+		queued := isQueuedDownloadState(current.State)
+		if setter, ok := c.(forceSetter); ok {
+			forceKey := playbackSelectionKey(clientIdentity, current.Hash)
+			leaseActive := forceStartLeaseActive(forceKey)
+			if !queued && !current.ForceStart && !leaseActive {
+				return nil
+			}
+			restoreForceStart := queued && !current.ForceStart && !leaseActive
+			leaseRelease, err := acquireForceStartLease(ctx, forceKey, current.Hash, setter, restoreForceStart)
+			if err != nil {
+				return err
+			}
+			if err := setter.SetForceStart(ctx, current.Hash, true); err != nil {
+				leaseRelease()
+				return err
+			}
+			forceLeaseAcquired = true
+			addPlaybackLease(func() {
+				time.AfterFunc(playbackPriorityGrace, leaseRelease)
+			}, leaseRelease)
+			if queued {
+				logger.Info("Playback: force-started queued torrent before buffering",
+					"hash", shortHash(current.Hash))
+			}
+			return nil
+		}
+		if queued {
+			if err := c.Resume(ctx, current.Hash); err != nil {
+				return err
+			}
+			forceLeaseAcquired = true
+		}
+		return nil
+	}
+	// A client-level "add stopped" preference, or a torrent retained from an
+	// earlier session, can leave the selected download motionless even though
+	// all of its streaming priorities are correct. Start it before waiting on
+	// the piece bitmap; otherwise preparation can only time out on a head that
+	// qBittorrent was never asked to fetch.
+	if isPausedState(info.State) {
+		if err := c.Resume(ctx, info.Hash); err != nil {
+			return nil, fmt.Errorf("start torrent for playback: %w", err)
+		}
+		logger.Info("Playback: resumed stopped torrent before buffering",
+			"hash", shortHash(info.Hash), "state", info.State)
+	}
+	if err := ensurePlaybackStarted(info); err != nil {
+		return nil, fmt.Errorf("start torrent for playback: %w", err)
 	}
 
 	deadline := time.Now().Add(timeout)
-	prioritySet := false
 	// Track why the loop is still waiting so a timeout reports the real reason
 	// instead of blaming buffering for what is actually a client failure.
 	var lastClientErr error
@@ -621,7 +1140,15 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 	// download has also failed to advance — a small but fast swarm is fine.
 	started := time.Now()
 	graceProgress := -1.0
+	selectionKey := ""
+	selectionFileIndex := -1
 	for {
+		if current, getErr := c.Get(ctx, info.Hash); getErr == nil && current != nil {
+			*info = *current
+			if err := ensurePlaybackStarted(info); err != nil {
+				return nil, fmt.Errorf("start torrent for playback: %w", err)
+			}
+		}
 		files, err := c.Files(ctx, info.Hash)
 		if err != nil {
 			// The download client itself is failing (auth, network, wrong host).
@@ -647,14 +1174,26 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 				lastProgress = f.Progress
 				// On a multi-file torrent (e.g. a season pack), pull the file
 				// being played ahead of the rest so its head buffers first.
-				// Priority 7 (maximum) only reorders downloads; it never
-				// disables the other files, so the torrent still completes and
-				// private-tracker seeding obligations stay intact. Best-effort:
-				// a failure here just falls back to sequential order.
-				if !prioritySet && len(files) > 1 {
-					prioritySet = true
-					if err := c.SetFilePriority(ctx, info.Hash, f.Index, 7); err != nil {
-						logger.Debug("torrent prepare: set file priority failed", "hash", info.Hash, "file", f.Index, "err", err)
+				// Priority 7 (maximum) only reorders downloads. Any episode left
+				// at 7 by an earlier viewing is returned to normal priority, but no
+				// file is disabled, so the torrent still completes and private-
+				// tracker seeding obligations stay intact. Best-effort: a failure
+				// here just falls back to sequential order.
+				if len(files) > 1 {
+					if selectionKey == "" {
+						selectionKey = playbackSelectionKey(clientIdentity, info.Hash)
+						selectionFileIndex = f.Index
+						release := m.beginPlaybackSelection(selectionKey, f.Index)
+						addPlaybackLease(func() {
+							m.finishPlaybackSelection(c, selectionKey, info.Hash, release)
+						}, func() {
+							m.releasePlaybackSelectionNow(c, selectionKey, info.Hash, release)
+						})
+					} else if selectionFileIndex != f.Index {
+						return nil, fmt.Errorf("selected video file changed from index %d to %d while preparing", selectionFileIndex, f.Index)
+					}
+					if err := m.prioritizeActiveVideoFiles(ctx, c, selectionKey, info.Hash); err != nil {
+						return nil, fmt.Errorf("prioritize selected video file: %w", err)
 					}
 				}
 				// A byte count cannot say where the bytes are. Sequential
@@ -713,15 +1252,18 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 				}
 				if headReady {
 					abs := absFilePath(remotePath, c.SavePath(), info, f.Name)
-					return &PrepareResult{
-						AbsPath:    abs,
-						Name:       filepath.Base(f.Name),
-						Size:       f.Size,
-						Hash:       info.Hash,
-						FileIndex:  f.Index,
-						ClientName: clientName,
-						Progress:   f.Progress,
-					}, nil
+					res := &PrepareResult{
+						AbsPath:          abs,
+						Name:             filepath.Base(f.Name),
+						Size:             f.Size,
+						Hash:             info.Hash,
+						FileIndex:        f.Index,
+						ClientName:       clientName,
+						Progress:         f.Progress,
+						releaseSelection: releaseSelection,
+					}
+					selectionTransferred = true
+					return res, nil
 				}
 			}
 		}

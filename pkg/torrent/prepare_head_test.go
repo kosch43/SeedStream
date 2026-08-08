@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,6 +24,9 @@ type headQBit struct {
 	pieceSize   int64
 	totalPieces int
 	downloaded  map[int]bool // piece index -> on disk
+	state       string
+	startCalls  atomic.Int64
+	forceCalls  atomic.Int64
 }
 
 func (q *headQBit) fileSize() int64 { return q.pieceSize * int64(q.totalPieces) }
@@ -46,8 +50,18 @@ func (q *headQBit) server(t *testing.T) *httptest.Server {
 		fmt.Fprint(w, "Ok.")
 	})
 	mux.HandleFunc("/api/v2/torrents/info", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, `[{"hash":"%s","name":"Thing.S01E01.1080p","size":%d,"progress":%v,"state":"downloading","category":"seedstream","save_path":"/downloads","num_seeds":50}]`,
-			hash, q.fileSize(), q.progress())
+		state := q.state
+		if state == "" {
+			state = "downloading"
+		}
+		fmt.Fprintf(w, `[{"hash":"%s","name":"Thing.S01E01.1080p","size":%d,"progress":%v,"state":%q,"category":"seedstream","save_path":"/downloads","num_seeds":50,"seq_dl":true,"f_l_piece_prio":true}]`,
+			hash, q.fileSize(), q.progress(), state)
+	})
+	mux.HandleFunc("/api/v2/torrents/start", func(w http.ResponseWriter, r *http.Request) {
+		q.startCalls.Add(1)
+	})
+	mux.HandleFunc("/api/v2/torrents/setForceStart", func(w http.ResponseWriter, r *http.Request) {
+		q.forceCalls.Add(1)
 	})
 	mux.HandleFunc("/api/v2/torrents/files", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, `[{"index":0,"name":"Thing.S01E01.1080p.mkv","size":%d,"progress":%v,"priority":1,"piece_range":[0,%d]}]`,
@@ -129,6 +143,59 @@ func TestPrepareStreamsAtTenPercent(t *testing.T) {
 	}
 	if res.Name != "Thing.S01E01.1080p.mkv" {
 		t.Fatalf("unexpected file %q", res.Name)
+	}
+}
+
+func TestPrepareDoesNotStartOnOnePiece(t *testing.T) {
+	const pieceSize = 1 << 20
+	q := &headQBit{pieceSize: pieceSize, totalPieces: 160, downloaded: map[int]bool{0: true}}
+	mgr := headManager(t, q)
+
+	_, err := mgr.PrepareForPlayback(context.Background(), prepareTestRelease(), 1, 1,
+		16<<20, PlaybackProfile{}, 2*time.Second, nil)
+	if err == nil {
+		t.Fatal("a single downloaded piece must not be enough runway to start playback")
+	}
+	if !contains(err.Error(), "still buffering") {
+		t.Fatalf("expected a buffering error, got %v", err)
+	}
+}
+
+func TestPrepareResumesStoppedTorrentBeforeWaitingForHead(t *testing.T) {
+	const pieceSize = 1 << 20
+	q := &headQBit{
+		pieceSize:   pieceSize,
+		totalPieces: 20,
+		downloaded:  map[int]bool{0: true, 1: true},
+		state:       "stoppedDL",
+	}
+
+	mgr := headManager(t, q)
+	if _, err := mgr.PrepareForPlayback(context.Background(), prepareTestRelease(), 1, 1,
+		pieceSize, PlaybackProfile{}, 5*time.Second, nil); err != nil {
+		t.Fatalf("PrepareForPlayback: %v", err)
+	}
+	if got := q.startCalls.Load(); got != 1 {
+		t.Fatalf("stopped torrent received %d start calls, want 1", got)
+	}
+}
+
+func TestPrepareForceStartsQueuedTorrentBeforeWaitingForHead(t *testing.T) {
+	const pieceSize = 1 << 20
+	q := &headQBit{
+		pieceSize:   pieceSize,
+		totalPieces: 20,
+		downloaded:  map[int]bool{0: true, 1: true},
+		state:       "queuedDL",
+	}
+
+	mgr := headManager(t, q)
+	if _, err := mgr.PrepareForPlayback(context.Background(), prepareTestRelease(), 1, 1,
+		pieceSize, PlaybackProfile{}, 5*time.Second, nil); err != nil {
+		t.Fatalf("PrepareForPlayback: %v", err)
+	}
+	if got := q.forceCalls.Load(); got != 1 {
+		t.Fatalf("queued torrent received %d force-start calls, want 1", got)
 	}
 }
 

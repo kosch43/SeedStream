@@ -36,6 +36,48 @@ type Client struct {
 	cookieSet time.Time
 }
 
+type streamingOrderLockEntry struct {
+	gate chan struct{}
+	refs int
+}
+
+var streamingOrderLocks = struct {
+	sync.Mutex
+	entries map[string]*streamingOrderLockEntry
+}{entries: make(map[string]*streamingOrderLockEntry)} // WebUI base URL + hash
+
+func acquireStreamingOrderLock(ctx context.Context, baseURL, hash string) (func(), error) {
+	key := baseURL + "\x00" + strings.ToLower(strings.TrimSpace(hash))
+	streamingOrderLocks.Lock()
+	entry := streamingOrderLocks.entries[key]
+	if entry == nil {
+		entry = &streamingOrderLockEntry{gate: make(chan struct{}, 1)}
+		streamingOrderLocks.entries[key] = entry
+	}
+	entry.refs++
+	streamingOrderLocks.Unlock()
+	select {
+	case entry.gate <- struct{}{}:
+		return func() {
+			<-entry.gate
+			streamingOrderLocks.Lock()
+			entry.refs--
+			if entry.refs == 0 {
+				delete(streamingOrderLocks.entries, key)
+			}
+			streamingOrderLocks.Unlock()
+		}, nil
+	case <-ctx.Done():
+		streamingOrderLocks.Lock()
+		entry.refs--
+		if entry.refs == 0 {
+			delete(streamingOrderLocks.entries, key)
+		}
+		streamingOrderLocks.Unlock()
+		return nil, ctx.Err()
+	}
+}
+
 // Options configures a Client.
 type Options struct {
 	BaseURL  string
@@ -48,6 +90,7 @@ type Options struct {
 
 // New constructs a qBittorrent client. It does not perform any network I/O.
 func New(opts Options) *Client {
+	baseURL := strings.TrimRight(strings.TrimSpace(opts.BaseURL), "/")
 	cat := strings.TrimSpace(opts.Category)
 	if cat == "" {
 		cat = "seedstream"
@@ -57,7 +100,7 @@ func New(opts Options) *Client {
 		timeout = 30 * time.Second
 	}
 	return &Client{
-		baseURL:  strings.TrimRight(opts.BaseURL, "/"),
+		baseURL:  baseURL,
 		username: opts.Username,
 		password: opts.Password,
 		category: cat,
@@ -167,19 +210,24 @@ func (c *Client) Add(ctx context.Context, opts AddOptions) error {
 	form.Set("urls", opts.URL)
 	form.Set("category", c.category)
 	form.Set("autoTMM", "false")
+	// Override the client's "add stopped" preference on both sides of the
+	// qBittorrent 5.0 rename. Unknown add fields are ignored, so sending both is
+	// compatible with qBittorrent 4.6 (paused) and 5.x (stopped). Queueing is
+	// still respected, but putting playback at the top prevents an older queued
+	// download from sitting ahead of the stream the viewer just requested.
+	form.Set("paused", "false")
+	form.Set("stopped", "false")
+	form.Set("addToTopOfQueue", "true")
+	form.Set("stopCondition", "None")
 	if c.savePath != "" {
 		form.Set("savepath", c.savePath)
 	}
 	if opts.Sequential {
 		form.Set("sequentialDownload", "true")
-		// First/last-piece priority is what actually pins piece 0 to the front
-		// of the queue. Sequential download alone only orders the REQUESTS;
-		// libtorrent's piece picker is still free to complete whatever arrives
-		// first, and on a fresh torrent it starts picking before any ordering
-		// has been asserted — which is how piece 0 ends up arriving late at
-		// random. With firstLastPiecePrio on, qBittorrent marks piece 0 (and
-		// the tail) priority 7, the highest the picker honours, so the head
-		// of the file is fetched ahead of everything else, every time.
+		// Sequential mode orders requests, while first/last-piece priority gives
+		// each wanted file's boundary region the picker's maximum priority. The
+		// manager then raises the selected video above the other files and verifies
+		// its actual first piece through pieceStates before playback begins.
 		form.Set("firstLastPiecePrio", "true")
 	}
 	_, err := c.do(ctx, http.MethodPost, "/api/v2/torrents/add", form)
@@ -198,6 +246,27 @@ type (
 	AddOptions        = tclient.AddOptions
 )
 
+func decodeTorrentInfoList(body []byte) ([]TorrentInfo, error) {
+	var raw []json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, err
+	}
+	list := make([]TorrentInfo, len(raw))
+	for i, item := range raw {
+		if err := json.Unmarshal(item, &list[i]); err != nil {
+			return nil, err
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(item, &fields); err != nil {
+			return nil, err
+		}
+		_, hasSequential := fields["seq_dl"]
+		_, hasFirstLast := fields["f_l_piece_prio"]
+		list[i].StreamingOrderSupported = hasSequential && hasFirstLast
+	}
+	return list, nil
+}
+
 // Get returns the torrent with the given info hash, or nil if not present.
 func (c *Client) Get(ctx context.Context, hash string) (*TorrentInfo, error) {
 	if strings.TrimSpace(hash) == "" {
@@ -207,8 +276,8 @@ func (c *Client) Get(ctx context.Context, hash string) (*TorrentInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	var list []TorrentInfo
-	if err := json.Unmarshal(body, &list); err != nil {
+	list, err := decodeTorrentInfoList(body)
+	if err != nil {
 		return nil, fmt.Errorf("qbittorrent info decode: %w", err)
 	}
 	if len(list) == 0 {
@@ -223,8 +292,8 @@ func (c *Client) ListCategory(ctx context.Context) ([]TorrentInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	var list []TorrentInfo
-	if err := json.Unmarshal(body, &list); err != nil {
+	list, err := decodeTorrentInfoList(body)
+	if err != nil {
 		return nil, fmt.Errorf("qbittorrent list decode: %w", err)
 	}
 	return list, nil
@@ -338,20 +407,58 @@ func (c *Client) EnsureStreamingOrder(ctx context.Context, info *TorrentInfo) er
 	if info == nil || strings.TrimSpace(info.Hash) == "" {
 		return nil
 	}
+	release, err := acquireStreamingOrderLock(ctx, c.baseURL, info.Hash)
+	if err != nil {
+		return err
+	}
+	defer release()
+
 	form := url.Values{}
 	form.Set("hashes", strings.ToLower(info.Hash))
+	readState := func() (bool, error) {
+		current, err := c.Get(ctx, info.Hash)
+		if err != nil {
+			return false, err
+		}
+		if current == nil {
+			return false, fmt.Errorf("qbittorrent streaming order: torrent %s not found", info.Hash)
+		}
+		info.SequentialDL = current.SequentialDL
+		info.FirstLastPiecePrio = current.FirstLastPiecePrio
+		return info.SequentialDL && info.FirstLastPiecePrio, nil
+	}
+	wait := func() error {
+		timer := time.NewTimer(200 * time.Millisecond)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+			return nil
+		}
+	}
 
 	for attempt := 0; attempt < 3; attempt++ {
-		current, err := c.Get(ctx, info.Hash)
+		ready, err := readState()
 		if err != nil {
 			return err
 		}
-		if current != nil {
-			info.SequentialDL = current.SequentialDL
-			info.FirstLastPiecePrio = current.FirstLastPiecePrio
+		if ready {
+			return nil
 		}
 
-		if info.SequentialDL && info.FirstLastPiecePrio {
+		// A magnet can become visible before its add-time options have settled.
+		// Confirm the missing state once before touching toggle endpoints; acting
+		// on the first stale read is exactly how an add with both flags enabled can
+		// be toggled back off.
+		if err := wait(); err != nil {
+			return err
+		}
+		ready, err = readState()
+		if err != nil {
+			return err
+		}
+		if ready {
 			return nil
 		}
 
@@ -376,9 +483,19 @@ func (c *Client) EnsureStreamingOrder(ctx context.Context, info *TorrentInfo) er
 			return firstErr
 		}
 
-		time.Sleep(200 * time.Millisecond)
+		if err := wait(); err != nil {
+			return err
+		}
 	}
 
+	ready, err := readState()
+	if err != nil {
+		return err
+	}
+	if !ready {
+		return fmt.Errorf("qbittorrent streaming order did not stay enabled for torrent %s (sequential=%t first_last_piece_priority=%t)",
+			info.Hash, info.SequentialDL, info.FirstLastPiecePrio)
+	}
 	return nil
 }
 
@@ -395,6 +512,27 @@ func (c *Client) Resume(ctx context.Context, hash string) error {
 	if err != nil && strings.Contains(err.Error(), "HTTP 404") {
 		_, err = c.do(ctx, http.MethodPost, "/api/v2/torrents/resume", form)
 	}
+	return err
+}
+
+// ForceStart starts a torrent without qBittorrent's queue limits. It is used
+// only for an active playback download that is otherwise stuck in queuedDL;
+// ordinary seeding continues to respect the operator's queue settings.
+func (c *Client) ForceStart(ctx context.Context, hash string) error {
+	return c.SetForceStart(ctx, hash, true)
+}
+
+// SetForceStart explicitly sets qBittorrent's force-start flag. Unlike the
+// streaming toggles, this endpoint is idempotent and can restore the prior
+// queue behavior when playback no longer needs a queued torrent bypassed.
+func (c *Client) SetForceStart(ctx context.Context, hash string, value bool) error {
+	if strings.TrimSpace(hash) == "" {
+		return nil
+	}
+	form := url.Values{}
+	form.Set("hashes", strings.ToLower(hash))
+	form.Set("value", strconv.FormatBool(value))
+	_, err := c.do(ctx, http.MethodPost, "/api/v2/torrents/setForceStart", form)
 	return err
 }
 

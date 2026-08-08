@@ -39,17 +39,16 @@ func TestRemuxGetsAMuchLargerBuffer(t *testing.T) {
 }
 
 // TestOrdinary1080pStartsSooner is the complaint this scaling answers. A 1080p
-// release is outpaced by any seedbox by a wide margin, so it needs seconds of
-// cushion, not the 16 MiB the default imposed on everything. Waiting on data the
-// stream was never going to need is time the viewer spends looking at a spinner.
+// release is outpaced by any seedbox by a wide margin, so it needs a bounded
+// runway rather than a large bitrate-independent wait.
 func TestOrdinary1080pStartsSooner(t *testing.T) {
 	s := bufferServer()
 	// 4 GB over 2h ≈ 4.4 Mbps — an ordinary 1080p encode.
 	got := s.playbackBufferBytes(bufferSession(4_000_000_000), 0)
 
-	if got >= torrent.DefaultBufferBytes {
-		t.Fatalf("an ordinary 1080p release should need less than the %d byte default, got %d",
-			torrent.DefaultBufferBytes, got)
+	if got > torrent.MinHeadBytes {
+		t.Fatalf("an ordinary 1080p release should use the minimum runway, got %d want <= %d",
+			got, torrent.MinHeadBytes)
 	}
 	if got < torrent.MinHeadBytes {
 		t.Fatalf("buffer %d is below the floor %d", got, torrent.MinHeadBytes)

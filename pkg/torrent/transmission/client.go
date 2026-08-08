@@ -334,11 +334,13 @@ func (c *Client) Get(ctx context.Context, hash string) (*tclient.TorrentInfo, er
 	if strings.TrimSpace(hash) == "" {
 		return nil, nil
 	}
+	streamingOrderSupported := true
 	list, err := c.getTorrents(ctx, hash, "sequential_download")
 	if err != nil {
 		// A daemon older than 4.1 rejects the whole call for an unknown field,
 		// so retry without it rather than losing the torrent entirely. Sequential
 		// download then reads as off, which is honest: it is not supported.
+		streamingOrderSupported = false
 		list, err = c.getTorrents(ctx, hash)
 		if err != nil {
 			return nil, err
@@ -348,12 +350,20 @@ func (c *Client) Get(ctx context.Context, hash string) (*tclient.TorrentInfo, er
 		return nil, nil
 	}
 	info := c.toTorrentInfo(list[0])
+	info.StreamingOrderSupported = streamingOrderSupported
 	return &info, nil
 }
 
 // ListCategory returns every torrent carrying this client's label.
 func (c *Client) ListCategory(ctx context.Context) ([]tclient.TorrentInfo, error) {
-	list, err := c.getTorrents(ctx, "")
+	streamingOrderSupported := true
+	list, err := c.getTorrents(ctx, "", "sequential_download")
+	if err != nil {
+		// Keep the same compatibility path as Get: Transmission before 4.1
+		// rejects this field, so retry without it rather than losing the list.
+		streamingOrderSupported = false
+		list, err = c.getTorrents(ctx, "")
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -362,7 +372,9 @@ func (c *Client) ListCategory(ctx context.Context) ([]tclient.TorrentInfo, error
 		if !hasLabel(t.Labels, c.category) {
 			continue
 		}
-		out = append(out, c.toTorrentInfo(t))
+		info := c.toTorrentInfo(t)
+		info.StreamingOrderSupported = streamingOrderSupported
+		out = append(out, info)
 	}
 	return out, nil
 }
@@ -448,7 +460,16 @@ func (c *Client) Files(ctx context.Context, hash string) ([]tclient.FileInfo, er
 			Progress: progress,
 		}
 		if i < len(t.FileStats) {
-			fi.Priority = t.FileStats[i].Priority
+			// Translate Transmission's -1/0/1 vocabulary into the shared
+			// qBittorrent-shaped 0/1/7 values used by the manager.
+			switch {
+			case t.FileStats[i].Priority > 0:
+				fi.Priority = 7
+			case t.FileStats[i].Priority < 0:
+				fi.Priority = 0
+			default:
+				fi.Priority = 1
+			}
 		}
 		// Piece range, derived rather than reported. Transmission lays files out
 		// end to end across the torrent's pieces in listing order, so a running
@@ -594,7 +615,7 @@ func (c *Client) SetFilePriority(ctx context.Context, hash string, fileIndex, pr
 	switch {
 	case priority >= 6:
 		key = "priority-high"
-	case priority <= 1:
+	case priority <= 0:
 		key = "priority-low"
 	}
 	return c.call(ctx, "torrent-set", map[string]any{

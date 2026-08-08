@@ -17,11 +17,16 @@ import (
 	"seedstream/pkg/search/triage"
 	"seedstream/pkg/services/cerberus"
 	"seedstream/pkg/services/uploadguard"
+	"seedstream/pkg/torrent/tclient"
 )
 
 const (
 	defaultStallThresholdMinutes = 10
 	defaultCheckIntervalMinutes  = 3
+	// streamingOrderMinDownloadedPieces is how many later pieces of the selected
+	// video must already be on disk before its missing first piece proves the
+	// download is not happening from that file's front.
+	streamingOrderMinDownloadedPieces = 5
 )
 
 // WatchdogConfig controls Cerberus watchdog behavior.
@@ -43,6 +48,10 @@ type Watchdog struct {
 	cfg      *config.Config
 	meter    *uploadguard.Meter // monthly upload meter; nil disables metering
 	checking atomic.Bool        // guards against concurrent check runs
+	// headWarned records which torrents have already been reported for a
+	// missing head piece, so a torrent whose picker ignores the ordering flags
+	// warns once instead of on every tick.
+	headWarned map[string]bool
 	// lastRetentionReview paces the dry-run obligation report; obligations are
 	// measured in days so there is nothing to gain from reporting every tick.
 	lastRetentionReview time.Time
@@ -57,7 +66,7 @@ func NewWatchdog(m *Manager, cer *cerberus.Client, idx indexer.Indexer, cfg *con
 	if m == nil || !m.Enabled() || cer == nil || idx == nil {
 		return nil
 	}
-	return &Watchdog{manager: m, cerberus: cer, indexer: idx, cfg: cfg, meter: meter}
+	return &Watchdog{manager: m, cerberus: cer, indexer: idx, cfg: cfg, meter: meter, headWarned: make(map[string]bool)}
 }
 
 // hnrRulesFor returns the H&R rules configured for the named indexer, or nil
@@ -286,6 +295,106 @@ func (w *Watchdog) check(ctx context.Context, stallThreshold time.Duration) {
 			"imdb_id", rec.ImdbID, "tmdb_id", rec.TmdbID)
 		w.handleStalled(ctx, e, rec)
 	}
+
+	// Streaming order is asserted at add time and again at playback time, but
+	// both are moments. Read the flags back from the API every check and repair
+	// them, then confirm that each video qBittorrent currently marks as a
+	// playback priority has its real first piece on disk.
+	w.verifyStreamingOrder(ctx, entries)
+}
+
+// verifyStreamingOrder makes every incomplete SeedStream torrent download from
+// the front and checks that the ordering actually works rather than merely
+// being switched on.
+//
+// For a multi-file torrent, torrent-global piece 0 may be a sample, an earlier
+// episode, or another unrelated file. Cerberus therefore observes the video
+// files qBittorrent currently reports at playback priority and checks each
+// file's PieceRange[0]. It never selects a file from persisted content metadata:
+// that record can lag behind an episode which is still preparing.
+//
+// The piece bitmap is the only API view that says WHERE downloaded bytes are.
+// If the selected first piece is not downloaded while later pieces of the
+// same file have completed, the viewer's head buffer cannot fill no matter how
+// much aggregate progress qBittorrent reports. That condition is reported once
+// per client/torrent/file; streaming-order flags are repaired on every check.
+func (w *Watchdog) verifyStreamingOrder(ctx context.Context, entries []TorrentHealthEntry) {
+	seenIncomplete := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		if e.Progress >= 1 {
+			continue
+		}
+
+		orderMissing := e.StreamingOrderSupported && (!e.SequentialDL || !e.FirstLastPiecePrio)
+		if orderMissing {
+			logger.Warn("Cerberus watchdog: torrent is not set to download from the front — enabling sequential download and first/last-piece priority",
+				"hash", e.Hash, "name", e.Name, "client", e.ClientName,
+				"state", e.State, "progress", e.Progress,
+				"sequential_dl", e.SequentialDL, "first_last_piece_prio", e.FirstLastPiecePrio)
+			if err := w.manager.EnsureStreamingOrder(ctx, e.ClientName, e.Hash); err != nil {
+				logger.Warn("Cerberus watchdog: could not enable streaming order",
+					"hash", e.Hash, "name", e.Name, "client", e.ClientName, "err", err)
+			}
+		}
+
+		heads, err := w.manager.StreamingHeads(ctx, e.ClientName, e.Hash)
+		if err != nil {
+			logger.Warn("Cerberus watchdog: could not verify the selected file's head",
+				"hash", e.Hash, "client", e.ClientName, "err", err)
+			continue
+		}
+		for _, head := range heads {
+			key := streamingHeadKey(e.ClientName, e.Hash, head.FileIndex)
+			seenIncomplete[key] = true
+			// The flags were just repaired. Give the picker a check interval
+			// before judging work requested under the old order.
+			if orderMissing {
+				continue
+			}
+			if !headPieceMissing(head.FirstPieceState, head.DownloadedPiecesAfter) {
+				delete(w.headWarned, key)
+				continue
+			}
+			if !w.headWarned[key] {
+				w.headWarned[key] = true
+				logger.Warn("Cerberus watchdog: selected video's first piece is not downloaded while later pieces are complete",
+					"hash", e.Hash, "name", e.Name, "client", e.ClientName,
+					"state", e.State, "progress", e.Progress,
+					"file", head.FileName, "file_index", head.FileIndex,
+					"first_piece", head.FirstPiece, "first_piece_state", head.FirstPieceState,
+					"later_file_pieces_downloaded", head.DownloadedPiecesAfter)
+				// qBittorrent exposes no arbitrary per-piece priority setter. The
+				// safe recovery levers are to verify the streaming flags again and
+				// reannounce, which can find a peer that has the missing head.
+				if err := w.manager.EnsureStreamingOrder(ctx, e.ClientName, e.Hash); err != nil {
+					logger.Debug("Cerberus watchdog: could not reassert streaming order for missing head",
+						"hash", e.Hash, "client", e.ClientName, "err", err)
+				}
+				if err := w.manager.Reannounce(ctx, e.ClientName, e.Hash); err != nil {
+					logger.Debug("Cerberus watchdog: could not reannounce torrent with missing head",
+						"hash", e.Hash, "client", e.ClientName, "err", err)
+				}
+			}
+		}
+	}
+	// Forget warnings for torrents that left the category so the map cannot
+	// grow without bound across the client's lifetime.
+	for h := range w.headWarned {
+		if !seenIncomplete[h] {
+			delete(w.headWarned, h)
+		}
+	}
+}
+
+func streamingHeadKey(clientName, hash string, fileIndex int) string {
+	return strings.TrimSpace(clientName) + ":" + strings.ToLower(strings.TrimSpace(hash)) + ":" + strconv.Itoa(fileIndex)
+}
+
+// headPieceMissing reports whether the selected video's first piece is still
+// unreadable despite several later pieces of that same file being complete.
+func headPieceMissing(firstPieceState, downloadedAfter int) bool {
+	return firstPieceState != tclient.PieceDownloaded &&
+		downloadedAfter >= streamingOrderMinDownloadedPieces
 }
 
 // syncUploadMeter folds the seedbox's BitTorrent upload into the monthly upload
