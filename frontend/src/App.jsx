@@ -10,6 +10,7 @@ import { StatisticsPage } from "@/components/StatisticsPage"
 import { LogsPage } from "@/components/LogsPage"
 import { CerberusPage } from "@/components/CerberusPage"
 import { ProfilePage } from "@/components/ProfilePage"
+import StreamManagement from '@/components/StreamManagement'
 import { getApiUrl, UNAUTHORIZED_EVENT } from './api'
 import { AlertCircle, Loader2 } from "lucide-react"
 
@@ -239,6 +240,16 @@ function App() {
           {activePage === 'cerberus' && (
             <div className="pt-4 md:pt-5 pb-3 px-4 lg:px-5">
               <CerberusPage />
+            </div>
+          )}
+          {activePage === 'install' && (
+            <div className="pt-4 md:pt-5 pb-3 px-4 lg:px-5">
+              <StreamManagement
+                globalConfig={config}
+                movieSearchQueries={config?.movie_search_queries || []}
+                seriesSearchQueries={config?.series_search_queries || []}
+                initialStreamsByName={config?.streams || {}}
+              />
             </div>
           )}
           {activePage === 'logs' && (

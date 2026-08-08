@@ -28,6 +28,7 @@ import { cn } from "@/lib/utils"
 const navMain = [
   { id: "dashboard", title: "Dashboard", icon: LayoutDashboard },
   { id: "statistics", title: "Statistics", icon: ChartColumn },
+  { id: "install", title: "Streams", icon: Zap },
   { id: "cerberus", title: "Cerberus", icon: ShieldCheck },
   { id: "logs", title: "Logs", icon: FileText },
   { id: "settings", title: "Settings", icon: Settings },
