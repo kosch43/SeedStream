@@ -1253,6 +1253,24 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 				}
 				needHead = m.reviseHead(ctx, c, info.Hash, needHead,
 					requiredHeadBytes(bufferBytes, f.Size), profile, &warnedRevised)
+
+				// A fragmented head is a download whose data is arriving out
+				// of order. The download-speed shrink is only safe when data
+				// lands sequentially; once the head is known to be fractured,
+				// require a deeper runway scaled to the bitrate so playback
+				// does not stall seconds in.
+				if fragmentedHead {
+					floor := MinHeadBytes * 4
+					if profile.Valid() {
+						if bitrateFloor := int64(profile.BytesPerSecond() * 20); bitrateFloor > floor {
+							floor = bitrateFloor
+						}
+					}
+					if needHead < floor {
+						needHead = floor
+					}
+				}
+
 				headReady := false
 				if avail != nil {
 					headReady = avail.BytesAvailable(ctx, 0, needHead)
