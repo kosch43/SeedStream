@@ -127,10 +127,10 @@ func TestEnsureStreamingOrderRaceCondition(t *testing.T) {
 		}
 	})
 	mux.HandleFunc("/api/v2/torrents/toggleSequentialDownload", func(w http.ResponseWriter, r *http.Request) {
-		*calls = append(*calls, "seq")
+		calls = append(calls, "seq")
 	})
 	mux.HandleFunc("/api/v2/torrents/toggleFirstLastPiecePrio", func(w http.ResponseWriter, r *http.Request) {
-		*calls = append(*calls, "flpp")
+		calls = append(calls, "flpp")
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()

@@ -69,6 +69,9 @@ func TestHandleDownloadLogsServesCurrentLogFile(t *testing.T) {
 
 func TestHandleDownloadLogsReturnsNotFoundWhenMissing(t *testing.T) {
 	setTestDataDir(t)
+	// Inside Docker GetDataDir is the shared /app/data, where an earlier test
+	// may have written the log file; guarantee it is absent.
+	_ = os.Remove(logger.GetCurrentLogPath())
 
 	req := httptest.NewRequest(http.MethodGet, "/api/logs/download", nil)
 	rr := httptest.NewRecorder()
