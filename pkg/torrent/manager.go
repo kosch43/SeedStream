@@ -697,23 +697,6 @@ type forceSetter interface {
 	SetForceStart(context.Context, string, bool) error
 }
 
-// sequentialAnchorer is a client that can move where sequential download starts
-// on a running torrent.
-//
-// Only Transmission 4.1 offers this. qBittorrent's sequential mode is pinned to
-// piece 0 with no way to move it, and its first/last-piece priority is what
-// pulls the head in instead. Transmission has no piece-priority lever at all,
-// so without this its sequential download orders requests from the torrent's
-// first piece and nothing pins the piece playback actually starts on.
-//
-// The distinction matters most on a multi-file torrent, where the video may
-// begin hundreds of pieces in: anchoring at the file's own first piece points
-// the download at the bytes the player needs first rather than at a sample or
-// a subtitle folder that happens to sort earlier.
-type sequentialAnchorer interface {
-	SequentialFromPiece(ctx context.Context, hash string, piece int) error
-}
-
 func acquireForceStartLease(ctx context.Context, key, hash string, setter forceSetter, restore bool) (func(), error) {
 	forceStartLeases.Lock()
 	lease := forceStartLeases.leases[key]
@@ -1298,9 +1281,9 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 				// list has arrived, because the video's first piece is not the
 				// torrent's first piece on a multi-file torrent.
 				if !anchoredHead && len(f.PieceRange) == 2 && f.PieceRange[0] >= 0 {
-					if anchor, ok := c.(sequentialAnchorer); ok {
+					{
 						anchoredHead = true
-						if err := anchor.SequentialFromPiece(ctx, info.Hash, f.PieceRange[0]); err != nil {
+						if err := c.SteerToPiece(ctx, info.Hash, f.PieceRange[0]); err != nil {
 							// Best-effort: an older daemon has no such lever, and
 							// saying so once is more useful than failing playback
 							// over an optimisation.
@@ -1367,9 +1350,9 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 						// does not take either, the client is not honouring it
 						// and repeating the call every poll only adds traffic.
 						if !reAnchored && len(f.PieceRange) == 2 && f.PieceRange[0] >= 0 {
-							if anchor, ok := c.(sequentialAnchorer); ok {
+							{
 								reAnchored = true
-								if err := anchor.SequentialFromPiece(ctx, info.Hash, f.PieceRange[0]); err != nil {
+								if err := c.SteerToPiece(ctx, info.Hash, f.PieceRange[0]); err != nil {
 									logger.Debug("could not re-anchor sequential download",
 										"hash", shortHash(info.Hash), "err", err)
 								} else {
