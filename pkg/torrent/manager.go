@@ -47,6 +47,11 @@ const DefaultPrepareTimeout = 90 * time.Second
 // hold it back past the point where the answer is obviously yes.
 const StreamableHeadFraction = 0.10
 
+// nearlyCompleteProgress is where the extra fragmented-head runway floor stops
+// being useful. The exact piece check still applies; this only avoids requiring
+// an unnecessarily deep runway when almost the entire file is already present.
+const nearlyCompleteProgress = 0.99
+
 // requiredHeadBytes is how much continuous data must sit at the front of the
 // file before playback starts: the requested buffer, normally capped at a
 // tenth of the file, and never more than the file itself. For small files the
@@ -1298,17 +1303,17 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 				needHead = m.reviseHead(ctx, c, info.Hash, needHead,
 					requiredHeadBytes(bufferBytes, f.Size), profile, &warnedRevised)
 
-			// A fragmented head is a download whose data is arriving out
-			// of order. The download-speed shrink is only safe when data
-			// lands sequentially; once the head is known to be fractured,
-			// require a deeper runway scaled to the bitrate so playback
-			// does not stall seconds in.
-			//
-			// Skip the floor when the file is nearly complete: at >99%
-			// progress the few remaining scattered pieces belong to the
-			// tail, not the head, and inflating the requirement just
-			// delays a stream that is ready to start.
-			if fragmentedHead && f.Progress < 0.99 {
+				// A fragmented head is a download whose data is arriving out
+				// of order. The download-speed shrink is only safe when data
+				// lands sequentially; once the head is known to be fractured,
+				// require a deeper runway scaled to the bitrate so playback
+				// does not stall seconds in.
+				//
+				// Skip the extra floor when the file is nearly complete. The
+				// exact piece check below still applies; this only avoids
+				// delaying startup on a nearly finished file because a deeper
+				// runway target was inferred from earlier fragmentation.
+				if fragmentedHead && f.Progress < nearlyCompleteProgress {
 					floor := MinHeadBytes * 4
 					if profile.Valid() {
 						if bitrateFloor := int64(profile.BytesPerSecond() * 20); bitrateFloor > floor {
@@ -1375,14 +1380,14 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 						}
 					}
 				}
-			if fragmentedHead && f.Progress < 0.99 {
-				// The file has plenty of bytes but they are scattered —
-				// a small head check may pass while the runway beyond
-				// it is sparse. Starting on a minimum head that just
-				// happens to be contiguous leads to a stall seconds in:
-				// the player drains those and hits a hole. Wait for a
-				// deeper continuous run before beginning.
-				if floor := MinHeadBytes * 4; needHead < floor {
+				if fragmentedHead && f.Progress < nearlyCompleteProgress {
+					// The file has plenty of bytes but they are scattered —
+					// a small head check may pass while the runway beyond
+					// it is sparse. Starting on a minimum head that just
+					// happens to be contiguous leads to a stall seconds in:
+					// the player drains those and hits a hole. Wait for a
+					// deeper continuous run before beginning.
+					if floor := MinHeadBytes * 4; needHead < floor {
 						needHead = floor
 						headReady = false
 					}

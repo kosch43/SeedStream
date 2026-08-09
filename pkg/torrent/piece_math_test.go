@@ -77,3 +77,32 @@ func TestUnalignedNeverApprovesMissing(t *testing.T) {
 		}
 	}
 }
+
+func TestPieceForByteUsesTorrentOffsetForUnalignedFiles(t *testing.T) {
+	a := &fileAvailability{
+		initDone:   true,
+		pieceMode:  true,
+		pieceSize:  1000,
+		fileOffset: 500,
+		firstPiece: 0,
+		lastPiece:  2,
+		fileSize:   2000,
+	}
+
+	for _, tc := range []struct {
+		offset int64
+		piece  int
+	}{
+		{0, 0},
+		{499, 0},
+		{500, 1},
+		{1499, 1},
+		{1500, 2},
+		{1999, 2},
+	} {
+		got, ok := a.PieceForByte(nil, tc.offset)
+		if !ok || got != tc.piece {
+			t.Errorf("PieceForByte(%d) = %d, %v; want %d, true", tc.offset, got, ok, tc.piece)
+		}
+	}
+}
