@@ -80,7 +80,11 @@ function TorrentClientDialog({ open, onOpenChange, initialValue, onSave, title, 
       setDraft(normalizeDraft(initialValue))
       setError('')
     }
-  }, [open, initialValue])
+    // initialValue omitted intentionally: it is a new object on every render
+    // for the Add dialog (emptyDraft()) and would reset user edits. The draft
+    // should only be seeded when the dialog transitions from closed to open.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
 
   const update = (patch) => setDraft((d) => ({ ...d, ...patch }))
   const kind = clientType(draft.type)
