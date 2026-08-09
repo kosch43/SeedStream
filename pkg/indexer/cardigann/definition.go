@@ -31,7 +31,11 @@ type Definition struct {
 	Type        string   `yaml:"type"` // public, semi-private, private
 	Encoding    string   `yaml:"encoding"`
 	Links       []string `yaml:"links"`
-	LegacyLinks []string `yaml:"legacylinks"`
+	// RequestDelay is the minimum number of seconds the tracker asks callers to
+	// leave between requests. Jackett and Prowlarr honour it; ignoring it on a
+	// private tracker risks rate-limiting or losing the account.
+	RequestDelay float64  `yaml:"requestDelay"`
+	LegacyLinks  []string `yaml:"legacylinks"`
 
 	Caps     Caps      `yaml:"caps"`
 	Settings []Setting `yaml:"settings"`

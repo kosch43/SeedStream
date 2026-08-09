@@ -31,6 +31,45 @@ type Engine struct {
 	mu          sync.Mutex
 	loggedIn    bool
 	lastLoginAt time.Time
+
+	// throttle serialises requests to this tracker and holds the time the last
+	// one went out, so the tracker's own declared minimum interval is honoured.
+	// Separate from mu, which guards login state and is held across a login.
+	throttle    sync.Mutex
+	lastRequest time.Time
+}
+
+// waitForTurn blocks until this tracker's declared request delay has elapsed
+// since the previous request, and reserves the slot for this one.
+//
+// 65 of the bundled definitions declare requestDelay — TorrentLeech asks for
+// 4.1 seconds — and it was parsed nowhere and honoured nowhere. Jackett and
+// Prowlarr both obey it. Ignoring it on a private tracker is how an account
+// gets rate-limited or banned, and searches now run concurrently, so without
+// this several requests leave for the same tracker at once.
+//
+// The lock is held across the wait deliberately: that is what turns a burst of
+// concurrent searches into a queue rather than letting them all observe the
+// same stale timestamp and fire together.
+func (e *Engine) waitForTurn(ctx context.Context) error {
+	delay := time.Duration(e.def.RequestDelay * float64(time.Second))
+	if delay <= 0 {
+		return nil
+	}
+	e.throttle.Lock()
+	defer e.throttle.Unlock()
+
+	if wait := delay - time.Since(e.lastRequest); wait > 0 && !e.lastRequest.IsZero() {
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	e.lastRequest = time.Now()
+	return nil
 }
 
 // loginTTL bounds how long a session is trusted before it is re-tested, so an
@@ -108,6 +147,10 @@ func (e *Engine) newContext() *Context {
 
 // do issues a request with the browser-like headers trackers expect.
 func (e *Engine) do(ctx context.Context, method, rawURL string, form url.Values, headers map[string]string) (*goquery.Document, string, error) {
+	// Respect the tracker's own request-rate limit before anything leaves.
+	if err := e.waitForTurn(ctx); err != nil {
+		return nil, "", err
+	}
 	var body io.Reader
 	if form != nil && method == http.MethodPost {
 		body = strings.NewReader(form.Encode())
