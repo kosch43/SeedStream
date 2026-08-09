@@ -33,6 +33,10 @@ type Components struct {
 	Triage      *triage.Service
 	TMDBClient  *tmdb.Client
 	TVDBClient  *tvdb.Client
+	// UsageManager holds the per-tracker counters. Carried through so the
+	// playback path can count a grab against the tracker that supplied the
+	// release; counters only the search path can reach are half a picture.
+	UsageManager *indexer.UsageManager
 }
 
 type App struct {
@@ -108,12 +112,13 @@ func (a *App) buildFull(cfg *config.Config, opts BuildOpts) (*Components, error)
 	tvdbClient := tvdb.NewClient(a.effectiveTVDBKey(), dataDir)
 
 	return &Components{
-		Config:      base.Config,
-		Indexer:     base.Indexer,
-		IndexerCaps: base.IndexerCaps,
-		Triage:      triageSvc,
-		TMDBClient:  tmdbClient,
-		TVDBClient:  tvdbClient,
+		Config:       base.Config,
+		Indexer:      base.Indexer,
+		IndexerCaps:  base.IndexerCaps,
+		Triage:       triageSvc,
+		TMDBClient:   tmdbClient,
+		TVDBClient:   tvdbClient,
+		UsageManager: base.UsageManager,
 	}, nil
 }
 

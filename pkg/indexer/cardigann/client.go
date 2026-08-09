@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"seedstream/pkg/core/config"
 	"seedstream/pkg/core/logger"
 	"seedstream/pkg/indexer"
+	"seedstream/pkg/stats"
 )
 
 // Client adapts a tracker definition to SeedStream's Indexer interface, so a
@@ -18,10 +20,35 @@ import (
 type Client struct {
 	engine *Engine
 	name   string
+
+	// Counters behind the stats page. A scraped tracker has no published quota,
+	// but every other number the page shows is measured locally and applies
+	// just as well here as to a Torznab indexer — reporting zeros made a
+	// working tracker look idle.
+	mu              sync.RWMutex
+	apiUsed         int
+	searchesCount   int
+	totalResponseMS int64
+
+	// usageManager persists the counters across restarts and holds the
+	// all-time totals. nil disables persistence; the live counters still work.
+	usageManager *indexer.UsageManager
+	// apiLimit and downloadLimit are the operator's configured daily ceilings,
+	// 0 for unlimited. Scraping has no tracker-imposed quota, but an operator
+	// may still want to bound how hard SeedStream hits a site.
+	apiLimit      int
+	downloadLimit int
 }
 
 // NewClient builds an indexer client for a definition id from the catalog.
 func NewClient(cat *Catalog, definitionID, displayName, baseURLOverride string, settings map[string]string, timeout time.Duration, indexerConfigs ...config.IndexerConfig) (*Client, error) {
+	return NewClientWithUsage(cat, definitionID, displayName, baseURLOverride, settings, timeout, nil, indexerConfigs...)
+}
+
+// NewClientWithUsage is NewClient with a usage manager attached, so counters
+// survive a restart and all-time totals accumulate. Kept separate so existing
+// callers and tests that do not care about statistics are unaffected.
+func NewClientWithUsage(cat *Catalog, definitionID, displayName, baseURLOverride string, settings map[string]string, timeout time.Duration, um *indexer.UsageManager, indexerConfigs ...config.IndexerConfig) (*Client, error) {
 	def, ok := cat.Get(definitionID)
 	if !ok {
 		return nil, fmt.Errorf("tracker definition %q is not installed", definitionID)
@@ -34,7 +61,21 @@ func NewClient(cat *Catalog, definitionID, displayName, baseURLOverride string, 
 	if name == "" {
 		name = def.Name
 	}
-	return &Client{engine: eng, name: name}, nil
+	c := &Client{engine: eng, name: name, usageManager: um}
+	for _, cfg := range indexerConfigs {
+		if strings.EqualFold(strings.TrimSpace(cfg.Name), name) {
+			c.apiLimit = cfg.APIHitsDay
+			c.downloadLimit = cfg.DownloadsDay
+			break
+		}
+	}
+	// Restore today's counters so a restart does not reset the page to zero.
+	if um != nil {
+		if usage := um.GetIndexerUsage(name); usage != nil {
+			c.apiUsed = usage.APIHitsUsed
+		}
+	}
+	return c, nil
 }
 
 // Name identifies this tracker in logs, stats and the stream list.
@@ -53,9 +94,75 @@ func (c *Client) Ping() error {
 	return c.engine.Login(ctx)
 }
 
-// GetUsage reports API budget. Scraped trackers have no published quota, so this
-// is reported as unlimited rather than inventing a number.
-func (c *Client) GetUsage() indexer.Usage { return indexer.Usage{} }
+// GetUsage reports what this tracker has actually done.
+//
+// A scraped tracker publishes no quota, which is why the limits are whatever
+// the operator configured and nothing is invented. Everything else — requests
+// made, searches run, average response time, all-time totals — is measured the
+// same way as for a Torznab indexer, and was previously reported as zeros that
+// made a working tracker indistinguishable from an idle one.
+func (c *Client) GetUsage() indexer.Usage {
+	// Read the shared counters before taking the local lock, never while
+	// holding it: the usage manager takes its own lock, and reversing the two
+	// orders between here and recordSearch would be a deadlock waiting on load.
+	var allTimeHits, allTimeDownloads, downloadsUsed int
+	if c.usageManager != nil {
+		if usage := c.usageManager.GetIndexerUsage(c.name); usage != nil {
+			allTimeHits = usage.AllTimeAPIHitsUsed
+			allTimeDownloads = usage.AllTimeDownloadsUsed
+			// Grabs are counted at playback, against the usage manager rather
+			// than this client, so today's total has to be read back from there
+			// or the download column stays at zero however much was grabbed.
+			downloadsUsed = usage.DownloadsUsed
+		}
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	u := indexer.Usage{
+		APIHitsLimit:         c.apiLimit,
+		APIHitsUsed:          c.apiUsed,
+		SearchesCount:        c.searchesCount,
+		DownloadsLimit:       c.downloadLimit,
+		DownloadsUsed:        downloadsUsed,
+		AllTimeAPIHitsUsed:   allTimeHits,
+		AllTimeDownloadsUsed: allTimeDownloads,
+	}
+	// A remaining figure only means something against a limit. Reporting one
+	// where the operator set none would invent a budget the tracker never gave.
+	if c.apiLimit > 0 {
+		if remaining := c.apiLimit - c.apiUsed; remaining > 0 {
+			u.APIHitsRemaining = remaining
+		}
+	}
+	if c.downloadLimit > 0 {
+		if remaining := c.downloadLimit - downloadsUsed; remaining > 0 {
+			u.DownloadsRemaining = remaining
+		}
+	}
+	if c.searchesCount > 0 {
+		u.AvgResponseMS = float64(c.totalResponseMS) / float64(c.searchesCount)
+	}
+	return u
+}
+
+// recordSearch updates the local counters and the persisted event log for one
+// completed search. Failures count as requests too: a search that errored still
+// hit the tracker, and hiding those would make a broken tracker look quiet
+// rather than broken.
+func (c *Client) recordSearch(success bool, elapsedMS int64, resultCount int) {
+	c.mu.Lock()
+	c.apiUsed++
+	c.searchesCount++
+	c.totalResponseMS += elapsedMS
+	c.mu.Unlock()
+
+	if c.usageManager != nil {
+		c.usageManager.IncrementUsed(c.name, 1, 0)
+	}
+	stats.Default().RecordIndexerSearch(c.name, success, elapsedMS, resultCount)
+}
 
 // DownloadNZB exists to satisfy the interface. These are torrent trackers, so
 // there is never an NZB to fetch.
@@ -64,8 +171,20 @@ func (c *Client) DownloadNZB(ctx context.Context, url string) ([]byte, error) {
 }
 
 // Search runs the query against the tracker and returns results in the same
-// shape a Torznab indexer would.
+// shape a Torznab indexer would, recording the same statistics event the
+// Torznab client records so both kinds of tracker appear in search history.
 func (c *Client) Search(req indexer.SearchRequest) (*indexer.SearchResponse, error) {
+	startedAt := time.Now()
+	resp, err := c.search(req)
+	resultCount := 0
+	if resp != nil {
+		resultCount = len(resp.Channel.Items)
+	}
+	c.recordSearch(err == nil, time.Since(startedAt).Milliseconds(), resultCount)
+	return resp, err
+}
+
+func (c *Client) search(req indexer.SearchRequest) (*indexer.SearchResponse, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 

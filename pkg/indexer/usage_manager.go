@@ -24,6 +24,29 @@ type UsageManager struct {
 var globalManager *UsageManager
 var managerMu sync.Mutex
 
+// NewUsageManager builds a usage manager over the given state, without
+// touching the process-wide instance.
+//
+// GetUsageManager returns a singleton, which is what the running application
+// wants and what makes the type awkward to exercise from anywhere else: a test
+// or a second component cannot get an isolated one. This constructor is that
+// missing piece. sm may be nil, in which case counters live only in memory —
+// useful in tests, and never silently lossy in production because the callers
+// that matter are handed the singleton.
+func NewUsageManager(sm *persistence.StateManager) (*UsageManager, error) {
+	m := &UsageManager{
+		state: sm,
+		data:  make(map[string]*UsageData),
+	}
+	if sm == nil {
+		return m, nil
+	}
+	if err := m.load(); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
 func GetUsageManager(sm *persistence.StateManager) (*UsageManager, error) {
 	managerMu.Lock()
 	defer managerMu.Unlock()
@@ -46,6 +69,9 @@ func GetUsageManager(sm *persistence.StateManager) (*UsageManager, error) {
 }
 
 func (m *UsageManager) load() error {
+	if m.state == nil {
+		return nil
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -75,6 +101,9 @@ func (m *UsageManager) load() error {
 }
 
 func (m *UsageManager) save() error {
+	if m.state == nil {
+		return nil // in-memory only; counters still work, they just do not persist
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.state.Set("indexer_usage", m.data)

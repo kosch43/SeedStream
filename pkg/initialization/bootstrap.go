@@ -20,6 +20,10 @@ type InitializedComponents struct {
 	Config      *config.Config
 	Indexer     indexer.Indexer
 	IndexerCaps map[string]*indexer.Caps
+	// UsageManager holds the per-tracker counters. Exposed so the playback
+	// path can count a grab against the tracker that supplied the release —
+	// the counters are useless if only the search path can reach them.
+	UsageManager *indexer.UsageManager
 }
 
 func WaitForInputAndExit(err error) {
@@ -91,8 +95,8 @@ func BuildComponents(cfg *config.Config) (*InitializedComponents, error) {
 		// Definition-driven trackers scrape the tracker's own site using a
 		// bundled definition, so they need no Torznab service in front of them.
 		if config.IsDefinitionIndexerType(idxCfg.Type) {
-			client, err := cardigann.NewClient(catalog, idxCfg.DefinitionID, idxCfg.Name,
-				idxCfg.URL, idxCfg.DefinitionSettings, idxCfg.EffectiveTimeout(), effectiveCfg)
+			client, err := cardigann.NewClientWithUsage(catalog, idxCfg.DefinitionID, idxCfg.Name,
+				idxCfg.URL, idxCfg.DefinitionSettings, idxCfg.EffectiveTimeout(), usageMgr, effectiveCfg)
 			if err != nil {
 				logger.Warn("Skipping tracker: definition unavailable",
 					"name", idxCfg.Name, "definition", idxCfg.DefinitionID, "err", err)
@@ -140,8 +144,9 @@ func BuildComponents(cfg *config.Config) (*InitializedComponents, error) {
 	}
 
 	return &InitializedComponents{
-		Config:      cfg,
-		Indexer:     aggregator,
-		IndexerCaps: indexerCaps,
+		Config:       cfg,
+		Indexer:      aggregator,
+		IndexerCaps:  indexerCaps,
+		UsageManager: usageMgr,
 	}, nil
 }

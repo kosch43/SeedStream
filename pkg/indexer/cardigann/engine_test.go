@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,11 +19,40 @@ import (
 
 // fakeTracker is a stand-in private tracker: it requires a form login carrying a
 // CSRF token, sets a session cookie, and serves a results table.
+// fakeTracker is shared by every test in this package, and its handlers run on
+// the httptest server's own goroutines — one per connection. A test that issues
+// concurrent searches therefore writes these fields from several goroutines at
+// once, so they are guarded rather than bare.
 type fakeTracker struct {
+	mu         sync.Mutex
 	loginHits  int
 	searchHits int
 	lastQuery  string
 	lastCats   []string
+}
+
+func (f *fakeTracker) logins() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.loginHits
+}
+
+func (f *fakeTracker) searches() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.searchHits
+}
+
+func (f *fakeTracker) query() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastQuery
+}
+
+func (f *fakeTracker) cats() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.lastCats...)
 }
 
 func (f *fakeTracker) server(t *testing.T) *httptest.Server {
@@ -38,7 +68,9 @@ func (f *fakeTracker) server(t *testing.T) *httptest.Server {
 				</form></body></html>`)
 			return
 		}
+		f.mu.Lock()
 		f.loginHits++
+		f.mu.Unlock()
 		_ = r.ParseForm()
 		if r.FormValue("username") != "alice" || r.FormValue("password") != "hunter2" {
 			fmt.Fprint(w, `<html><body><span class="error">Invalid credentials</span></body></html>`)
@@ -57,9 +89,11 @@ func (f *fakeTracker) server(t *testing.T) *httptest.Server {
 			http.Error(w, "not logged in", http.StatusForbidden)
 			return
 		}
+		f.mu.Lock()
 		f.searchHits++
 		f.lastQuery = r.URL.Query().Get("search")
 		f.lastCats = r.URL.Query()["cat[]"]
+		f.mu.Unlock()
 		fmt.Fprint(w, `<html><body><table class="torrents"><tbody>
 			<tr>
 				<td><a href="details.php?id=101">Some.Movie.2021.2160p.BluRay.REMUX-GRP</a></td>
@@ -168,14 +202,14 @@ func TestEngineLogsInAndScrapes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
-	if f.loginHits != 1 {
-		t.Fatalf("expected exactly one login, got %d", f.loginHits)
+	if f.logins() != 1 {
+		t.Fatalf("expected exactly one login, got %d", f.logins())
 	}
-	if f.lastQuery != "some movie" {
-		t.Fatalf("keywords not passed through: %q", f.lastQuery)
+	if f.query() != "some movie" {
+		t.Fatalf("keywords not passed through: %q", f.query())
 	}
-	if len(f.lastCats) != 1 || f.lastCats[0] != "1" {
-		t.Fatalf("categories not expanded into repeated params: %v", f.lastCats)
+	if cats := f.cats(); len(cats) != 1 || cats[0] != "1" {
+		t.Fatalf("categories not expanded into repeated params: %v", f.cats())
 	}
 	if len(results) != 2 {
 		t.Fatalf("expected 2 releases, got %d", len(results))
@@ -216,11 +250,11 @@ func TestEngineReusesSession(t *testing.T) {
 			t.Fatalf("search %d: %v", i, err)
 		}
 	}
-	if f.loginHits != 1 {
-		t.Fatalf("session not reused: %d logins for 3 searches", f.loginHits)
+	if f.logins() != 1 {
+		t.Fatalf("session not reused: %d logins for 3 searches", f.logins())
 	}
-	if f.searchHits != 3 {
-		t.Fatalf("expected 3 searches, got %d", f.searchHits)
+	if f.searches() != 3 {
+		t.Fatalf("expected 3 searches, got %d", f.searches())
 	}
 }
 

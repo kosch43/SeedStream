@@ -37,6 +37,7 @@ type Server struct {
 	torrentManager            *torrent.Manager
 	cerberusClient            *cerberus.Client
 	uploadMeter               *uploadguard.Meter
+	usageManager              *indexer.UsageManager
 	runtimeCache              sync.Map // content-id key -> int64 runtime seconds
 	playlistCache             sync.Map
 	rawSearchCache            sync.Map
@@ -62,6 +63,9 @@ type ServerOptions struct {
 	Version        string
 	CerberusClient *cerberus.Client
 	UploadMeter    *uploadguard.Meter
+	// UsageManager holds the per-tracker counters shown on the statistics page.
+	// nil disables the live counters; the persisted event log is unaffected.
+	UsageManager *indexer.UsageManager
 }
 
 func NewServer(opts *ServerOptions) (*Server, error) {
@@ -84,6 +88,7 @@ func NewServer(opts *ServerOptions) (*Server, error) {
 		tvdbClient:        opts.TVDBClient,
 		streamManager:     opts.StreamManager,
 		uploadMeter:       opts.UploadMeter,
+		usageManager:      opts.UsageManager,
 		uniqueIndexerHits: make(map[string]int64),
 	}
 	if opts.Config != nil {

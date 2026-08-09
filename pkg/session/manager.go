@@ -60,6 +60,12 @@ type Session struct {
 
 	bytesRead atomic.Int64
 
+	// downloadRecorded latches once this session's release has been counted as
+	// a grab against its tracker. A player reconnects and re-requests ranges
+	// constantly, and every one of those re-enters the play handler, so an
+	// unguarded counter would report dozens of grabs for a single torrent.
+	downloadRecorded atomic.Bool
+
 	// position reports where the viewer currently is, supplied by whatever is
 	// serving the bytes. Held as a function rather than a value so the dashboard
 	// reads a live figure instead of whatever was last pushed, and so this
@@ -91,6 +97,15 @@ func (s *Session) SetPositionSource(fn func() PlaybackPosition) {
 		return
 	}
 	s.position.Store(&fn)
+}
+
+// MarkDownloadRecorded reports whether this session's release still needs
+// counting as a grab, and claims it if so. True exactly once per session.
+func (s *Session) MarkDownloadRecorded() bool {
+	if s == nil {
+		return false
+	}
+	return s.downloadRecorded.CompareAndSwap(false, true)
 }
 
 // Position returns the live playback position, and false when nothing is

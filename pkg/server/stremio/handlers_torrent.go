@@ -141,6 +141,13 @@ func (s *Server) serveTorrent(w http.ResponseWriter, r *http.Request, sess *sess
 	}
 	defer s.torrentManager.ReleasePlayback(res)
 
+	// The torrent is now accepted by a download client, which is what taking a
+	// release from a tracker amounts to here. Counted once per session against
+	// the tracker that supplied it — until now nothing counted a grab at all,
+	// because the only code that did lives in the Usenet download path SeedStream
+	// never reaches for a torrent.
+	recordTrackerGrab(sess, playRelease, s.usageManager)
+
 	// Register the torrent with Cerberus so the watchdog can correlate stalled
 	// hashes back to their content IDs, and so a later viewing of this title can
 	// find the torrent again instead of downloading a fresh copy. Records the

@@ -208,6 +208,7 @@ func main() {
 		Version:        Version,
 		CerberusClient: cerberusClient,
 		UploadMeter:    uploadMeter,
+		UsageManager:   comp.UsageManager,
 	})
 	if err != nil {
 		initialization.WaitForInputAndExit(fmt.Errorf("failed to initialize Stremio server: %v", err))
