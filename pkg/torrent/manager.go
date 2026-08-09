@@ -685,6 +685,23 @@ type forceSetter interface {
 	SetForceStart(context.Context, string, bool) error
 }
 
+// sequentialAnchorer is a client that can move where sequential download starts
+// on a running torrent.
+//
+// Only Transmission 4.1 offers this. qBittorrent's sequential mode is pinned to
+// piece 0 with no way to move it, and its first/last-piece priority is what
+// pulls the head in instead. Transmission has no piece-priority lever at all,
+// so without this its sequential download orders requests from the torrent's
+// first piece and nothing pins the piece playback actually starts on.
+//
+// The distinction matters most on a multi-file torrent, where the video may
+// begin hundreds of pieces in: anchoring at the file's own first piece points
+// the download at the bytes the player needs first rather than at a sample or
+// a subtitle folder that happens to sort earlier.
+type sequentialAnchorer interface {
+	SequentialFromPiece(ctx context.Context, hash string, piece int) error
+}
+
 func acquireForceStartLease(ctx context.Context, key, hash string, setter forceSetter, restore bool) (func(), error) {
 	forceStartLeases.Lock()
 	lease := forceStartLeases.leases[key]
@@ -1174,6 +1191,8 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 	// reports the target that was actually in force.
 	needHead := bufferBytes
 	warnedRevised := false
+	anchoredHead := false
+	reAnchored := false
 	// Swarm health: a freshly added torrent needs a moment to find peers, so the
 	// live seeder count is only judged after a grace period, and only when the
 	// download has also failed to advance — a small but fast swarm is fine.
@@ -1251,6 +1270,25 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 				if avail == nil && f.Size > 0 {
 					avail = newFileAvailability(c, info.Hash, f.Index, f.Size)
 				}
+				// Point the download at the piece playback starts on, for a
+				// client that can be told. Done once, and only once the file
+				// list has arrived, because the video's first piece is not the
+				// torrent's first piece on a multi-file torrent.
+				if !anchoredHead && len(f.PieceRange) == 2 && f.PieceRange[0] >= 0 {
+					if anchor, ok := c.(sequentialAnchorer); ok {
+						anchoredHead = true
+						if err := anchor.SequentialFromPiece(ctx, info.Hash, f.PieceRange[0]); err != nil {
+							// Best-effort: an older daemon has no such lever, and
+							// saying so once is more useful than failing playback
+							// over an optimisation.
+							logger.Debug("could not anchor sequential download at the video's first piece",
+								"hash", shortHash(info.Hash), "piece", f.PieceRange[0], "err", err)
+						} else {
+							logger.Info("Playback: sequential download anchored at the video's first piece",
+								"hash", shortHash(info.Hash), "file", f.Index, "piece", f.PieceRange[0])
+						}
+					}
+				}
 				needHead = m.reviseHead(ctx, c, info.Hash, needHead,
 					requiredHeadBytes(bufferBytes, f.Size), profile, &warnedRevised)
 
@@ -1298,6 +1336,25 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 						// enough that ordering has had time to assert itself.
 						// That one is worth reporting.
 						fragmentedHead = true
+						// Re-anchor once. The opening anchor can be lost — it
+						// races the add, and a daemon still registering the
+						// torrent may accept the call and discard it — and a
+						// head that is still fragmented well into prepare is the
+						// evidence. Bounded to one retry: if a second anchor
+						// does not take either, the client is not honouring it
+						// and repeating the call every poll only adds traffic.
+						if !reAnchored && len(f.PieceRange) == 2 && f.PieceRange[0] >= 0 {
+							if anchor, ok := c.(sequentialAnchorer); ok {
+								reAnchored = true
+								if err := anchor.SequentialFromPiece(ctx, info.Hash, f.PieceRange[0]); err != nil {
+									logger.Debug("could not re-anchor sequential download",
+										"hash", shortHash(info.Hash), "err", err)
+								} else {
+									logger.Info("Playback: head still fragmented, re-anchoring the download at the video's first piece",
+										"hash", shortHash(info.Hash), "piece", f.PieceRange[0], "progress", f.Progress)
+								}
+							}
+						}
 						if !warnedFragmented {
 							warnedFragmented = true
 							logger.Info("Playback: enough of this file is downloaded, but not at the start — waiting for a continuous head instead of starting into holes",
