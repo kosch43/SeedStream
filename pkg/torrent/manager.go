@@ -1073,10 +1073,27 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 	hash := strings.ToLower(strings.TrimSpace(rel.InfoHash))
 
 	// Reuse an existing download if we can identify it by hash.
+	// A transient Get error (client unreachable) is not the same as a missing
+	// torrent and must not send us into the Add path — retrying gives the
+	// seedbox a chance to recover before we start a duplicate download.
 	var info *qbittorrent.TorrentInfo
 	if hash != "" {
-		if existing, err := c.Get(ctx, hash); err == nil && existing != nil {
-			info = existing
+		for attempt := 0; attempt < 3; attempt++ {
+			existing, err := c.Get(ctx, hash)
+			if err == nil && existing != nil {
+				info = existing
+				break
+			}
+			if err == nil {
+				break // nil info with no error means the torrent truly is not present
+			}
+			logger.Debug("torrent prepare: client unreachable during Get, retrying",
+				"hash", shortHash(hash), "attempt", attempt+1, "err", err)
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(500 * time.Millisecond):
+			}
 		}
 	}
 
@@ -1090,18 +1107,24 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 		// category instead would hand back whatever another concurrent request
 		// happened to add a moment earlier — a different title entirely.
 		before := m.categoryHashes(ctx, c)
-		if err := c.Add(ctx, qbittorrent.AddOptions{URL: addURL, Sequential: true}); err != nil {
+		// Use a detached context for the add so the torrent is not abandoned
+		// when the HTTP request ends before the seedbox responds. The add must
+		// survive the caller: a cancelled add leaves nothing for the next retry
+		// to find, so every attempt starts from zero.
+		addCtx, addCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer addCancel()
+		if err := c.Add(addCtx, qbittorrent.AddOptions{URL: addURL, Sequential: true}); err != nil {
 			return nil, fmt.Errorf("add torrent: %w", err)
 		}
 		var err error
-		info, err = m.resolveAdded(ctx, c, hash, before, rel.Title)
+		info, err = m.resolveAdded(addCtx, c, hash, before, rel.Title)
 		if err != nil {
 			return nil, err
 		}
 		// Stop the download client's global ratio and seed-time limits from ending
 		// this torrent's seeding on their own, which on a private tracker could cut a
 		// hit-and-run obligation short. Best-effort; never blocks playback.
-		if serr := c.SetShareLimits(ctx, info.Hash,
+		if serr := c.SetShareLimits(addCtx, info.Hash,
 			qbittorrent.NoShareLimit, qbittorrent.NoShareLimit, qbittorrent.NoShareLimit); serr != nil {
 			logger.Debug("could not pin share limits on the added torrent",
 				"hash", shortHash(info.Hash), "err", serr)
