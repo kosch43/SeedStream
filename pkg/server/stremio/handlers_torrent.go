@@ -146,6 +146,10 @@ func (s *Server) serveTorrent(w http.ResponseWriter, r *http.Request, sess *sess
 	// the tracker that supplied it — until now nothing counted a grab at all,
 	// because the only code that did lives in the Usenet download path SeedStream
 	// never reaches for a torrent.
+	//
+	// The latch matters more than it looks: a player reconnects and re-requests
+	// ranges throughout playback, and each of those re-enters this handler, so
+	// counting here unguarded reports dozens of grabs for one torrent.
 	recordTrackerGrab(sess, playRelease, s.usageManager)
 
 	// Register the torrent with Cerberus so the watchdog can correlate stalled

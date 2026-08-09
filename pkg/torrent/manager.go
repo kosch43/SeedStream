@@ -1253,6 +1253,24 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 				}
 				needHead = m.reviseHead(ctx, c, info.Hash, needHead,
 					requiredHeadBytes(bufferBytes, f.Size), profile, &warnedRevised)
+
+				// A fragmented head is a download whose data is arriving out
+				// of order. The download-speed shrink is only safe when data
+				// lands sequentially; once the head is known to be fractured,
+				// require a deeper runway scaled to the bitrate so playback
+				// does not stall seconds in.
+				if fragmentedHead {
+					floor := MinHeadBytes * 4
+					if profile.Valid() {
+						if bitrateFloor := int64(profile.BytesPerSecond() * 20); bitrateFloor > floor {
+							floor = bitrateFloor
+						}
+					}
+					if needHead < floor {
+						needHead = floor
+					}
+				}
+
 				headReady := false
 				if avail != nil {
 					headReady = avail.BytesAvailable(ctx, 0, needHead)
@@ -1265,7 +1283,7 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 					// for the file IS waiting for the head, and both arrive at the
 					// same moment. Saying otherwise sends an operator hunting for a
 					// fault in piece ordering that is not there.
-					fast, remain := nearingCompletion(ctx, c, info.Hash)
+					fast, remain := nearingCompletion(ctx, c, info.Hash, deadline)
 					fastFinish = fast
 					if fast {
 						fragmentedHead = false
@@ -1287,6 +1305,18 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 								"progress", f.Progress, "need_head_bytes", needHead,
 								"sequential", info.SequentialDL)
 						}
+					}
+				}
+				if fragmentedHead {
+					// The file has plenty of bytes but they are scattered —
+					// a small head check may pass while the runway beyond
+					// it is sparse. Starting on a minimum head that just
+					// happens to be contiguous leads to a stall seconds in:
+					// the player drains those and hits a hole. Wait for a
+					// deeper continuous run before beginning.
+					if floor := MinHeadBytes * 4; needHead < floor {
+						needHead = floor
+						headReady = false
 					}
 				}
 				if headReady {
@@ -1430,7 +1460,7 @@ func (m *Manager) reviseHead(ctx context.Context, c tclient.Client, hash string,
 // Deliberately conservative: an unreadable torrent, an unknown size, or a
 // download rate of zero all report false, so the ordinary path is what runs
 // whenever this cannot be established.
-func nearingCompletion(ctx context.Context, c tclient.Client, hash string) (bool, time.Duration) {
+func nearingCompletion(ctx context.Context, c tclient.Client, hash string, deadline time.Time) (bool, time.Duration) {
 	info, err := c.Get(ctx, hash)
 	if err != nil || info == nil || info.Size <= 0 || info.DlSpeed <= 0 {
 		return false, 0
@@ -1440,7 +1470,15 @@ func nearingCompletion(ctx context.Context, c tclient.Client, hash string) (bool
 		return true, 0
 	}
 	eta := time.Duration(float64(remaining) / float64(info.DlSpeed) * float64(time.Second))
-	return eta <= fastCompletionWindow, eta
+	if eta <= fastCompletionWindow {
+		return true, eta
+	}
+	if !deadline.IsZero() {
+		if budgetLeft := time.Until(deadline); budgetLeft > 0 && eta <= budgetLeft {
+			return true, eta
+		}
+	}
+	return false, eta
 }
 
 // categoryHashes returns the set of info hashes currently in this client's
@@ -1515,6 +1553,17 @@ func (m *Manager) resolveAdded(ctx context.Context, c tclient.Client, hash strin
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
+	// Polling exhausted. A fuzzy match across the whole category would resolve
+	// most of these, and must not be used: bestTitleMatch accepts a majority of
+	// words, and sibling episodes share every word but one, so it answers a
+	// request for S07E01 with S07E02 — the viewer gets the wrong episode and
+	// nothing anywhere reports a fault.
+	//
+	// The case that motivates a fallback here — the client naming a release
+	// differently from the indexer — is already handled by exactTitleMatch
+	// above, which compares the multiset of words and so survives reordering
+	// and alternate spellings without ever accepting a different episode.
+	// Failing here is the honest answer for what is left.
 	return nil, fmt.Errorf("could not identify the torrent added for %q", releaseTitle)
 }
 

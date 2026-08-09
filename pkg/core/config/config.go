@@ -400,9 +400,9 @@ func (c *Config) EffectiveHnRSafetyMarginPercent() int {
 }
 
 // DefaultMinSeeders is the seeder count required of a torrent when the operator
-// has not chosen one. Ten is enough of a swarm to sustain a download faster than
-// playback consumes it, which is what keeps a stream from stalling.
-const DefaultMinSeeders = 10
+// has not chosen one. Twenty gives enough peers that the probability of a fast
+// first-piece arrival is high even with out-of-order swarm delivery.
+const DefaultMinSeeders = 20
 
 // EffectiveMinSeeders returns the minimum seeder count to enforce. Unset means
 // DefaultMinSeeders; an explicit 0 (or a negative value) disables the check.

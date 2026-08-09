@@ -9,14 +9,13 @@ import (
 
 func minSeedersPtr(n int) *int { return &n }
 
-// TestDefaultMinSeedersIsTen pins the shipped default: an operator who has never
-// touched the setting still gets the protection.
-func TestDefaultMinSeedersIsTen(t *testing.T) {
-	if got := (&config.Config{}).EffectiveMinSeeders(); got != 10 {
-		t.Fatalf("default minimum seeders = %d, want 10", got)
+// TestDefaultMinSeedersIsTwenty pins the shipped default.
+func TestDefaultMinSeedersIsTwenty(t *testing.T) {
+	if got := (&config.Config{}).EffectiveMinSeeders(); got != 20 {
+		t.Fatalf("default minimum seeders = %d, want 20", got)
 	}
-	if got := (*config.Config)(nil).EffectiveMinSeeders(); got != 10 {
-		t.Fatalf("nil config minimum seeders = %d, want 10", got)
+	if got := (*config.Config)(nil).EffectiveMinSeeders(); got != 20 {
+		t.Fatalf("nil config minimum seeders = %d, want 20", got)
 	}
 }
 

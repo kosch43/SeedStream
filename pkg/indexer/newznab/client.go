@@ -483,18 +483,63 @@ func normalizeIMDbID(id string) string {
 	return strings.TrimPrefix(strings.TrimSpace(id), "tt")
 }
 
-func supportsMovieIDParam(caps *indexer.Caps, param string) bool {
-	if caps == nil || len(caps.Searching.MovieSearchSupportedParams) == 0 {
-		return param == "imdbid" || param == "tmdbid"
-	}
-	return caps.Searching.MovieSearchSupportedParams[param]
+func isStandardMovieIDParam(param string) bool {
+	return param == "imdbid" || param == "tmdbid"
 }
 
-func supportsTVIDParam(caps *indexer.Caps, param string) bool {
-	if caps == nil || len(caps.Searching.TVSearchSupportedParams) == 0 {
-		return param == "tvdbid" || param == "tmdbid" || param == "imdbid"
+func supportsMovieIDParam(caps *indexer.Caps, param string) bool {
+	if caps == nil {
+		return isStandardMovieIDParam(param)
 	}
-	return caps.Searching.TVSearchSupportedParams[param]
+	if caps.Searching.MovieSearchSupportedParams[param] {
+		return true
+	}
+	if declaresAnyIDParam(caps.Searching.MovieSearchSupportedParams, isStandardMovieIDParam) {
+		return false
+	}
+	return isStandardMovieIDParam(param)
+}
+
+func isStandardTVIDParam(param string) bool {
+	return param == "tvdbid" || param == "tmdbid" || param == "imdbid"
+}
+
+// declaresAnyIDParam reports whether a supportedParams list names at least one
+// ID parameter. A tracker that lists only season and ep has said nothing about
+// ID support either way; one that lists tvdbid has.
+func declaresAnyIDParam(params map[string]bool, standard func(string) bool) bool {
+	for name, ok := range params {
+		if ok && standard(name) {
+			return true
+		}
+	}
+	return false
+}
+
+// supportsTVIDParam decides whether an ID search may be sent to this tracker.
+//
+// Two failure modes pull in opposite directions. Trusting supportedParams
+// absolutely means a tracker that lists only "season, ep" — which many do —
+// never receives an ID search at all, and every series falls back to text
+// matching. Ignoring it entirely means sending an ID a tracker does not
+// understand, which it answers by ignoring the filter and returning the whole
+// category, so the caller believes it ran an ID search and got a clean result
+// when it did not.
+//
+// The distinction that resolves both: a list naming no ID parameter has said
+// nothing about ID support, so the standard ones are assumed. A list that does
+// name one has spoken, and is taken at its word.
+func supportsTVIDParam(caps *indexer.Caps, param string) bool {
+	if caps == nil {
+		return isStandardTVIDParam(param)
+	}
+	if caps.Searching.TVSearchSupportedParams[param] {
+		return true
+	}
+	if declaresAnyIDParam(caps.Searching.TVSearchSupportedParams, isStandardTVIDParam) {
+		return false // it listed IDs and did not list this one
+	}
+	return isStandardTVIDParam(param)
 }
 
 func selectMovieIDSearchParam(caps *indexer.Caps, req indexer.SearchRequest) (string, string) {

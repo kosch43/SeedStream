@@ -1055,3 +1055,62 @@ func TestSearchAggregatorIncludesCacheTimeParam(t *testing.T) {
 		t.Fatalf("raw query = %q, want %q", gotRawQuery, want)
 	}
 }
+
+// TestIDSearchWhenCapsListNoIDParams is the case that motivated always allowing
+// standard IDs: many trackers list only "season, ep" in supportedParams, which
+// says nothing about ID support. Refusing an ID search there forces every
+// series to text matching, which is markedly worse.
+func TestIDSearchWhenCapsListNoIDParams(t *testing.T) {
+	caps := &indexer.Caps{
+		Searching: indexer.CapsSearching{
+			TVSearch:                true,
+			TVSearchSupportedParams: map[string]bool{"season": true, "ep": true},
+		},
+	}
+	for _, param := range []string{"tvdbid", "imdbid", "tmdbid"} {
+		if !supportsTVIDParam(caps, param) {
+			t.Errorf("%s should be allowed: the tracker listed no ID params at all", param)
+		}
+	}
+}
+
+// TestCapsAreTakenAtTheirWordWhenTheySpeak is the other half. A tracker that
+// does name an ID parameter has stated its support, and sending one it omitted
+// gets the filter ignored and the whole category returned — which the caller
+// then mistakes for a clean ID-search result.
+func TestCapsAreTakenAtTheirWordWhenTheySpeak(t *testing.T) {
+	caps := &indexer.Caps{
+		Searching: indexer.CapsSearching{
+			TVSearch:                true,
+			TVSearchSupportedParams: map[string]bool{"tvdbid": true, "season": true, "ep": true},
+		},
+	}
+	if !supportsTVIDParam(caps, "tvdbid") {
+		t.Error("tvdbid was declared and must be allowed")
+	}
+	for _, param := range []string{"imdbid", "tmdbid"} {
+		if supportsTVIDParam(caps, param) {
+			t.Errorf("%s was not declared alongside tvdbid, so it must not be sent", param)
+		}
+	}
+}
+
+// TestMovieCapsFollowTheSameRule keeps the two paths from drifting apart.
+func TestMovieCapsFollowTheSameRule(t *testing.T) {
+	silent := &indexer.Caps{Searching: indexer.CapsSearching{MovieSearch: true}}
+	if !supportsMovieIDParam(silent, "imdbid") {
+		t.Error("caps naming no ID params must allow the standard ones")
+	}
+	spoken := &indexer.Caps{
+		Searching: indexer.CapsSearching{
+			MovieSearch:                true,
+			MovieSearchSupportedParams: map[string]bool{"imdbid": true},
+		},
+	}
+	if !supportsMovieIDParam(spoken, "imdbid") {
+		t.Error("imdbid was declared and must be allowed")
+	}
+	if supportsMovieIDParam(spoken, "tmdbid") {
+		t.Error("tmdbid was not declared alongside imdbid, so it must not be sent")
+	}
+}

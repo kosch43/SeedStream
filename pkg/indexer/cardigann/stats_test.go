@@ -37,7 +37,7 @@ func statsClient(t *testing.T, f *fakeTracker) *Client {
 	cat.mu.Unlock()
 
 	c, err := NewClient(cat, def.ID, "Fake Tracker", srv.URL,
-		map[string]string{"username": "alice", "password": "hunter2"}, 10*time.Second)
+		map[string]string{"username": "alice", "password": "hunter2"}, 10*time.Second, nil)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestFailedSearchStillCountsAsARequest(t *testing.T) {
 	cat.defs[def.ID] = def
 	cat.mu.Unlock()
 	c, err := NewClient(cat, def.ID, "Fake Tracker", srv.URL,
-		map[string]string{"username": "wrong", "password": "wrong"}, 10*time.Second)
+		map[string]string{"username": "wrong", "password": "wrong"}, 10*time.Second, nil)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -205,7 +205,7 @@ func TestGrabsRecordedElsewhereSurfaceHere(t *testing.T) {
 	cat.defs[def.ID] = def
 	cat.mu.Unlock()
 
-	c, err := NewClientWithUsage(cat, def.ID, "Fake Tracker", srv.URL,
+	c, err := NewClient(cat, def.ID, "Fake Tracker", srv.URL,
 		map[string]string{"username": "alice", "password": "hunter2"}, 10*time.Second, um)
 	if err != nil {
 		t.Fatalf("NewClientWithUsage: %v", err)
@@ -245,7 +245,7 @@ func TestSearchesPersistToTheUsageManager(t *testing.T) {
 	cat.mu.Unlock()
 	settings := map[string]string{"username": "alice", "password": "hunter2"}
 
-	c, err := NewClientWithUsage(cat, def.ID, "Fake Tracker", srv.URL, settings, 10*time.Second, um)
+	c, err := NewClient(cat, def.ID, "Fake Tracker", srv.URL, settings, 10*time.Second, um)
 	if err != nil {
 		t.Fatalf("NewClientWithUsage: %v", err)
 	}
@@ -254,7 +254,7 @@ func TestSearchesPersistToTheUsageManager(t *testing.T) {
 	}
 
 	// A fresh client over the same usage manager is what a restart looks like.
-	restarted, err := NewClientWithUsage(cat, def.ID, "Fake Tracker", srv.URL, settings, 10*time.Second, um)
+	restarted, err := NewClient(cat, def.ID, "Fake Tracker", srv.URL, settings, 10*time.Second, um)
 	if err != nil {
 		t.Fatalf("NewClientWithUsage: %v", err)
 	}

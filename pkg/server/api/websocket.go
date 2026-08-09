@@ -480,7 +480,7 @@ func pingIndexerWithTimeout(indexerCfg config.IndexerConfig) error {
 		if config.IsDefinitionIndexerType(indexerCfg.Type) {
 			catalog := initialization.TrackerCatalog(paths.GetDataDir())
 			client, err := cardigann.NewClient(catalog, indexerCfg.DefinitionID, indexerCfg.Name,
-				indexerCfg.URL, indexerCfg.DefinitionSettings, indexerCfg.EffectiveTimeout(), indexerCfg)
+				indexerCfg.URL, indexerCfg.DefinitionSettings, indexerCfg.EffectiveTimeout(), nil, indexerCfg)
 			if err != nil {
 				return err
 			}

@@ -41,14 +41,11 @@ type Client struct {
 }
 
 // NewClient builds an indexer client for a definition id from the catalog.
-func NewClient(cat *Catalog, definitionID, displayName, baseURLOverride string, settings map[string]string, timeout time.Duration, indexerConfigs ...config.IndexerConfig) (*Client, error) {
-	return NewClientWithUsage(cat, definitionID, displayName, baseURLOverride, settings, timeout, nil, indexerConfigs...)
-}
-
-// NewClientWithUsage is NewClient with a usage manager attached, so counters
-// survive a restart and all-time totals accumulate. Kept separate so existing
-// callers and tests that do not care about statistics are unaffected.
-func NewClientWithUsage(cat *Catalog, definitionID, displayName, baseURLOverride string, settings map[string]string, timeout time.Duration, um *indexer.UsageManager, indexerConfigs ...config.IndexerConfig) (*Client, error) {
+//
+// um persists the counters across restarts and holds the all-time totals; nil
+// keeps them in memory only, which is what tests want and what a caller with no
+// state manager gets.
+func NewClient(cat *Catalog, definitionID, displayName, baseURLOverride string, settings map[string]string, timeout time.Duration, um *indexer.UsageManager, indexerConfigs ...config.IndexerConfig) (*Client, error) {
 	def, ok := cat.Get(definitionID)
 	if !ok {
 		return nil, fmt.Errorf("tracker definition %q is not installed", definitionID)

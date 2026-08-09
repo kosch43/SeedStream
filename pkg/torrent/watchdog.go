@@ -36,6 +36,19 @@ type WatchdogConfig struct {
 	// CheckIntervalMinutes is how often the watchdog polls qBittorrent.
 	// Default 3 minutes.
 	CheckIntervalMinutes int
+	// ReplaceStalled allows the watchdog to add a healthier alternative when a
+	// torrent stalls at zero progress. It defaults to false: a download that
+	// cannot start is left alone rather than answered with a second copy of the
+	// same title.
+	//
+	// The replacement is never a swap — Replace adds alongside and deletes
+	// nothing, deliberately, because removing a torrent already announced to a
+	// private tracker risks a hit-and-run. That safety property is exactly what
+	// makes the behaviour expensive: every stall that resolves this way leaves
+	// another torrent on the seedbox for good, and if the replacement also
+	// stalls the next tick can add another. On a shared or quota-limited box
+	// that accumulates without bound, so it is opt-in.
+	ReplaceStalled bool
 }
 
 // Watchdog monitors active torrents for stalls and automatically replaces
@@ -47,6 +60,10 @@ type Watchdog struct {
 	cfg      *config.Config
 	meter    *uploadguard.Meter // monthly upload meter; nil disables metering
 	checking atomic.Bool        // guards against concurrent check runs
+	// replaceStalled mirrors WatchdogConfig.ReplaceStalled. Written once in
+	// Start before the ticker loop begins, so later reads from a check are
+	// ordered after it.
+	replaceStalled bool
 	// headWarned records which torrents have already been reported for a
 	// missing head piece, so a torrent whose picker ignores the ordering flags
 	// warns once instead of on every tick.
@@ -113,6 +130,7 @@ func (w *Watchdog) Start(ctx context.Context, cfg WatchdogConfig) {
 	if threshold <= 0 {
 		threshold = time.Duration(defaultStallThresholdMinutes) * time.Minute
 	}
+	w.replaceStalled = cfg.ReplaceStalled
 
 	// Prune stale registry entries once at startup to keep the DB bounded.
 	// 90 days is conservative: private-tracker H&R windows rarely exceed 30 days.
@@ -689,6 +707,16 @@ func (w *Watchdog) handleStalled(ctx context.Context, stalled TorrentHealthEntry
 	// failure, then find and swap in a better torrent.
 	if err := w.cerberus.ReportFailure(stalled.Hash, "stalled: "+stalled.State); err != nil {
 		logger.Warn("Cerberus watchdog: failed to report failure", "hash", stalled.Hash, "err", err)
+	}
+
+	// Report and stop unless replacement was explicitly asked for. The failure
+	// above is still recorded, so the dead swarm is blocklisted and will not be
+	// chosen again; what is skipped is starting a second download of the same
+	// title. A stream that cannot start is left as a failed stream.
+	if !w.replaceStalled {
+		logger.Info("Cerberus watchdog: zero-progress stall left alone (replacement disabled)",
+			"hash", stalled.Hash, "name", stalled.Name, "state", stalled.State)
+		return
 	}
 
 	ids := cerberus.ContentIDs{
