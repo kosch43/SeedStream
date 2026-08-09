@@ -375,3 +375,21 @@ func shortHash(h string) string {
 	}
 	return h
 }
+
+// PieceForByte returns the torrent piece index covering the given file byte
+// offset, and whether it can be determined. Returns false when piece-level
+// tracking is not yet initialised or not supported by the download client.
+func (a *fileAvailability) PieceForByte(ctx context.Context, byteOffset int64) (int, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.initLocked(ctx)
+	if !a.pieceMode || a.pieceSize <= 0 {
+		return 0, false
+	}
+	piece := a.firstPiece + int(byteOffset/a.pieceSize)
+	if piece > a.lastPiece {
+		piece = a.lastPiece
+	}
+	return piece, true
+}

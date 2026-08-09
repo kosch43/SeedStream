@@ -499,6 +499,10 @@ func (c *Client) EnsureStreamingOrder(ctx context.Context, info *TorrentInfo) er
 	return nil
 }
 
+// SteerToPiece is a no-op on qBittorrent — its sequential mode is always pinned
+// to piece 0 and the WebUI API exposes no method to move it.
+func (c *Client) SteerToPiece(_ context.Context, _ string, _ int) error { return nil }
+
 // Resume starts a paused/stopped torrent. qBittorrent 5.0 renamed the endpoint
 // from /torrents/resume to /torrents/start, so try the new name first and fall
 // back to the old one when the server predates the rename.

@@ -395,12 +395,16 @@ func (w *Watchdog) verifyStreamingOrder(ctx context.Context, entries []TorrentHe
 					"file", head.FileName, "file_index", head.FileIndex,
 					"first_piece", head.FirstPiece, "first_piece_state", head.FirstPieceState,
 					"later_file_pieces_downloaded", head.DownloadedPiecesAfter)
-				// qBittorrent exposes no arbitrary per-piece priority setter. The
-				// safe recovery levers are to verify the streaming flags again and
-				// reannounce, which can find a peer that has the missing head.
+				// Reassert streaming flags, re-anchor sequential download to the
+				// missing head piece (Transmission 4.1+), and reannounce to find
+				// a peer that carries the data.
 				if err := w.manager.EnsureStreamingOrder(ctx, e.ClientName, e.Hash); err != nil {
 					logger.Debug("Cerberus watchdog: could not reassert streaming order for missing head",
 						"hash", e.Hash, "client", e.ClientName, "err", err)
+				}
+				if err := w.manager.SteerPiece(ctx, e.ClientName, e.Hash, head.FirstPiece); err != nil {
+					logger.Debug("Cerberus watchdog: could not re-anchor sequential download to the missing head piece",
+						"hash", e.Hash, "client", e.ClientName, "piece", head.FirstPiece, "err", err)
 				}
 				if err := w.manager.Reannounce(ctx, e.ClientName, e.Hash); err != nil {
 					logger.Debug("Cerberus watchdog: could not reannounce torrent with missing head",

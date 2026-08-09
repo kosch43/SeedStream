@@ -26,11 +26,15 @@ var seekWaitTimeout = 5 * time.Minute
 // the bytes at the current position are actually on disk, blocking until they
 // are or until seekWaitTimeout elapses.
 //
-// With piece-level data from qBittorrent the check is exact: a forward seek
-// into a region no peer has delivered yet stalls until the pieces arrive,
+// With piece-level data from the download client the check is exact: a forward
+// seek into a region no peer has delivered yet stalls until the pieces arrive,
 // instead of serving zeros from an unwritten region. The checker also caches
-// its answers, so steady-state playback costs at most one qBittorrent round
-// trip per cache window rather than one per 32 KiB read.
+// its answers, so steady-state playback costs at most one client round trip per
+// cache window rather than one per 32 KiB read.
+//
+// On a seek, steerFunc (when set) is called with the new byte offset so the
+// download client can re-anchor its sequential download at the viewer's new
+// position, keeping the data the player needs ahead of the download order.
 type SeekableFileReader struct {
 	f        *os.File
 	avail    *fileAvailability
@@ -46,6 +50,9 @@ type SeekableFileReader struct {
 	// warnedRunway suppresses repeat warnings for one continuous shortfall, so
 	// a genuinely slow swarm produces one line rather than one per read.
 	warnedRunway bool
+	// steerFunc is called on seeks so the download can follow the viewer's
+	// position. The function receives the new byte offset.
+	steerFunc func(context.Context, int64)
 }
 
 // runwayInterval is how often the contiguous run ahead of the playhead is
@@ -145,8 +152,8 @@ func (r *SeekableFileReader) trackRunway() {
 // Read waits until the bytes at the current position are downloaded, then
 // delegates to the underlying file.
 //
-// A short file on disk is never reported as EOF. qBittorrent writes pieces as
-// they arrive, so until the final piece lands the file is physically smaller
+// A short file on disk is never reported as EOF. Download clients write pieces
+// as they arrive, so until the final piece lands the file is physically smaller
 // than the torrent says it will be. A read past that point returns io.EOF from
 // the OS even though the bytes are still coming, and http.ServeContent has
 // already promised the full length in Content-Length — so returning EOF ends the
@@ -237,6 +244,9 @@ func (r *SeekableFileReader) Seek(offset int64, whence int) (int64, error) {
 		// The runway ahead of the old position says nothing about the new one.
 		r.lastRunwayAt = time.Time{}
 		r.warnedRunway = false
+	}
+	if err == nil && r.steerFunc != nil {
+		r.steerFunc(r.readContext(), newPos)
 	}
 	return newPos, err
 }
