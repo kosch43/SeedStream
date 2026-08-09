@@ -6,7 +6,7 @@ import { Label } from "@/components/ui/label"
 import { Switch } from "@/components/ui/switch"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { ConfirmDialog } from "@/components/ConfirmDialog"
-import { HardDrive, Plus, Settings, Trash2 } from "lucide-react"
+import { HardDrive, Plus, Power, PowerOff, Settings, Trash2 } from "lucide-react"
 
 const CACHE_CLEARED_SUFFIX = ' Search cache cleared.'
 
@@ -229,6 +229,13 @@ export function TorrentClientSettings({ fields, replace, onPersist, onStatus, on
     persist(next)
   }
 
+  const handleToggle = (index) => {
+    const next = clients.map(stripRHF)
+    next[index].enabled = !next[index].enabled
+    replace(next)
+    persist(next)
+  }
+
   const existingNames = clients.map((c) => c.name).filter(Boolean)
 
   return (
@@ -272,6 +279,12 @@ export function TorrentClientSettings({ fields, replace, onPersist, onStatus, on
                 </div>
               </div>
               <div className="flex items-center gap-1 shrink-0">
+                <Button type="button" variant="ghost" size="icon" className="h-8 w-8"
+                  onClick={() => handleToggle(index)}
+                  aria-label={client.enabled !== false ? 'Disable client' : 'Enable client'}
+                  title={client.enabled !== false ? 'Disable client' : 'Enable client'}>
+                  {client.enabled !== false ? <Power className="h-4 w-4" /> : <PowerOff className="h-4 w-4 text-muted-foreground" />}
+                </Button>
                 <Button type="button" variant="ghost" size="icon" className="h-8 w-8"
                   onClick={() => setEditIndex(index)} aria-label="Edit">
                   <Settings className="h-4 w-4" />
