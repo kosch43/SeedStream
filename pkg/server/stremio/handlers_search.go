@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode"
 
 	"seedstream/pkg/auth"
@@ -849,7 +850,18 @@ func searchLimitForLog(limit int) any {
 }
 
 func (s *Server) runConfiguredSearchRequests(contentType, id, streamLabel string, stream *auth.Stream, selectedQueries []string, params *SearchParams) ([]*release.Release, int, error) {
-	indexerReleases := make([]*release.Release, 0)
+	combineMode := streamCombinesResults(stream)
+
+	// Phase 1 (sequential, cheap): prepare every search job with the same
+	// validation, skip checks and logging as before, without touching the
+	// indexers yet. Each query gets its own clone of the base params so
+	// parallel execution cannot race on shared label fields.
+	type searchJob struct {
+		idx          indexer.Indexer
+		reqVariant   indexer.SearchRequest
+		contentType  string
+	}
+	jobs := make([]searchJob, 0, len(selectedQueries))
 	executedRequests := 0
 	for _, name := range selectedQueries {
 		searchQuery := s.config.GetSearchQueryByName(contentType, name)
@@ -857,9 +869,10 @@ func (s *Server) runConfiguredSearchRequests(contentType, id, streamLabel string
 			logger.Debug("Stream search query missing", "stream", streamLabel, "content_type", contentType, "id", id, "query", name)
 			continue
 		}
-		params.Req.StreamLabel = streamLabel
-		params.Req.RequestLabel = searchQuery.Name
-		profileParams, profileErr := s.buildSearchParamsFromBase(params, searchQuery)
+		queryBase := cloneSearchParams(params)
+		queryBase.Req.StreamLabel = streamLabel
+		queryBase.Req.RequestLabel = searchQuery.Name
+		profileParams, profileErr := s.buildSearchParamsFromBase(queryBase, searchQuery)
 		if profileErr != nil {
 			return nil, executedRequests, profileErr
 		}
@@ -958,7 +971,6 @@ func (s *Server) runConfiguredSearchRequests(contentType, id, streamLabel string
 		if searchMode == "id" || len(queryVariants) == 0 {
 			queryVariants = []string{profileParams.Req.Query}
 		}
-		requestReleases := make([]*release.Release, 0)
 		for _, queryVariant := range queryVariants {
 			reqVariant := profileParams.Req
 			reqVariant.Limit = effectiveLimit
@@ -966,32 +978,73 @@ func (s *Server) runConfiguredSearchRequests(contentType, id, streamLabel string
 				reqVariant.Query = queryVariant
 			}
 			executedRequests++
-			idxrForSearch := s.streamIndexer(stream, &reqVariant)
-			releases, runErr := search.RunIndexerSearches(idxrForSearch, reqVariant, contentType)
+			jobs = append(jobs, searchJob{
+				idx:         s.streamIndexer(stream, &reqVariant),
+				reqVariant:  reqVariant,
+				contentType: contentType,
+			})
+		}
+	}
+	if len(jobs) == 0 {
+		return nil, executedRequests, nil
+	}
+
+	if !combineMode {
+		// First-hit mode: run sequentially and return the first request that
+		// produces releases, exactly as before.
+		requestReleases := make([]*release.Release, 0)
+		for _, job := range jobs {
+			releases, runErr := search.RunIndexerSearches(job.idx, job.reqVariant, job.contentType)
 			if runErr != nil {
 				return nil, executedRequests, runErr
 			}
 			if len(releases) > 0 {
 				requestReleases = append(requestReleases, releases...)
-			}
-			if streamCombinesResults(stream) {
-				indexerReleases = append(indexerReleases, releases...)
-				continue
-			}
-			if len(releases) > 0 {
 				if idxName, ok := singleIndexerFromReleases(requestReleases); ok {
 					s.addUniqueIndexerHits(map[string]int{idxName: 1})
 				}
 				return releases, executedRequests, nil
 			}
 		}
+		return nil, executedRequests, nil
+	}
+
+	// Combine mode: run all prepared requests concurrently so the first
+	// search no longer waits for each request in turn. Results are collected
+	// in request order so slot ordering is unchanged.
+	indexerReleases := make([]*release.Release, 0, len(jobs))
+	results := make([][]*release.Release, len(jobs))
+	var wg sync.WaitGroup
+	var firstErrMu sync.Mutex
+	var firstErr error
+	for i := range jobs {
+		wg.Add(1)
+		go func(i int, job searchJob) {
+			defer wg.Done()
+			releases, runErr := search.RunIndexerSearches(job.idx, job.reqVariant, job.contentType)
+			if runErr != nil {
+				firstErrMu.Lock()
+				if firstErr == nil {
+					firstErr = runErr
+				}
+				firstErrMu.Unlock()
+				return
+			}
+			results[i] = releases
+		}(i, jobs[i])
+	}
+	wg.Wait()
+	if firstErr != nil {
+		return nil, executedRequests, firstErr
+	}
+	for _, rels := range results {
+		indexerReleases = append(indexerReleases, rels...)
 	}
 	if idxName, ok := singleIndexerFromReleases(indexerReleases); ok {
 		s.addUniqueIndexerHits(map[string]int{idxName: 1})
 	}
 	return indexerReleases, executedRequests, nil
 }
-
 func (s *Server) streamIndexer(_ *auth.Stream, _ *indexer.SearchRequest) indexer.Indexer {
 	return s.indexer
 }

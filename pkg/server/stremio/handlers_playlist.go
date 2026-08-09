@@ -147,6 +147,15 @@ func (s *Server) buildPlaylistUncached(ctx context.Context, key StreamSlotKey, i
 	return s.buildPlaylistFromRaw(raw, isAIOStreams, stream)
 }
 
+// rawSearchFlight tracks one in-flight cold search build so concurrent
+// callers (e.g. the player firing two slot requests at once) share a single
+// indexer search instead of duplicating it.
+type rawSearchFlight struct {
+	done chan struct{}
+	raw  *rawSearchResult
+	err  error
+}
+
 func (s *Server) getOrBuildRawSearchResult(ctx context.Context, contentType, id string, stream *auth.Stream) (*rawSearchResult, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -163,17 +172,48 @@ func (s *Server) getOrBuildRawSearchResult(ctx context.Context, contentType, id 
 		}
 	}
 	logger.Debug("Playback candidate cache miss", "key", rawKey)
-	raw, err := s.buildRawSearchResult(ctx, contentType, id, stream)
-	if err != nil || raw == nil {
-		return nil, err
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	s.rawSearchCache.Store(rawKey, &rawSearchCacheEntry{raw: raw, until: time.Now().Add(playlistCacheTTL)})
-	return cloneRawSearchResult(raw), nil
-}
 
+	// Single-flight: one cold search per key. The build runs on a detached
+	// context so a client disconnect does not abort a search that other
+	// callers (or the next refresh) are waiting on, and the result is cached
+	// for the 10-minute TTL exactly like the previous caller-bound build.
+	if v, ok := s.rawSearchInflight.Load(rawKey); ok {
+		flight := v.(*rawSearchFlight)
+		select {
+		case <-flight.done:
+			return cloneRawSearchResult(flight.raw), flight.err
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	flight := &rawSearchFlight{done: make(chan struct{})}
+	if actual, loaded := s.rawSearchInflight.LoadOrStore(rawKey, flight); loaded {
+		flight = actual.(*rawSearchFlight)
+		select {
+		case <-flight.done:
+			return cloneRawSearchResult(flight.raw), flight.err
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	go func() {
+		defer s.rawSearchInflight.Delete(rawKey)
+		defer close(flight.done)
+		buildCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+		raw, err := s.buildRawSearchResult(buildCtx, contentType, id, stream)
+		flight.raw, flight.err = raw, err
+		if err == nil && raw != nil && buildCtx.Err() == nil {
+			s.rawSearchCache.Store(rawKey, &rawSearchCacheEntry{raw: raw, until: time.Now().Add(playlistCacheTTL)})
+		}
+	}()
+	select {
+	case <-flight.done:
+		return cloneRawSearchResult(flight.raw), flight.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
 func (s *Server) GetSearchReleases(ctx context.Context, contentType, id string) (*SearchReleasesResponse, error) {
 	fallbackStream := &auth.Stream{Username: defaultStreamID}
 	if contentType == "movie" {

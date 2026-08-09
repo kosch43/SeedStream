@@ -376,7 +376,7 @@ func TestNewClientUsesEffectiveTimeout(t *testing.T) {
 		{
 			name: "default aggregator timeout",
 			cfg:  config.IndexerConfig{Name: "Aggregator", Type: "aggregator"},
-			want: 10 * time.Second,
+			want: config.DefaultAggregatorIndexerTimeoutSeconds * time.Second,
 		},
 		{
 			name: "explicit override",

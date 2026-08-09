@@ -27,7 +27,7 @@ const (
 	defaultAdminPassword                   = "admin"
 	bootstrapAdminPasswordFile             = "bootstrap-admin-password"
 	DefaultInternalIndexerTimeoutSeconds   = 5
-	DefaultAggregatorIndexerTimeoutSeconds = 10
+	DefaultAggregatorIndexerTimeoutSeconds = 6
 	DefaultPlaybackStartupTimeoutSeconds   = 5
 	MaxPlaybackStartupTimeoutSeconds       = 60
 	DefaultTorrentBufferBytes              = 16 * 1024 * 1024

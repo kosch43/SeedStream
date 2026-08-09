@@ -41,6 +41,7 @@ type Server struct {
 	runtimeCache              sync.Map // content-id key -> int64 runtime seconds
 	playlistCache             sync.Map
 	rawSearchCache            sync.Map
+	rawSearchInflight         sync.Map
 	recordedSuccessSessionIDs sync.Map // session ID -> struct{}; record actual playback success only once per stream
 	nextReleaseIndex          sync.Map // key: streamToken|key.CacheKey() → *nextReleaseCursor; tracks manual "next" progression
 	webHandler                http.Handler
