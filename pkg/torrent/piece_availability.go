@@ -39,10 +39,11 @@ const negativeRecheckInterval = 200 * time.Millisecond
 // a sparse hole succeeds and yields zeros. Such a server can only serve a file
 // once it is complete.
 type fileAvailability struct {
-	client    tclient.Client
-	hash      string
-	fileIndex int
-	fileSize  int64
+	client     tclient.Client
+	hash       string
+	fileIndex  int
+	fileSize   int64
+	fileOffset int64 // byte offset of this file within the torrent
 
 	mu       sync.Mutex
 	initDone bool
@@ -92,10 +93,14 @@ func (a *fileAvailability) initLocked(ctx context.Context) {
 		return
 	}
 	var pieceRange []int
+	var fileOffset int64
 	for _, f := range files {
 		if f.Index == a.fileIndex {
 			pieceRange = f.PieceRange
 			break
+		}
+		if f.Index < a.fileIndex {
+			fileOffset += f.Size
 		}
 	}
 	if len(pieceRange) < 2 || pieceRange[0] < 0 || pieceRange[1] < pieceRange[0] {
@@ -112,6 +117,7 @@ func (a *fileAvailability) initLocked(ctx context.Context) {
 	a.pieceSize = props.PieceSize
 	a.firstPiece = pieceRange[0]
 	a.lastPiece = pieceRange[1]
+	a.fileOffset = fileOffset
 	a.pieceMode = true
 	// A piece-aligned file spans exactly ceil(fileSize/pieceSize) pieces. If it
 	// spans one more, its first byte sits mid-piece, so mapping is ambiguous by
@@ -387,7 +393,13 @@ func (a *fileAvailability) PieceForByte(ctx context.Context, byteOffset int64) (
 	if !a.pieceMode || a.pieceSize <= 0 {
 		return 0, false
 	}
-	piece := a.firstPiece + int(byteOffset/a.pieceSize)
+	if byteOffset < 0 {
+		byteOffset = 0
+	}
+	piece := int((a.fileOffset + byteOffset) / a.pieceSize)
+	if piece < a.firstPiece {
+		piece = a.firstPiece
+	}
 	if piece > a.lastPiece {
 		piece = a.lastPiece
 	}

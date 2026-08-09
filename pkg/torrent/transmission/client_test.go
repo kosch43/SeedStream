@@ -284,6 +284,27 @@ func TestListCategoryReadsSequentialState(t *testing.T) {
 	}
 }
 
+func TestEnsureStreamingOrderAnchorsAtTheFront(t *testing.T) {
+	d := &mockDaemon{torrent: baseTorrent()}
+	c := d.client(t)
+
+	info, err := c.Get(context.Background(), testHash)
+	if err != nil || info == nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if err := c.EnsureStreamingOrder(context.Background(), info); err != nil {
+		t.Fatalf("EnsureStreamingOrder: %v", err)
+	}
+
+	args := d.argsFor("torrent-set")
+	if got := args["sequential_download"]; got != true {
+		t.Fatalf("sequential_download = %v, want true", got)
+	}
+	if got := args["sequential_download_from_piece"]; got != float64(0) {
+		t.Fatalf("sequential_download_from_piece = %v, want 0", got)
+	}
+}
+
 // TestSwarmSeedersComeFromTheTracker: the seeder floor is judged on the swarm
 // size, not the connection count. Transmission reports it per tracker, and this
 // must reach TorrentInfo where SeedStream's own checks read it.
