@@ -678,8 +678,9 @@ func (c *Client) EnsureStreamingOrder(ctx context.Context, info *tclient.Torrent
 		return nil
 	}
 	err := c.call(ctx, "torrent-set", map[string]any{
-		"ids":                 []string{strings.ToLower(info.Hash)},
-		"sequential_download": true,
+		"ids":                            []string{strings.ToLower(info.Hash)},
+		"sequential_download":            true,
+		"sequential_download_from_piece": 0,
 	}, nil)
 	if err != nil {
 		if isUnknownArgument(err) {

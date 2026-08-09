@@ -370,6 +370,18 @@ func (m *Manager) EnsureStreamingOrder(ctx context.Context, clientName, hash str
 	return c.EnsureStreamingOrder(ctx, info)
 }
 
+// SteerPiece re-anchors sequential download on the named client's torrent to the
+// given piece, so the download fills from wherever the viewer or watchdog needs
+// it rather than walking there from piece 0. Transmission 4.1+ supports this;
+// qBittorrent is a no-op.
+func (m *Manager) SteerPiece(ctx context.Context, clientName, hash string, piece int) error {
+	c := m.clientByName(clientName)
+	if c == nil {
+		return fmt.Errorf("torrent client %q not found", clientName)
+	}
+	return c.SteerToPiece(ctx, hash, piece)
+}
+
 // PieceStates returns the per-piece download state of a torrent on the named
 // client. This is the only API view of WHERE downloaded bytes are, so it is
 // how the watchdog verifies that streaming order is not just enabled but
