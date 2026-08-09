@@ -52,11 +52,6 @@ const StreamableHeadFraction = 0.10
 // an unnecessarily deep runway when almost the entire file is already present.
 const nearlyCompleteProgress = 0.99
 
-// minRunwaySeconds is how many seconds of contiguous video must sit beyond the
-// head before playback is declared ready. A player that starts with less will
-// drain the buffer moments after the first frame, stall, and reconnect.
-const minRunwaySeconds = 10
-
 // requiredHeadBytes is how much continuous data must sit at the front of the
 // file before playback starts: the requested buffer, normally capped at a
 // tenth of the file, and never more than the file itself. For small files the
@@ -1418,23 +1413,6 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 					if floor := MinHeadBytes * 4; needHead < floor {
 						needHead = floor
 						headReady = false
-					}
-				}
-				if headReady {
-					// The head is ready, but the contiguous data beyond it may
-					// be too thin for a player to start. A player needs several
-					// seconds of runway before it will display video rather than
-					// a spinner; starting with a single-frame buffer earns an
-					// immediate stall and a reconnect loop.
-					if avail != nil && profile.Valid() {
-						end := avail.ContiguousEnd(ctx, 0)
-						runwayBytes := end - needHead
-						if runwayBytes < 0 {
-							runwayBytes = 0
-						}
-						if float64(runwayBytes) < minRunwaySeconds*profile.BytesPerSecond() {
-							headReady = false
-						}
 					}
 				}
 				if headReady {
