@@ -180,6 +180,14 @@ type Client interface {
 	// that arrived by another route ever gets them.
 	EnsureStreamingOrder(ctx context.Context, info *TorrentInfo) error
 
+	// SteerToPiece re-anchors sequential download at a given torrent piece so
+	// the download follows the viewer's position. qBittorrent's sequential mode
+	// is always pinned to piece 0, so its implementation is a no-op.
+	// Transmission supports re-anchoring to an arbitrary piece (4.1+); older
+	// daemons return the unknown-argument error, which the caller treats as
+	// best-effort.
+	SteerToPiece(ctx context.Context, hash string, piece int) error
+
 	// Resume starts a paused or stopped torrent.
 	Resume(ctx context.Context, hash string) error
 	// Pause stops a torrent without deleting it or its downloaded data.

@@ -1,10 +1,10 @@
 // Package transmission is a client for the Transmission RPC API.
 //
-// It exists alongside the qBittorrent client because Transmission 4.1 can do
-// one thing qBittorrent cannot: sequential download can be re-anchored to an
-// arbitrary piece on a running torrent, which is what steering the download to
-// a viewer's seek position requires. qBittorrent's sequential mode is always
-// pinned to piece 0 and its WebUI API exposes no way to move it.
+// Transmission 4.1 can do one thing qBittorrent cannot: sequential download can
+// be re-anchored to an arbitrary piece on a running torrent, which is what
+// steering the download to a viewer's seek position requires. qBittorrent's
+// sequential mode is always pinned to piece 0 and its WebUI API exposes no way
+// to move it.
 //
 // # Protocol choice
 //
@@ -693,8 +693,7 @@ func (c *Client) EnsureStreamingOrder(ctx context.Context, info *tclient.Torrent
 
 // SequentialFromPiece re-anchors sequential download at a given piece.
 //
-// This has no qBittorrent equivalent, and it is the reason this package exists:
-// a viewer seeking forward lands in a region the download has not reached, and
+// A viewer seeking forward lands in a region the download has not reached, and
 // sequential order from piece 0 will walk there in its own time. Moving the
 // anchor points the download at where the viewer actually is.
 //
@@ -709,6 +708,14 @@ func (c *Client) SequentialFromPiece(ctx context.Context, hash string, piece int
 		"sequential_download":            true,
 		"sequential_download_from_piece": piece,
 	}, nil)
+}
+
+// SteerToPiece delegates to SequentialFromPiece to satisfy the shared client
+// interface. The unknown-argument error from a pre-4.1 daemon is swallowed here
+// — the caller already knows streaming order is unsupported from that daemon's
+// metadata and treats this as best-effort.
+func (c *Client) SteerToPiece(ctx context.Context, hash string, piece int) error {
+	return c.SequentialFromPiece(ctx, hash, piece)
 }
 
 // Resume starts a paused or stopped torrent.

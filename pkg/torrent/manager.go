@@ -1,7 +1,7 @@
-// Package torrent wires torrent releases to a seedbox qBittorrent for playback.
+// Package torrent wires torrent releases to a seedbox download client for playback.
 //
 // SeedStream does not download or seed torrents itself. When a torrent release
-// is played it is handed to a configured qBittorrent (running on a seedbox),
+// is played it is handed to a configured download client (running on a seedbox),
 // which downloads sequentially so the head of the file is ready quickly and
 // then keeps seeding indefinitely for private-tracker ratio. SeedStream reads
 // the finished/partial file from the client's save path and serves it with HTTP
@@ -926,14 +926,28 @@ func (m *Manager) OpenForPlayback(ctx context.Context, res *PrepareResult, ph *P
 		return nil, err
 	}
 	var avail *fileAvailability
-	if c := m.clientByName(res.ClientName); res.Progress < 1 && res.Hash != "" && c != nil {
-		avail = newFileAvailability(c, res.Hash, res.FileIndex, res.Size)
+	steerClient := m.clientByName(res.ClientName)
+	if steerClient != nil && res.Progress < 1 && res.Hash != "" {
+		avail = newFileAvailability(steerClient, res.Hash, res.FileIndex, res.Size)
 	} else {
 		// Complete, or no client to ask: every byte is on disk, or nothing can
 		// be proven about which are. Either way there is nothing to wait for.
 		avail = completedAvailability(res.Size)
 	}
-	return newSeekableFileReaderWithContext(ctx, f, avail, res.Size, ph), nil
+	reader := newSeekableFileReaderWithContext(ctx, f, avail, res.Size, ph)
+	if steerClient != nil && avail != nil && res.Progress < 1 && res.Hash != "" {
+		reader.steerFunc = func(steerCtx context.Context, byteOffset int64) {
+			piece, ok := avail.PieceForByte(steerCtx, byteOffset)
+			if !ok {
+				return
+			}
+			if err := steerClient.SteerToPiece(steerCtx, res.Hash, piece); err != nil {
+				logger.Debug("steer to piece: could not re-anchor download",
+					"hash", shortHash(res.Hash), "piece", piece, "byte_offset", byteOffset, "err", err)
+			}
+		}
+	}
+	return reader, nil
 }
 
 // PrepareResult describes a torrent file ready (or buffering) for playback.
@@ -945,7 +959,7 @@ type PrepareResult struct {
 	Size       int64
 	Hash       string  // torrent infohash for progress polling
 	FileIndex  int     // file index within the torrent
-	ClientName string  // name of the qBittorrent client that holds this torrent
+	ClientName string  // name of the download client that holds this torrent
 	Progress   float64 // download progress at prepare time (0..1)
 
 	releaseSelection func()
@@ -962,12 +976,12 @@ func (m *Manager) ReleasePlayback(res *PrepareResult) {
 }
 
 // PrepareForPlayback ensures the release's torrent is present in a seedbox
-// qBittorrent (adding it if needed), waits for the chosen file's head to buffer,
-// and returns the file's absolute path for range serving. The torrent is left
-// running so it keeps seeding.
+// download client (adding it if needed), waits for the chosen file's head to
+// buffer, and returns the file's absolute path for range serving. The torrent
+// is left running so it keeps seeding.
 //
-// clientOverride, if non-nil, is used instead of the global client list. This
-// lets each stream route to its own seedbox qBittorrent.
+// clientOverride, if non-nil, is used instead of the globally configured
+// clients. This lets each stream route to its own seedbox.
 // profile, when valid, lets the head requirement be revised while waiting. It
 // is computed before the torrent exists, so the opening figure rests on a
 // bitrate prior; the real download rate only becomes knowable once peers are
@@ -1016,19 +1030,16 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 		}
 	}()
 
-	// Resolve which qBittorrent client to use: prefer the stream-level override
+	// Resolve which download client to use: prefer the stream-level override
 	// so each member can point to their own seedbox, fall back to the first
 	// globally configured client.
 	var c tclient.Client
 	var clientName, clientIdentity, remotePath string
 	if clientOverride != nil && strings.TrimSpace(clientOverride.URL) != "" {
-		c = qbittorrent.New(qbittorrent.Options{
-			BaseURL:  clientOverride.URL,
-			Username: clientOverride.Username,
-			Password: clientOverride.Password,
-			Category: clientOverride.CategoryOrDefault(),
-			SavePath: clientOverride.SavePath,
-		})
+		c = newClient(*clientOverride)
+		if c == nil {
+			return nil, fmt.Errorf("unsupported torrent client type %q", clientOverride.Type)
+		}
 		clientName = strings.TrimSpace(clientOverride.Name)
 		clientIdentity = config.NormalizeTorrentClientType(clientOverride.Type) + ":" + strings.TrimRight(strings.TrimSpace(clientOverride.URL), "/")
 		remotePath = strings.TrimSpace(clientOverride.RemotePath)
@@ -1070,8 +1081,8 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 		if err != nil {
 			return nil, err
 		}
-		// Stop qBittorrent's global ratio and seed-time limits from ending this
-		// torrent's seeding on their own, which on a private tracker could cut a
+		// Stop the download client's global ratio and seed-time limits from ending
+		// this torrent's seeding on their own, which on a private tracker could cut a
 		// hit-and-run obligation short. Best-effort; never blocks playback.
 		if serr := c.SetShareLimits(ctx, info.Hash,
 			qbittorrent.NoShareLimit, qbittorrent.NoShareLimit, qbittorrent.NoShareLimit); serr != nil {
@@ -1084,8 +1095,8 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 	// avoids mutating a finished torrent solely to repair flags that no longer
 	// affect its data layout.
 	if info.Progress < 0.999 && info.StreamingOrderSupported {
-		// Whatever route this torrent took into qBittorrent, make it download from
-		// the front. A torrent the client already held ignores the streaming flags
+		// Whatever route this torrent took into the download client, make it
+		// download from the front. A torrent the client already held ignores the
 		// on the add that "created" it, so without this a re-watch — or anything the
 		// user grabbed by hand — fills in rarest-first and never presents a
 		// continuous head, no matter how much of it is downloaded. A failure here
