@@ -1337,9 +1337,9 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 				// delaying startup on a nearly finished file because a deeper
 				// runway target was inferred from earlier fragmentation.
 				if fragmentedHead && f.Progress < nearlyCompleteProgress {
-					floor := MinHeadBytes * 4
+					floor := MinHeadBytes * 2
 					if profile.Valid() {
-						if bitrateFloor := int64(profile.BytesPerSecond() * 20); bitrateFloor > floor {
+						if bitrateFloor := int64(profile.BytesPerSecond() * 8); bitrateFloor > floor {
 							floor = bitrateFloor
 						}
 					}
@@ -1410,7 +1410,7 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 					// happens to be contiguous leads to a stall seconds in:
 					// the player drains those and hits a hole. Wait for a
 					// deeper continuous run before beginning.
-					if floor := MinHeadBytes * 4; needHead < floor {
+					if floor := MinHeadBytes * 2; needHead < floor {
 						needHead = floor
 						headReady = false
 					}
