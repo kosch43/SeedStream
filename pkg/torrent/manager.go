@@ -1298,12 +1298,17 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 				needHead = m.reviseHead(ctx, c, info.Hash, needHead,
 					requiredHeadBytes(bufferBytes, f.Size), profile, &warnedRevised)
 
-				// A fragmented head is a download whose data is arriving out
-				// of order. The download-speed shrink is only safe when data
-				// lands sequentially; once the head is known to be fractured,
-				// require a deeper runway scaled to the bitrate so playback
-				// does not stall seconds in.
-				if fragmentedHead {
+			// A fragmented head is a download whose data is arriving out
+			// of order. The download-speed shrink is only safe when data
+			// lands sequentially; once the head is known to be fractured,
+			// require a deeper runway scaled to the bitrate so playback
+			// does not stall seconds in.
+			//
+			// Skip the floor when the file is nearly complete: at >99%
+			// progress the few remaining scattered pieces belong to the
+			// tail, not the head, and inflating the requirement just
+			// delays a stream that is ready to start.
+			if fragmentedHead && f.Progress < 0.99 {
 					floor := MinHeadBytes * 4
 					if profile.Valid() {
 						if bitrateFloor := int64(profile.BytesPerSecond() * 20); bitrateFloor > floor {
@@ -1370,14 +1375,14 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 						}
 					}
 				}
-				if fragmentedHead {
-					// The file has plenty of bytes but they are scattered —
-					// a small head check may pass while the runway beyond
-					// it is sparse. Starting on a minimum head that just
-					// happens to be contiguous leads to a stall seconds in:
-					// the player drains those and hits a hole. Wait for a
-					// deeper continuous run before beginning.
-					if floor := MinHeadBytes * 4; needHead < floor {
+			if fragmentedHead && f.Progress < 0.99 {
+				// The file has plenty of bytes but they are scattered —
+				// a small head check may pass while the runway beyond
+				// it is sparse. Starting on a minimum head that just
+				// happens to be contiguous leads to a stall seconds in:
+				// the player drains those and hits a hole. Wait for a
+				// deeper continuous run before beginning.
+				if floor := MinHeadBytes * 4; needHead < floor {
 						needHead = floor
 						headReady = false
 					}
