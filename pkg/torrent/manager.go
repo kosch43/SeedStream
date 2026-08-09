@@ -126,6 +126,18 @@ func KeepReleaseOnRetry(err error) bool {
 // and reports a fault that is not there.
 const fastCompletionWindow = 30 * time.Second
 
+// nearCompletionProgress is how far in a download must be before "it will
+// finish inside the prepare budget" is accepted as a reason to stop caring
+// where its pieces are. Below this the claim is about the request's clock, not
+// about the download, and it costs the viewer the whole file.
+const nearCompletionProgress = 0.9
+
+// reAnchorInterval paces re-anchoring a download whose head is still missing.
+// The call is cheap, but issuing it on every 1.5s poll would be noise; spacing
+// it keeps steady pressure on a client that accepts the instruction and then
+// ignores it.
+const reAnchorInterval = 10 * time.Second
+
 var videoExts = map[string]struct{}{
 	".mkv": {}, ".mp4": {}, ".avi": {}, ".m4v": {}, ".mov": {},
 	".wmv": {}, ".flv": {}, ".webm": {}, ".ts": {}, ".m2ts": {},
@@ -1203,7 +1215,7 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 	needHead := bufferBytes
 	warnedRevised := false
 	anchoredHead := false
-	reAnchored := false
+	var lastReAnchor time.Time
 	// Swarm health: a freshly added torrent needs a moment to find peers, so the
 	// live seeder count is only judged after a grace period, and only when the
 	// download has also failed to advance — a small but fast swarm is fine.
@@ -1352,16 +1364,22 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 						// enough that ordering has had time to assert itself.
 						// That one is worth reporting.
 						fragmentedHead = true
-						// Re-anchor once. The opening anchor can be lost — it
-						// races the add, and a daemon still registering the
-						// torrent may accept the call and discard it — and a
-						// head that is still fragmented well into prepare is the
-						// evidence. Bounded to one retry: if a second anchor
-						// does not take either, the client is not honouring it
-						// and repeating the call every poll only adds traffic.
-						if !reAnchored && len(f.PieceRange) == 2 && f.PieceRange[0] >= 0 {
+						// Re-anchor, on a timer rather than once.
+						//
+						// A single retry was too few. The opening anchor can be
+						// lost to the add, and Transmission has been observed
+						// answering "success" and then fetching later pieces
+						// anyway — 1478 of them at 91% while piece 0 was still
+						// missing. One ignored retry left nothing trying again
+						// for the rest of the download.
+						//
+						// Rate-limited instead of unbounded: it is a cheap RPC,
+						// but repeating it every 1.5s poll would be noise rather
+						// than pressure.
+						if len(f.PieceRange) == 2 && f.PieceRange[0] >= 0 &&
+							time.Since(lastReAnchor) >= reAnchorInterval {
 							{
-								reAnchored = true
+								lastReAnchor = time.Now()
 								if err := c.SteerToPiece(ctx, info.Hash, f.PieceRange[0]); err != nil {
 									logger.Debug("could not re-anchor sequential download",
 										"hash", shortHash(info.Hash), "err", err)
@@ -1546,7 +1564,20 @@ func nearingCompletion(ctx context.Context, c tclient.Client, hash string, deadl
 	if eta <= fastCompletionWindow {
 		return true, eta
 	}
-	if !deadline.IsZero() {
+	// The prepare budget is not evidence about piece order.
+	//
+	// This branch exists so a torrent that will simply finish before the request
+	// times out is not reported as a piece-ordering fault. That is fair at the
+	// end of a download. It is wrong at the start: measured in the field, a
+	// torrent 5% downloaded with 33 seconds to go took this branch and was
+	// therefore treated as "finishes in moments", which suppressed head ordering
+	// and made playback wait for 100% of a file it could have streamed at 5%.
+	//
+	// The justification for ignoring order is that the in-flight window covers
+	// most of the file — true when the whole thing lands in a couple of seconds,
+	// false at 5%. The budget measures neither. Requiring real progress as well
+	// keeps the excuse where it belongs, at the end.
+	if !deadline.IsZero() && info.Progress >= nearCompletionProgress {
 		if budgetLeft := time.Until(deadline); budgetLeft > 0 && eta <= budgetLeft {
 			return true, eta
 		}
