@@ -64,14 +64,33 @@ func TestBudgetStillAppliesNearTheEnd(t *testing.T) {
 	}
 }
 
-// TestShortEtaStillCountsWhateverTheProgress: the thirty-second window is about
-// the download itself, not the request clock, so it stands on its own.
-func TestShortEtaStillCountsWhateverTheProgress(t *testing.T) {
+// TestShortEtaNeedsRealProgressToo: the thirty-second window measures the
+// download, not the request clock — but it is still not evidence about piece
+// order. Measured in the field: a 5.6 GB file 48% downloaded at 125 MB/s had
+// a 27-second ETA, took this branch, and playback waited for the whole file,
+// because on a swarm that fast the in-flight window scatters pieces across
+// the entire file and the continuous head completes only near the end. The
+// window therefore carries the same progress gate as the budget branch: short
+// ETA at the start of a download must keep the ordering pressure on.
+func TestShortEtaNeedsRealProgressToo(t *testing.T) {
 	remaining := int64(float64(7_100_000_000) * 0.95)
-	c := etaServer(t, 0.05, remaining/5) // ~5 seconds left
+	c := etaServer(t, 0.05, remaining/5) // ~5 seconds left, at 5% progress
+
+	fast, _ := nearingCompletion(context.Background(), c, "abcdefabcdefabcdefabcdefabcdefabcdefabcd", time.Time{})
+	if fast {
+		t.Fatal("a five-second ETA at 5% progress must not excuse piece ordering; the pieces are scattered, not arriving")
+	}
+}
+
+// TestShortEtaStillCountsNearTheEnd keeps the window's purpose once the
+// download genuinely is at the end: there the remaining pieces land with the
+// file, and reporting an ordering fault describes normal swarm behaviour.
+func TestShortEtaStillCountsNearTheEnd(t *testing.T) {
+	remaining := int64(float64(7_100_000_000) * 0.05)
+	c := etaServer(t, 0.95, remaining/5) // ~5 seconds left, at 95% progress
 
 	fast, _ := nearingCompletion(context.Background(), c, "abcdefabcdefabcdefabcdefabcdefabcdefabcd", time.Time{})
 	if !fast {
-		t.Fatal("a file five seconds from done is finishing in moments at any progress")
+		t.Fatal("a file five seconds from done at 95% progress is finishing in moments")
 	}
 }

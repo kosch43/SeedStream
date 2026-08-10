@@ -21,6 +21,18 @@ const seekPollInterval = 250 * time.Millisecond
 // data before failing. A var (not const) only so tests can shorten it.
 var seekWaitTimeout = 5 * time.Minute
 
+// gapSteerDelay is how long a read must be blocked on missing bytes before
+// the download is steered at them. Shorter would steer on every ordinary
+// piece-to-piece handoff; a healthy sequential download delivers the next
+// piece well inside this window. Vars (not consts) only so tests can shorten
+// them.
+var gapSteerDelay = 3 * time.Second
+
+// gapSteerInterval paces the steering calls while a read stays blocked. The
+// call is cheap but the block can last minutes on a slow swarm, and issuing
+// it every poll would be noise rather than pressure.
+var gapSteerInterval = 10 * time.Second
+
 // SeekableFileReader wraps an *os.File belonging to an in-progress torrent.
 // Before every Read it verifies — through a fileAvailability checker — that
 // the bytes at the current position are actually on disk, blocking until they
@@ -53,6 +65,20 @@ type SeekableFileReader struct {
 	// steerFunc is called on seeks so the download can follow the viewer's
 	// position. The function receives the new byte offset.
 	steerFunc func(context.Context, int64)
+
+	// gapSteerFunc is called when a read has been blocked on missing bytes for
+	// long enough that the download is clearly not bringing them on its own.
+	// It receives the blocked byte offset and points the client at the piece
+	// that is actually missing, instead of waiting for the piece picker to get
+	// around to it. Receives the same offset as steerFunc but is driven by a
+	// stall rather than a seek.
+	gapSteerFunc func(context.Context, int64)
+	// gapBlockedSince is when the current continuous block on missing bytes
+	// began; zero when the last read found its data.
+	gapBlockedSince time.Time
+	// lastGapSteer paces gap steering so a long stall issues the call on a
+	// timer rather than on every poll.
+	lastGapSteer time.Time
 }
 
 // runwayInterval is how often the contiguous run ahead of the playhead is
@@ -258,14 +284,24 @@ func (r *SeekableFileReader) Close() error { return r.f.Close() }
 // [startByte, startByte+length) of the file are on disk. Returns an error
 // only on timeout — an available region returns immediately, usually from
 // the checker's cache without any network I/O.
+//
+// When the wait drags past gapSteerDelay the download is steered at the
+// missing piece. Sequential order is a request order, not an arrival order:
+// on a swarm delivering out of order, the piece the viewer is waiting on can
+// sit behind scattered later pieces indefinitely, and the freeze only ends
+// when the picker happens to circle back. Pointing the client at the exact
+// missing piece makes it top priority, which is what turns a minutes-long
+// stall into a moment's wait.
 func (r *SeekableFileReader) waitForBytes(startByte, length int64) error {
 	ctx, cancel := context.WithTimeout(r.readContext(), seekWaitTimeout)
 	defer cancel()
 
 	for {
 		if r.avail.BytesAvailable(ctx, startByte, length) {
+			r.gapBlockedSince = time.Time{}
 			return nil
 		}
+		r.steerAtGap(ctx, startByte)
 		select {
 		case <-ctx.Done():
 			if err := r.readContext().Err(); err != nil {
@@ -275,6 +311,27 @@ func (r *SeekableFileReader) waitForBytes(startByte, length int64) error {
 		case <-time.After(seekPollInterval):
 		}
 	}
+}
+
+// steerAtGap points the download at the piece the reader is blocked on, once
+// the block has lasted long enough to be a stall rather than an ordinary
+// piece handoff, and no more often than gapSteerInterval while it persists.
+func (r *SeekableFileReader) steerAtGap(ctx context.Context, startByte int64) {
+	if r.gapSteerFunc == nil {
+		return
+	}
+	if r.gapBlockedSince.IsZero() {
+		r.gapBlockedSince = time.Now()
+		return
+	}
+	if time.Since(r.gapBlockedSince) < gapSteerDelay {
+		return
+	}
+	if !r.lastGapSteer.IsZero() && time.Since(r.lastGapSteer) < gapSteerInterval {
+		return
+	}
+	r.lastGapSteer = time.Now()
+	r.gapSteerFunc(ctx, startByte)
 }
 
 // Ensure *SeekableFileReader satisfies io.ReadSeekCloser.

@@ -975,6 +975,28 @@ func (m *Manager) OpenForPlayback(ctx context.Context, res *PrepareResult, ph *P
 					"hash", shortHash(res.Hash), "piece", piece, "byte_offset", byteOffset, "err", err)
 			}
 		}
+		// A read blocked on a gap is steered at the missing piece itself, not
+		// at the piece that merely contains the offset: the run up to the gap
+		// is usually already on disk, and the freeze ends when the hole is
+		// fetched, which is what anchoring the sequential order at it does.
+		reader.gapSteerFunc = func(steerCtx context.Context, byteOffset int64) {
+			piece, ok := avail.FirstMissingPiece(steerCtx, byteOffset, res.Size-byteOffset)
+			if !ok {
+				if p, ok2 := avail.PieceForByte(steerCtx, byteOffset); ok2 {
+					piece, ok = p, true
+				}
+			}
+			if !ok {
+				return
+			}
+			if err := steerClient.SteerToPiece(steerCtx, res.Hash, piece); err != nil {
+				logger.Debug("gap steer: could not re-anchor download at the missing piece",
+					"hash", shortHash(res.Hash), "piece", piece, "byte_offset", byteOffset, "err", err)
+				return
+			}
+			logger.Info("Playback: read stalled on a gap — steering the download at the missing piece",
+				"hash", shortHash(res.Hash), "piece", piece, "byte_offset", byteOffset)
+		}
 	}
 	return reader, nil
 }
@@ -1403,12 +1425,28 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 							time.Since(lastReAnchor) >= reAnchorInterval {
 							{
 								lastReAnchor = time.Now()
-								if err := c.SteerToPiece(ctx, info.Hash, f.PieceRange[0]); err != nil {
+								// Steer at the hole, not at the file's first
+								// piece. A fragmented head normally has a run
+								// from byte zero — pieces 0..k on disk, piece
+								// k+1 missing, later pieces scattered beyond —
+								// and anchoring at piece 0 asks for what the
+								// picker already has. Measured on a 71 GB
+								// remux: four minutes of re-anchors at piece 0
+								// while the run sat waiting on one early piece
+								// that never climbed the queue. The missing
+								// piece is the anchor that moves the run.
+								target := f.PieceRange[0]
+								if avail != nil {
+									if missing, ok := avail.FirstMissingPiece(ctx, 0, needHead); ok {
+										target = missing
+									}
+								}
+								if err := c.SteerToPiece(ctx, info.Hash, target); err != nil {
 									logger.Debug("could not re-anchor sequential download",
 										"hash", shortHash(info.Hash), "err", err)
 								} else {
-									logger.Info("Playback: head still fragmented, re-anchoring the download at the video's first piece",
-										"hash", shortHash(info.Hash), "piece", f.PieceRange[0], "progress", f.Progress)
+									logger.Info("Playback: head still fragmented, re-anchoring the download at the first missing head piece",
+										"hash", shortHash(info.Hash), "piece", target, "progress", f.Progress)
 								}
 							}
 						}
@@ -1584,7 +1622,16 @@ func nearingCompletion(ctx context.Context, c tclient.Client, hash string, deadl
 		return true, 0
 	}
 	eta := time.Duration(float64(remaining) / float64(info.DlSpeed) * float64(time.Second))
-	if eta <= fastCompletionWindow {
+	// The thirty-second window is subject to the same progress gate as the
+	// budget branch below. Measured in the field: a 5.6 GB file 48% downloaded
+	// at 125 MB/s had a 27-second ETA, took this branch, and playback waited
+	// for the whole file — because on a swarm that fast the in-flight window
+	// scatters pieces across the whole file, the continuous head does not
+	// complete until near the end, and "the file is moments away" said nothing
+	// about where those moments of data were landing. Below the gate the
+	// honest answer is "head still fragmented", which keeps the steering
+	// pressure on instead of silently waiting for 100%.
+	if eta <= fastCompletionWindow && info.Progress >= nearCompletionProgress {
 		return true, eta
 	}
 	// The prepare budget is not evidence about piece order.
