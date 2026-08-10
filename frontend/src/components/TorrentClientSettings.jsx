@@ -20,7 +20,7 @@ const CLIENT_TYPES = [
     urlLabel: 'qBittorrent WebUI URL',
     urlPlaceholder: 'http://seedbox:8080',
     categoryLabel: 'Category',
-    note: 'Downloads sequentially with first and last pieces prioritised.',
+    note: 'Downloads sequentially with first and last pieces prioritised; both can be switched off below.',
   },
   {
     value: 'transmission',
@@ -51,6 +51,8 @@ function normalizeDraft(draft) {
     save_path: (v.save_path || '').trim(),
     remote_path: (v.remote_path || '').trim(),
     enabled: v.enabled !== false,
+    sequential_order: v.sequential_order !== false,
+    first_last_first: v.first_last_first !== false,
   }
 }
 
@@ -67,6 +69,10 @@ function summarize(client) {
     parts.push(`${client.remote_path} → ${client.save_path}`)
   } else if (client.save_path) {
     parts.push(`Path: ${client.save_path}`)
+  }
+  if (clientType(client.type).value === 'qbittorrent') {
+    if (client.sequential_order === false) parts.push('Sequential order off')
+    if (client.first_last_first === false) parts.push('First/last first off')
   }
   return parts
 }
@@ -174,6 +180,26 @@ function TorrentClientDialog({ open, onOpenChange, initialValue, onSave, title, 
               path above when reading files. Leave blank if both services share a filesystem.
             </p>
           </div>
+          {draft.type === 'qbittorrent' && (
+            <>
+              <div className="flex items-center justify-between gap-4">
+                <div className="min-w-0">
+                  <Label htmlFor="tc-sequential">Sequential Order</Label>
+                  <p className="text-xs text-muted-foreground">Download in sequential order so playback can start before the torrent completes.</p>
+                </div>
+                <Switch id="tc-sequential" checked={draft.sequential_order}
+                  onCheckedChange={(v) => update({ sequential_order: v })} />
+              </div>
+              <div className="flex items-center justify-between gap-4">
+                <div className="min-w-0">
+                  <Label htmlFor="tc-first-last">First and Last First</Label>
+                  <p className="text-xs text-muted-foreground">Download first and last pieces first.</p>
+                </div>
+                <Switch id="tc-first-last" checked={draft.first_last_first}
+                  onCheckedChange={(v) => update({ first_last_first: v })} />
+              </div>
+            </>
+          )}
           <div className="flex items-center justify-between">
             <Label htmlFor="tc-enabled">Enabled</Label>
             <Switch id="tc-enabled" checked={draft.enabled}

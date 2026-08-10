@@ -32,8 +32,10 @@ type TorrentClientConfig struct {
 	// by the qBittorrent API and replaces it with SavePath, so the file is
 	// read from the correct local mount point.
 	// Leave empty when both services share a filesystem.
-	RemotePath string `json:"remote_path,omitempty"`
-	Enabled    *bool  `json:"enabled,omitempty"`
+	RemotePath      string `json:"remote_path,omitempty"`
+	Enabled         *bool  `json:"enabled,omitempty"`
+	SequentialOrder *bool  `json:"sequential_order,omitempty"`
+	FirstLastFirst  *bool  `json:"first_last_first,omitempty"`
 }
 
 // Supported download client kinds.
@@ -85,6 +87,14 @@ func IsDefinitionIndexerType(indexerType string) bool {
 
 func (t TorrentClientConfig) IsEnabled() bool {
 	return t.Enabled == nil || *t.Enabled
+}
+
+func (t TorrentClientConfig) SequentialOrderOrDefault() bool {
+	return t.SequentialOrder == nil || *t.SequentialOrder
+}
+
+func (t TorrentClientConfig) FirstLastFirstOrDefault() bool {
+	return t.FirstLastFirst == nil || *t.FirstLastFirst
 }
 
 func (t TorrentClientConfig) CategoryOrDefault() string {

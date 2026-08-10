@@ -29,6 +29,9 @@ type Client struct {
 	category string
 	savePath string
 
+	sequentialOrder bool
+	firstLastFirst  bool
+
 	http *http.Client
 
 	mu        sync.Mutex
@@ -85,7 +88,12 @@ type Options struct {
 	Password string
 	Category string // applied to added torrents; defaults to "seedstream"
 	SavePath string // absolute download path on the seedbox; "" = client default
-	Timeout  time.Duration
+	// SequentialOrder and FirstLastFirst control the streaming-order flags set
+	// on added torrents and enforced by EnsureStreamingOrder. Nil means on,
+	// matching every configuration written before they became configurable.
+	SequentialOrder *bool
+	FirstLastFirst  *bool
+	Timeout         time.Duration
 }
 
 // New constructs a qBittorrent client. It does not perform any network I/O.
@@ -100,12 +108,14 @@ func New(opts Options) *Client {
 		timeout = 30 * time.Second
 	}
 	return &Client{
-		baseURL:  baseURL,
-		username: opts.Username,
-		password: opts.Password,
-		category: cat,
-		savePath: strings.TrimSpace(opts.SavePath),
-		http:     &http.Client{Timeout: timeout},
+		baseURL:         baseURL,
+		username:        opts.Username,
+		password:        opts.Password,
+		category:        cat,
+		savePath:        strings.TrimSpace(opts.SavePath),
+		sequentialOrder: opts.SequentialOrder == nil || *opts.SequentialOrder,
+		firstLastFirst:  opts.FirstLastFirst == nil || *opts.FirstLastFirst,
+		http:            &http.Client{Timeout: timeout},
 	}
 }
 
@@ -199,9 +209,10 @@ func (c *Client) Ping(ctx context.Context) error {
 	return err
 }
 
-// Add submits a torrent to qBittorrent under the configured category, with
-// sequential download and first/last-piece priority enabled for streaming.
-// Auto Torrent Management is left off so SavePath is honoured.
+// Add submits a torrent to qBittorrent under the configured category, with the
+// configured streaming-order flags (sequential download and first/last-piece
+// priority, both on unless disabled per client). Auto Torrent Management is
+// left off so SavePath is honoured.
 func (c *Client) Add(ctx context.Context, opts AddOptions) error {
 	if strings.TrimSpace(opts.URL) == "" {
 		return fmt.Errorf("qbittorrent add: empty URL/magnet")
@@ -222,8 +233,10 @@ func (c *Client) Add(ctx context.Context, opts AddOptions) error {
 	if c.savePath != "" {
 		form.Set("savepath", c.savePath)
 	}
-	if opts.Sequential {
+	if opts.Sequential && c.sequentialOrder {
 		form.Set("sequentialDownload", "true")
+	}
+	if opts.Sequential && c.firstLastFirst {
 		// Sequential mode orders requests, while first/last-piece priority gives
 		// each wanted file's boundary region the picker's maximum priority. The
 		// manager then raises the selected video above the other files and verifies
@@ -383,8 +396,10 @@ func (c *Client) SetFilePriority(ctx context.Context, hash string, fileIndex, pr
 	return err
 }
 
-// EnsureStreamingOrder turns on sequential download and first/last-piece
-// priority for a torrent that is missing either.
+// EnsureStreamingOrder turns on the configured streaming-order flags
+// (sequential download and first/last-piece priority) for a torrent that is
+// missing them. Flags the client was configured to leave off are neither set
+// nor reported as missing.
 //
 // Setting them at add time is not enough. Adding a magnet qBittorrent already
 // holds succeeds and changes nothing — the flags in that request are thrown
@@ -407,6 +422,11 @@ func (c *Client) EnsureStreamingOrder(ctx context.Context, info *TorrentInfo) er
 	if info == nil || strings.TrimSpace(info.Hash) == "" {
 		return nil
 	}
+	wantSeq := c.sequentialOrder
+	wantFirstLast := c.firstLastFirst
+	if !wantSeq && !wantFirstLast {
+		return nil
+	}
 	release, err := acquireStreamingOrderLock(ctx, c.baseURL, info.Hash)
 	if err != nil {
 		return err
@@ -425,7 +445,7 @@ func (c *Client) EnsureStreamingOrder(ctx context.Context, info *TorrentInfo) er
 		}
 		info.SequentialDL = current.SequentialDL
 		info.FirstLastPiecePrio = current.FirstLastPiecePrio
-		return info.SequentialDL && info.FirstLastPiecePrio, nil
+		return (!wantSeq || info.SequentialDL) && (!wantFirstLast || info.FirstLastPiecePrio), nil
 	}
 	wait := func() error {
 		timer := time.NewTimer(200 * time.Millisecond)
@@ -463,14 +483,14 @@ func (c *Client) EnsureStreamingOrder(ctx context.Context, info *TorrentInfo) er
 		}
 
 		var firstErr error
-		if !info.SequentialDL {
+		if wantSeq && !info.SequentialDL {
 			if _, err := c.do(ctx, http.MethodPost, "/api/v2/torrents/toggleSequentialDownload", form); err != nil {
 				firstErr = err
 			} else {
 				info.SequentialDL = true
 			}
 		}
-		if !info.FirstLastPiecePrio {
+		if wantFirstLast && !info.FirstLastPiecePrio {
 			if _, err := c.do(ctx, http.MethodPost, "/api/v2/torrents/toggleFirstLastPiecePrio", form); err != nil {
 				if firstErr == nil {
 					firstErr = err

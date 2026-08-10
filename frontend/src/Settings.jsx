@@ -163,6 +163,8 @@ function Settings({
           save_path: tc.save_path || '',
           remote_path: tc.remote_path || '',
           enabled: tc.enabled !== false,
+          sequential_order: tc.sequential_order !== false,
+          first_last_first: tc.first_last_first !== false,
         })) || [],
         movie_search_queries: initialConfig.movie_search_queries?.map((query) => ({
           name: query.name || '',
