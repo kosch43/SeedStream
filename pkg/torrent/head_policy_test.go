@@ -133,3 +133,55 @@ func TestInvalidProfileComputesNothing(t *testing.T) {
 		}
 	}
 }
+
+// TestAlignHeadToPieces rounds a byte head up to whole pieces and floors it at
+// one piece, so a small-piece torrent is not asked for four times the run a
+// large-piece torrent is at the same byte target.
+func TestAlignHeadToPieces(t *testing.T) {
+	const miB = 1 << 20
+	cases := []struct {
+		name      string
+		head      int64
+		pieceSize int64
+		want      int64
+	}{
+		{"aligned", 16 * miB, 4 * miB, 16 * miB},
+		{"round up", 17 * miB, 4 * miB, 20 * miB},
+		{"floor at one piece", 3 * miB, 4 * miB, 4 * miB},
+		{"exact one piece", 4 * miB, 4 * miB, 4 * miB},
+		{"large piece", 16 * miB, 32 * miB, 32 * miB},
+		{"no piece size is a passthrough", 17 * miB, 0, 17 * miB},
+	}
+	for _, tc := range cases {
+		if got := AlignHeadToPieces(tc.head, tc.pieceSize); got != tc.want {
+			t.Errorf("%s: AlignHeadToPieces(%d, %d) = %d, want %d", tc.name, tc.head, tc.pieceSize, got, tc.want)
+		}
+	}
+}
+
+// TestPieceTrackingLowersTheFloor: a fast low-bitrate download's rate-aware head
+// is below one piece, so the byte floor (MinHeadBytes, four 4 MiB pieces) holds
+// it at four pieces while the piece-aware floor lets a single piece through.
+// That is the difference between waiting for piece 0..3 and waiting for piece 0.
+func TestPieceTrackingLowersTheFloor(t *testing.T) {
+	p := PlaybackProfile{FileBytes: 50_000_000, RuntimeSeconds: 1200}
+	const piece = 4 << 20
+	byteFloored := HeadBytesFor(p, 10<<20)
+	got := HeadBytesForPieceTracking(p, 10<<20, piece)
+	if got < piece {
+		t.Fatalf("piece-tracking head %d is below one piece (%d)", got, piece)
+	}
+	if got >= byteFloored {
+		t.Fatalf("piece-tracking head %d did not drop below the byte-floored %d", got, byteFloored)
+	}
+}
+
+// TestPieceTrackingFallsBackWithoutPieceSize: without a piece size there is no
+// piece-aware floor to apply, so the answer must match HeadBytesFor exactly.
+func TestPieceTrackingFallsBackWithoutPieceSize(t *testing.T) {
+	p := remuxProfile()
+	want := HeadBytesFor(p, 557_000_000)
+	if got := HeadBytesForPieceTracking(p, 557_000_000, 0); got != want {
+		t.Fatalf("without a piece size the piece-tracking path must match HeadBytesFor, got %d want %d", got, want)
+	}
+}

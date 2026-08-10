@@ -232,7 +232,7 @@ func TestHeadRevisionNeverGrows(t *testing.T) {
 	warned := false
 	const current = 8 << 20
 	got := mgr.reviseHead(context.Background(), c, "abcdefabcdefabcdefabcdefabcdefabcdefabcd",
-		current, 120<<20, profile, &warned)
+		current, 120<<20, profile, 0, &warned)
 	if got > current {
 		t.Fatalf("the requirement grew from %d to %d mid-wait", current, got)
 	}
@@ -248,7 +248,7 @@ func TestHeadRevisionWithoutAProfileIsANoOp(t *testing.T) {
 	warned := false
 	const current = 64 << 20
 	got := mgr.reviseHead(context.Background(), c, "abcdefabcdefabcdefabcdefabcdefabcdefabcd",
-		current, current, PlaybackProfile{}, &warned)
+		current, current, PlaybackProfile{}, 0, &warned)
 	if got != current {
 		t.Fatalf("without a profile the head must be left alone, got %d want %d", got, current)
 	}

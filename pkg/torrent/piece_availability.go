@@ -476,3 +476,16 @@ func (a *fileAvailability) FirstMissingPiece(ctx context.Context, offset, length
 	}
 	return 0, false
 }
+
+// PieceSize reports the torrent's piece size, or 0 when piece tracking is off
+// or not yet initialised. Triggers initialisation on first call, so the cost
+// is one round trip per prepare rather than per poll.
+func (a *fileAvailability) PieceSize(ctx context.Context) int64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.initLocked(ctx)
+	if !a.pieceMode {
+		return 0
+	}
+	return a.pieceSize
+}

@@ -126,6 +126,15 @@ func KeepReleaseOnRetry(err error) bool {
 // and reports a fault that is not there.
 const fastCompletionWindow = 30 * time.Second
 
+// maxDeadlineExtensions bounds how far a nearly-finished download may push the
+// prepare deadline out. Each extension is one fastCompletionWindow, so this
+// caps the total reprieve rather than letting a stalled torrent wait forever.
+const maxDeadlineExtensions = 4
+
+// stallGrace is how long progress may sit still before a deadline extension is
+// refused. A download that has stopped moving is not "about to finish".
+const stallGrace = 15 * time.Second
+
 // nearCompletionProgress is how far in a download must be before "it will
 // finish inside the prepare budget" is accepted as a reason to stop caring
 // where its pieces are. Below this the claim is about the request's clock, not
@@ -1245,6 +1254,8 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 	var lastClientErr error
 	clientErrs := 0
 	lastProgress := -1.0
+	progressAt := time.Now()
+	extensions := 0
 	// Readiness is decided on the piece bitmap, not on a byte count. Created
 	// once the video file is known and reused across polls so its cached bitmap
 	// and complete-latch survive the loop.
@@ -1297,6 +1308,9 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 		if err == nil && len(files) > 0 {
 			f := pickVideoFile(files, season, episode)
 			if f != nil {
+				if f.Progress > lastProgress {
+					progressAt = time.Now()
+				}
 				lastProgress = f.Progress
 				// On a multi-file torrent (e.g. a season pack), pull the file
 				// being played ahead of the rest so its head buffers first.
@@ -1338,6 +1352,13 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 				if avail == nil && f.Size > 0 {
 					avail = newFileAvailability(c, info.Hash, f.Index, f.Size)
 				}
+				// Piece size, known once the availability tracker has
+				// initialised. Zero until then, or when the client offers no
+				// piece bitmap — in which case the head stays byte-floored.
+				var pieceSize int64
+				if avail != nil {
+					pieceSize = avail.PieceSize(ctx)
+				}
 				// Point the download at the piece playback starts on, for a
 				// client that can be told. Done once, and only once the file
 				// list has arrived, because the video's first piece is not the
@@ -1358,7 +1379,7 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 					}
 				}
 				needHead = m.reviseHead(ctx, c, info.Hash, needHead,
-					requiredHeadBytes(bufferBytes, f.Size), profile, &warnedRevised)
+					requiredHeadBytes(bufferBytes, f.Size), profile, pieceSize, &warnedRevised)
 
 				// A fragmented head is a download whose data is arriving out
 				// of order. The download-speed shrink is only safe when data
@@ -1384,6 +1405,14 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 
 				headReady := false
 				if avail != nil {
+					// Round the head up to whole pieces so the byte target and
+					// the piece check ask for the same thing: a 23.5 MiB head
+					// on 4 MiB pieces is six pieces either way, but stating it
+					// in pieces keeps the timeout message and the fragmented
+					// detection consistent with what was actually required.
+					if pieceSize > 0 {
+						needHead = AlignHeadToPieces(needHead, pieceSize)
+					}
 					headReady = avail.BytesAvailable(ctx, 0, needHead)
 				}
 				if !headReady && f.Size > 0 {
@@ -1528,30 +1557,43 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 			}
 		}
 		if time.Now().After(deadline) {
-			if lastClientErr != nil {
-				return nil, fmt.Errorf("torrent client error while preparing playback after %s: %w", timeout, lastClientErr)
+			// Having decided to wait for the whole file, honour that decision.
+			// A download at 99.9% and still climbing finishes sooner than a
+			// retry would, and failing here throws away the wait already spent.
+			// The guards keep this from rewarding a stall: progress must still
+			// be advancing inside stallGrace, and the total reprieve is capped.
+			if fastFinish && lastProgress >= nearCompletionProgress &&
+				time.Since(progressAt) < stallGrace && extensions < maxDeadlineExtensions {
+				extensions++
+				deadline = time.Now().Add(fastCompletionWindow)
+				logger.Info("Playback: nearly complete and still advancing — extending the prepare deadline",
+					"hash", shortHash(info.Hash), "progress", lastProgress, "extension", extensions)
+			} else {
+				if lastClientErr != nil {
+					return nil, fmt.Errorf("torrent client error while preparing playback after %s: %w", timeout, lastClientErr)
+				}
+				if lastProgress < 0 {
+					return nil, fmt.Errorf("torrent metadata not available after %s (no file list from client)", timeout)
+				}
+				// Every remaining case is a torrent that is downloading and simply
+				// has not got there yet, so all of them wrap ErrStillBuffering: the
+				// caller must retry this same torrent rather than start another for
+				// the same film.
+				if fastFinish {
+					// The download was outrunning the clock, not misbehaving. Naming
+					// ordering here would point at the wrong thing entirely.
+					return nil, fmt.Errorf("%w: still finishing after %s (file %.1f%% downloaded, and downloading fast — the prepare timeout is the limit here, not the swarm)",
+						ErrStillBuffering, timeout, lastProgress*100)
+				}
+				if fragmentedHead {
+					// The data is arriving fine, just not at the front of the file,
+					// and the operator needs to know that to act on it.
+					return nil, fmt.Errorf("%w: downloaded %.1f%% of the file but not the first %d bytes continuously after %s (pieces are arriving out of order)",
+						ErrStillBuffering, lastProgress*100, needHead, timeout)
+				}
+				return nil, fmt.Errorf("%w: after %s the file is %.1f%% downloaded and needs %d bytes of head",
+					ErrStillBuffering, timeout, lastProgress*100, needHead)
 			}
-			if lastProgress < 0 {
-				return nil, fmt.Errorf("torrent metadata not available after %s (no file list from client)", timeout)
-			}
-			// Every remaining case is a torrent that is downloading and simply
-			// has not got there yet, so all of them wrap ErrStillBuffering: the
-			// caller must retry this same torrent rather than start another for
-			// the same film.
-			if fastFinish {
-				// The download was outrunning the clock, not misbehaving. Naming
-				// ordering here would point at the wrong thing entirely.
-				return nil, fmt.Errorf("%w: still finishing after %s (file %.1f%% downloaded, and downloading fast — the prepare timeout is the limit here, not the swarm)",
-					ErrStillBuffering, timeout, lastProgress*100)
-			}
-			if fragmentedHead {
-				// The data is arriving fine, just not at the front of the file,
-				// and the operator needs to know that to act on it.
-				return nil, fmt.Errorf("%w: downloaded %.1f%% of the file but not the first %d bytes continuously after %s (pieces are arriving out of order)",
-					ErrStillBuffering, lastProgress*100, needHead, timeout)
-			}
-			return nil, fmt.Errorf("%w: after %s the file is %.1f%% downloaded and needs %d bytes of head",
-				ErrStillBuffering, timeout, lastProgress*100, needHead)
 		}
 		select {
 		case <-ctx.Done():
@@ -1574,18 +1616,33 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 // momentary dip in the rate would extend a wait already in progress, and the
 // caller has a fixed budget to spend. ceiling is the requirement as first
 // computed, which nothing may exceed.
-func (m *Manager) reviseHead(ctx context.Context, c tclient.Client, hash string, current, ceiling int64, profile PlaybackProfile, warned *bool) int64 {
+//
+// pieceSize, when positive, lowers the floor from MinHeadBytes (four 4 MiB
+// pieces) to one piece. With exact piece tracking a contiguous prefix is
+// provable rather than assumed, so a single piece at the playhead is enough
+// runway for the check to pass; the byte floor's four-piece margin exists for
+// the byte-progress case that cannot say where the data is.
+func (m *Manager) reviseHead(ctx context.Context, c tclient.Client, hash string, current, ceiling int64, profile PlaybackProfile, pieceSize int64, warned *bool) int64 {
+	floorMin := MinHeadBytes
+	if pieceSize > 0 && pieceSize < floorMin {
+		floorMin = pieceSize
+	}
 	if current <= 0 || current > ceiling {
 		current = ceiling
 	}
-	if !profile.Valid() || current <= MinHeadBytes {
+	if !profile.Valid() || current <= floorMin {
 		return current
 	}
 	info, err := c.Get(ctx, hash)
 	if err != nil || info == nil || info.DlSpeed <= 0 {
 		return current // no rate to go on; the opening figure stands
 	}
-	want := HeadBytesFor(profile, info.DlSpeed)
+	var want int64
+	if pieceSize > 0 {
+		want = HeadBytesForPieceTracking(profile, info.DlSpeed, pieceSize)
+	} else {
+		want = HeadBytesFor(profile, info.DlSpeed)
+	}
 	if want >= current {
 		return current
 	}
