@@ -540,12 +540,20 @@ func (e *Engine) parseJSONRows(raw []byte) []Result {
 	path := jsonPath(sel)
 	top, err := parseJSONObject(raw)
 	if err != nil || top == nil {
-		logger.Debug("cardigann: JSON response did not parse as an object", "base", e.baseURL, "rows_selector", sel, "err", err)
+		bodyPrefix := string(raw)
+		if len(bodyPrefix) > 500 {
+			bodyPrefix = bodyPrefix[:500]
+		}
+		logger.Warn("cardigann: JSON response did not parse as an object — this is the body SeedStream received", "base", e.baseURL, "rows_selector", sel, "err", err, "body_prefix", bodyPrefix)
 		return nil
 	}
 	arr, ok := jsonNavigateArray(top, path)
 	if !ok {
-		logger.Debug("cardigann: rows JSON path did not locate an array", "base", e.baseURL, "rows_selector", sel, "path", path)
+		bodyPrefix := string(raw)
+		if len(bodyPrefix) > 500 {
+			bodyPrefix = bodyPrefix[:500]
+		}
+		logger.Warn("cardigann: rows JSON path did not locate an array — the response parsed as JSON but the rows selector missed", "base", e.baseURL, "rows_selector", sel, "path", path, "body_prefix", bodyPrefix)
 		return nil
 	}
 	var out []Result
