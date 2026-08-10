@@ -7,9 +7,12 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"text/template"
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"seedstream/pkg/core/logger"
 )
 
 // Context carries everything a definition's templates can refer to while a
@@ -29,50 +32,101 @@ type Context struct {
 // definitions use. The engine implements the small subset the definitions
 // actually rely on rather than pulling in a full template language, so that a
 // malformed definition can never execute arbitrary logic.
-var (
-	reSimpleVar = regexp.MustCompile(`\{\{\s*\.([A-Za-z0-9_.]+)\s*\}\}`)
-	reIfBlock   = regexp.MustCompile(`(?s)\{\{\s*if\s+\.([A-Za-z0-9_.]+)\s*\}\}(.*?)\{\{\s*end\s*\}\}`)
-	reRangeCats = regexp.MustCompile(`(?s)\{\{\s*range\s+\.Categories\s*\}\}(.*?)\{\{\s*end\s*\}\}`)
-	reJoinCats  = regexp.MustCompile(`\{\{\s*join\s+\.Categories\s+"([^"]*)"\s*\}\}`)
-)
 
-// Expand resolves the template forms used by definitions against ctx.
+// Expand renders a definition's template against ctx.
+//
+// This is Go's text/template rather than a set of regexes. The regex engine it
+// replaces matched only "{{ if .Something }}…{{ end }}", so three forms real
+// definitions use went straight through untouched: "{{ else }}", "{{ if or … }}"
+// and "{{ if and … }}". TorrentLeech's search path uses all three, so its
+// unrendered template was URL-encoded into the request path, the tracker
+// rejected the nonsense URL, and every search returned nothing while login and
+// everything else looked healthy.
+//
+// text/template is the same class of engine Jackett and Prowlarr use, so the
+// definitions behave as their authors tested them.
 func (ctx *Context) Expand(tmpl string) string {
 	if tmpl == "" || !strings.Contains(tmpl, "{{") {
 		return tmpl
 	}
-	out := tmpl
+	t, err := template.New("cardigann").Funcs(ctx.funcMap()).Option("missingkey=zero").Parse(tmpl)
+	if err != nil {
+		logger.Debug("cardigann: template parse failed, using it literally",
+			"template", tmpl, "err", err)
+		return tmpl
+	}
+	var b strings.Builder
+	if err := t.Execute(&b, ctx.data()); err != nil {
+		logger.Debug("cardigann: template execution failed, using it literally",
+			"template", tmpl, "err", err)
+		return tmpl
+	}
+	return b.String()
+}
 
-	// {{ join .Categories "," }}
-	out = reJoinCats.ReplaceAllStringFunc(out, func(m string) string {
-		sep := reJoinCats.FindStringSubmatch(m)[1]
-		return strings.Join(ctx.Categories, sep)
-	})
+// parses reports whether a template is well-formed. A definition carrying a
+// syntax error cannot be rendered by any engine, and separating that from an
+// engine gap is what keeps the two from being confused.
+func (ctx *Context) parses(tmpl string) bool {
+	if !strings.Contains(tmpl, "{{") {
+		return true
+	}
+	_, err := template.New("cardigann").Funcs(ctx.funcMap()).Parse(tmpl)
+	return err == nil
+}
 
-	// {{ range .Categories }}cat[]={{.}}&{{ end }}
-	out = reRangeCats.ReplaceAllStringFunc(out, func(m string) string {
-		body := reRangeCats.FindStringSubmatch(m)[1]
-		var b strings.Builder
-		for _, c := range ctx.Categories {
-			b.WriteString(strings.ReplaceAll(body, "{{.}}", c))
+// funcMap provides the helpers Cardigann definitions call.
+func (ctx *Context) funcMap() template.FuncMap {
+	return template.FuncMap{
+		// join is Cardigann's own spelling: {{ join .Categories "," }}. Go's
+		// built-in has the arguments the other way round, so it cannot be used
+		// directly.
+		"join": func(items []string, sep string) string { return strings.Join(items, sep) },
+	}
+}
+
+// data is what the template sees.
+//
+// Config values are normalised first, because Go and Cardigann disagree about
+// truth. A checkbox setting is stored as the string "false", and to Go's
+// template package a non-empty string is true — so "{{ if .Config.freeleech }}"
+// would fire on a checkbox the operator had explicitly turned off. Emptying
+// those makes Go's truthiness mean what the definition intends.
+func (ctx *Context) data() map[string]any {
+	cfg := make(map[string]string, len(ctx.Config))
+	for k, v := range ctx.Config {
+		if isFalsey(v) {
+			cfg[k] = ""
+			continue
 		}
-		return b.String()
-	})
+		cfg[k] = v
+	}
+	return map[string]any{
+		"Config":     cfg,
+		"Query":      ctx.Query,
+		"Result":     ctx.Result,
+		"Keywords":   ctx.Keywords,
+		"Categories": ctx.Categories,
+		"BaseUrl":    ctx.BaseURL,
+		"BaseURL":    ctx.BaseURL,
+		"Today":      ctx.Today.Format("2006-01-02"),
+		// Cardigann's own boolean literals, used as {{ eq .Config.x .False }}.
+		// False is the empty string rather than "false" so it compares equal to
+		// a normalised off-setting: the same normalisation that makes "if" work
+		// would otherwise make every "eq …​ .False" answer the wrong way.
+		"True":  "true",
+		"False": "",
+	}
+}
 
-	// {{ if .Query.X }}...{{ end }}
-	out = reIfBlock.ReplaceAllStringFunc(out, func(m string) string {
-		sub := reIfBlock.FindStringSubmatch(m)
-		if ctx.lookup(sub[1]) != "" {
-			return sub[2]
-		}
-		return ""
-	})
-
-	// {{ .Config.username }} / {{ .Keywords }} / {{ .Result.title }}
-	out = reSimpleVar.ReplaceAllStringFunc(out, func(m string) string {
-		return ctx.lookup(reSimpleVar.FindStringSubmatch(m)[1])
-	})
-	return out
+// isFalsey reports whether a stored setting means "off". Checkboxes arrive as
+// strings, so this is the only place the distinction can be made.
+func isFalsey(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "false", "0", "no", "off":
+		return true
+	}
+	return false
 }
 
 // lookup resolves a dotted template path such as "Config.username".
