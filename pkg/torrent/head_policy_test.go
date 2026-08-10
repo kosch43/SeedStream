@@ -1,6 +1,7 @@
 package torrent
 
 import (
+	"math"
 	"testing"
 )
 
@@ -183,5 +184,53 @@ func TestPieceTrackingFallsBackWithoutPieceSize(t *testing.T) {
 	want := HeadBytesFor(p, 557_000_000)
 	if got := HeadBytesForPieceTracking(p, 557_000_000, 0); got != want {
 		t.Fatalf("without a piece size the piece-tracking path must match HeadBytesFor, got %d want %d", got, want)
+	}
+}
+
+// TestPieceTrackingRequiresTwoLargePieces is the 80 GB remux field case: 64 MiB
+// pieces, a 99 Mbps-class stream delivered faster than playback. The rate-aware
+// head shrinks to jitter, which one piece would satisfy — but a 64 MiB piece is a
+// cliff, so the head must round up to two. A scattered sequential download that
+// has only piece 0 on disk must not be declared ready.
+func TestPieceTrackingRequiresTwoLargePieces(t *testing.T) {
+	// 80,773,656,621 bytes, ~7.9 MB/s playback (matches the logged run).
+	p := PlaybackProfile{FileBytes: 80_773_656_621, RuntimeSeconds: 10_201}
+	const piece = 64 << 20
+	got := HeadBytesForPieceTracking(p, 52_000_000, piece)
+	aligned := AlignHeadToPieces(got, piece)
+	if aligned < piece*2 {
+		t.Fatalf("a 64 MiB-piece remux needs at least two pieces of head, got %d (aligned %d)", got, aligned)
+	}
+	if aligned%piece != 0 {
+		t.Fatalf("piece-tracking head %d is not a whole number of pieces", aligned)
+	}
+}
+
+// TestPieceTrackingOnePieceFloorHoldsBelowByteFloor: the two-piece floor only
+// applies when a single piece already exceeds the byte runway floor. Below that
+// boundary the head matches the one-piece floor exactly — small-piece torrents
+// keep the fast start (see also TestPieceTrackingLowersTheFloor). At and above
+// the boundary the head is the same calculation floored at two pieces instead.
+func TestPieceTrackingOnePieceFloorHoldsBelowByteFloor(t *testing.T) {
+	p := PlaybackProfile{FileBytes: 80_773_656_621, RuntimeSeconds: 10_201}
+	want := int64(math.Ceil(float64(headSecondsFor(p, 52_000_000)) * p.BytesPerSecond()))
+	cases := []struct {
+		name     string
+		piece    int64
+		minFloor int64
+	}{
+		{"small piece, one-piece floor", 4 << 20, 4 << 20},
+		{"byte-floor piece, one-piece floor", MinHeadBytes, MinHeadBytes},
+		{"just below boundary, one-piece floor", MinHeadBytes*2 - 1, MinHeadBytes*2 - 1},
+		{"at boundary, two-piece floor", MinHeadBytes * 2, MinHeadBytes * 4},
+		{"large piece, two-piece floor", 64 << 20, 128 << 20},
+	}
+	for _, tc := range cases {
+		got := HeadBytesForPieceTracking(p, 52_000_000, tc.piece)
+		alignedGot := AlignHeadToPieces(got, tc.piece)
+		alignedWant := AlignHeadToPieces(clampHeadTo(want, p.FileBytes, tc.minFloor), tc.piece)
+		if alignedGot != alignedWant {
+			t.Fatalf("%s: got %d, want %d (minFloor %d, piece %d)", tc.name, alignedGot, alignedWant, tc.minFloor, tc.piece)
+		}
 	}
 }

@@ -192,5 +192,16 @@ func HeadBytesForPieceTracking(p PlaybackProfile, dlBytesPerSec, pieceSize int64
 	playback := p.BytesPerSecond()
 	seconds := headSecondsFor(p, dlBytesPerSec)
 	want := int64(math.Ceil(float64(seconds) * playback))
-	return clampHeadTo(want, p.FileBytes, pieceSize)
+	minHead := pieceSize
+	// A single piece larger than the byte runway floor is a cliff on its own:
+	// playback drains it and then waits on the next piece to arrive, which on a
+	// scattered sequential download has not come yet. Requiring the second piece
+	// too guarantees the player a cued-up piece ahead, instead of starting on a
+	// one-piece runway the stall detector already flags as too short. Pieces at
+	// or below the byte floor keep the one-piece minimum, so small-piece
+	// torrents are unaffected.
+	if pieceSize >= MinHeadBytes*2 {
+		minHead = pieceSize * 2
+	}
+	return clampHeadTo(want, p.FileBytes, minHead)
 }
