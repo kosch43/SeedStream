@@ -452,6 +452,15 @@ var managedFilePriorities = struct {
 	original map[string]map[int]int // client/hash -> file index -> prior priority
 }{original: make(map[string]map[int]int)}
 
+// lastReAnchorTimes shares the re-anchor steering throttle across every
+// concurrent prepare for one torrent. The key is playbackSelectionKey
+// (client identity + hash); the value is when the last SteerToPiece was
+// issued for it. Per-prepare pacing used to let N concurrent prepares re-anchor
+// at N×reAnchorInterval, and on Transmission that many torrent-set calls in
+// quick succession is the shape of "steering itself keeps piece 0 from
+// arriving". The shared map collapses them to one steer per interval.
+var lastReAnchorTimes sync.Map
+
 const playbackPriorityGrace = 30 * time.Second
 
 type forceStartLease struct {
@@ -1271,7 +1280,6 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 	needHead := bufferBytes
 	warnedRevised := false
 	anchoredHead := false
-	var lastReAnchor time.Time
 	// Swarm health: a freshly added torrent needs a moment to find peers, so the
 	// live seeder count is only judged after a grace period, and only when the
 	// download has also failed to advance — a small but fast swarm is fine.
@@ -1280,11 +1288,22 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 	selectionKey := ""
 	selectionFileIndex := -1
 	for {
+		infoFresh := false
 		if current, getErr := c.Get(ctx, info.Hash); getErr == nil && current != nil {
 			*info = *current
+			infoFresh = true
 			if err := ensurePlaybackStarted(info); err != nil {
 				return nil, fmt.Errorf("start torrent for playback: %w", err)
 			}
+		}
+		// infoArg is the torrent state reviseHead/nearingCompletion use for the
+		// download rate, passed in instead of letting each refetch it. nil when
+		// the top-of-poll Get failed, so those helpers fall back to their own
+		// fetch (which will also fail and leave the head unchanged) rather than
+		// shrinking from a stale rate.
+		var infoArg *qbittorrent.TorrentInfo
+		if infoFresh {
+			infoArg = info
 		}
 		files, err := c.Files(ctx, info.Hash)
 		if err != nil {
@@ -1379,7 +1398,7 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 					}
 				}
 				needHead = m.reviseHead(ctx, c, info.Hash, needHead,
-					requiredHeadBytes(bufferBytes, f.Size), profile, pieceSize, &warnedRevised)
+					requiredHeadBytes(bufferBytes, f.Size), profile, pieceSize, infoArg, &warnedRevised)
 
 				// A fragmented head is a download whose data is arriving out
 				// of order. The download-speed shrink is only safe when data
@@ -1423,7 +1442,7 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 					// for the file IS waiting for the head, and both arrive at the
 					// same moment. Saying otherwise sends an operator hunting for a
 					// fault in piece ordering that is not there.
-					fast, remain := nearingCompletion(ctx, c, info.Hash, deadline)
+					fast, remain := nearingCompletion(ctx, c, info.Hash, deadline, infoArg)
 					fastFinish = fast
 					if fast {
 						fragmentedHead = false
@@ -1450,10 +1469,16 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 						// Rate-limited instead of unbounded: it is a cheap RPC,
 						// but repeating it every 1.5s poll would be noise rather
 						// than pressure.
-						if len(f.PieceRange) == 2 && f.PieceRange[0] >= 0 &&
-							time.Since(lastReAnchor) >= reAnchorInterval {
-							{
-								lastReAnchor = time.Now()
+						if len(f.PieceRange) == 2 && f.PieceRange[0] >= 0 {
+							steerKey := playbackSelectionKey(clientIdentity, info.Hash)
+							canSteer := true
+							if v, ok := lastReAnchorTimes.Load(steerKey); ok {
+								if t, okT := v.(time.Time); okT && time.Since(t) < reAnchorInterval {
+									canSteer = false
+								}
+							}
+							if canSteer {
+								lastReAnchorTimes.Store(steerKey, time.Now())
 								// Steer at the hole, not at the file's first
 								// piece. A fragmented head normally has a run
 								// from byte zero — pieces 0..k on disk, piece
@@ -1622,7 +1647,7 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 // provable rather than assumed, so a single piece at the playhead is enough
 // runway for the check to pass; the byte floor's four-piece margin exists for
 // the byte-progress case that cannot say where the data is.
-func (m *Manager) reviseHead(ctx context.Context, c tclient.Client, hash string, current, ceiling int64, profile PlaybackProfile, pieceSize int64, warned *bool) int64 {
+func (m *Manager) reviseHead(ctx context.Context, c tclient.Client, hash string, current, ceiling int64, profile PlaybackProfile, pieceSize int64, info *qbittorrent.TorrentInfo, warned *bool) int64 {
 	floorMin := MinHeadBytes
 	if pieceSize > 0 && pieceSize < floorMin {
 		floorMin = pieceSize
@@ -1633,9 +1658,17 @@ func (m *Manager) reviseHead(ctx context.Context, c tclient.Client, hash string,
 	if !profile.Valid() || current <= floorMin {
 		return current
 	}
-	info, err := c.Get(ctx, hash)
-	if err != nil || info == nil || info.DlSpeed <= 0 {
-		return current // no rate to go on; the opening figure stands
+	// info, when non-nil, is the torrent state the prepare loop already fetched
+	// this poll, so re-fetching it here would be a redundant round trip to the
+	// seedbox. nil (a failed top-of-poll Get, or a test) falls back to fetching.
+	if info == nil {
+		fetched, err := c.Get(ctx, hash)
+		if err != nil || fetched == nil || fetched.DlSpeed <= 0 {
+			return current // no rate to go on; the opening figure stands
+		}
+		info = fetched
+	} else if info.DlSpeed <= 0 {
+		return current
 	}
 	var want int64
 	if pieceSize > 0 {
@@ -1669,9 +1702,17 @@ func (m *Manager) reviseHead(ctx context.Context, c tclient.Client, hash string,
 // Deliberately conservative: an unreadable torrent, an unknown size, or a
 // download rate of zero all report false, so the ordinary path is what runs
 // whenever this cannot be established.
-func nearingCompletion(ctx context.Context, c tclient.Client, hash string, deadline time.Time) (bool, time.Duration) {
-	info, err := c.Get(ctx, hash)
-	if err != nil || info == nil || info.Size <= 0 || info.DlSpeed <= 0 {
+func nearingCompletion(ctx context.Context, c tclient.Client, hash string, deadline time.Time, info *qbittorrent.TorrentInfo) (bool, time.Duration) {
+	// info is the torrent state the prepare loop already fetched this poll;
+	// nil falls back to fetching, preserving the old behaviour for callers
+	// without a fresh snapshot (tests, and a failed top-of-poll Get).
+	if info == nil {
+		fetched, err := c.Get(ctx, hash)
+		if err != nil || fetched == nil || fetched.Size <= 0 || fetched.DlSpeed <= 0 {
+			return false, 0
+		}
+		info = fetched
+	} else if info.Size <= 0 || info.DlSpeed <= 0 {
 		return false, 0
 	}
 	remaining := info.Size - int64(info.Progress*float64(info.Size))

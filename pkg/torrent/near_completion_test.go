@@ -42,7 +42,7 @@ func TestBudgetDoesNotExcuseOrderingEarly(t *testing.T) {
 	c := etaServer(t, 0.05, remaining/33)
 
 	deadline := time.Now().Add(78 * time.Second) // budget left, as in the logs
-	fast, eta := nearingCompletion(context.Background(), c, "abcdefabcdefabcdefabcdefabcdefabcdefabcd", deadline)
+	fast, eta := nearingCompletion(context.Background(), c, "abcdefabcdefabcdefabcdefabcdefabcdefabcd", deadline, nil)
 
 	if fast {
 		t.Fatalf("at 5%% progress with %v to go, the prepare budget must not excuse piece ordering", eta)
@@ -57,7 +57,7 @@ func TestBudgetStillAppliesNearTheEnd(t *testing.T) {
 	c := etaServer(t, 0.97, remaining/40)
 
 	deadline := time.Now().Add(78 * time.Second)
-	fast, _ := nearingCompletion(context.Background(), c, "abcdefabcdefabcdefabcdefabcdefabcdefabcd", deadline)
+	fast, _ := nearingCompletion(context.Background(), c, "abcdefabcdefabcdefabcdefabcdefabcdefabcd", deadline, nil)
 
 	if !fast {
 		t.Fatal("at 97% with the remainder inside the budget, waiting for the file is the right call")
@@ -76,7 +76,7 @@ func TestShortEtaNeedsRealProgressToo(t *testing.T) {
 	remaining := int64(float64(7_100_000_000) * 0.95)
 	c := etaServer(t, 0.05, remaining/5) // ~5 seconds left, at 5% progress
 
-	fast, _ := nearingCompletion(context.Background(), c, "abcdefabcdefabcdefabcdefabcdefabcdefabcd", time.Time{})
+	fast, _ := nearingCompletion(context.Background(), c, "abcdefabcdefabcdefabcdefabcdefabcdefabcd", time.Time{}, nil)
 	if fast {
 		t.Fatal("a five-second ETA at 5% progress must not excuse piece ordering; the pieces are scattered, not arriving")
 	}
@@ -89,7 +89,7 @@ func TestShortEtaStillCountsNearTheEnd(t *testing.T) {
 	remaining := int64(float64(7_100_000_000) * 0.05)
 	c := etaServer(t, 0.95, remaining/5) // ~5 seconds left, at 95% progress
 
-	fast, _ := nearingCompletion(context.Background(), c, "abcdefabcdefabcdefabcdefabcdefabcdefabcd", time.Time{})
+	fast, _ := nearingCompletion(context.Background(), c, "abcdefabcdefabcdefabcdefabcdefabcdefabcd", time.Time{}, nil)
 	if !fast {
 		t.Fatal("a file five seconds from done at 95% progress is finishing in moments")
 	}
