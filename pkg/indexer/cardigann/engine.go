@@ -408,6 +408,8 @@ func (e *Engine) searchPath(ctx context.Context, p SearchPath, base *Context) ([
 		method = http.MethodPost
 	}
 
+	logger.Debug("cardigann: search request", "tracker", e.def.Name, "url", target)
+
 	if method == http.MethodGet {
 		q := form.Encode()
 		if rawExtra != "" {
@@ -430,6 +432,7 @@ func (e *Engine) searchPath(ctx context.Context, p SearchPath, base *Context) ([
 	if err != nil {
 		return nil, err
 	}
+	logger.Debug("cardigann: search response", "tracker", e.def.Name, "url", target, "html_bytes", len(raw))
 	if p.Response != nil && strings.EqualFold(strings.TrimSpace(p.Response.Type), "json") {
 		return e.parseJSONRows([]byte(raw)), nil
 	}
