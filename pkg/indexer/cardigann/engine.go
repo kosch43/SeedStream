@@ -433,6 +433,13 @@ func (e *Engine) searchPath(ctx context.Context, p SearchPath, base *Context) ([
 		return nil, err
 	}
 	logger.Debug("cardigann: search response", "tracker", e.def.Name, "url", target, "html_bytes", len(raw))
+	if len(raw) > 0 {
+		sample := string(raw)
+		if len(sample) > 500 {
+			sample = sample[:500]
+		}
+		logger.Debug("cardigann: search html sample", "tracker", e.def.Name, "html", sample)
+	}
 	if p.Response != nil && strings.EqualFold(strings.TrimSpace(p.Response.Type), "json") {
 		return e.parseJSONRows([]byte(raw)), nil
 	}
