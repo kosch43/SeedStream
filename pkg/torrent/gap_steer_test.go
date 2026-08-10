@@ -141,3 +141,61 @@ func TestReaderSteersAtTheGapItIsBlockedOn(t *testing.T) {
 		t.Fatal("the read did not resume once its piece arrived")
 	}
 }
+
+// TestGapSteerSharedThrottleDeduplicatesAcrossReaders: the per-reader pacing in
+// steerAtGap only gates one SeekableFileReader, and each player reconnect gets a
+// fresh reader, so without the shared throttle N concurrent reads on the same
+// stalled piece would fire N steers per interval. The shared map keyed on
+// (client, hash, piece) collapses them to one.
+func TestGapSteerSharedThrottleDeduplicatesAcrossReaders(t *testing.T) {
+	// Drive the throttle directly: the production closure checks
+	// gapSteerAllowed before SteerToPiece, so a second call for the same key
+	// inside gapSteerInterval must be refused while a different piece is
+	// still allowed.
+	const key50 = "test\x00" + "abcdefabcdefabcdefabcdefabcdefabcdefabcd" + "\x00" + "50"
+	const key200 = "test\x00" + "abcdefabcdefabcdefabcdefabcdefabcdefabcd" + "\x00" + "200"
+
+	// Clean slate: neither piece has been steered.
+	lastGapSteerTimes.Delete(key50)
+	lastGapSteerTimes.Delete(key200)
+
+	if !gapSteerAllowed(key50) {
+		t.Fatal("an unsteered piece must be allowed through")
+	}
+	// Record a steer for piece 50, as the production closure does on success.
+	lastGapSteerTimes.Store(key50, time.Now())
+
+	if gapSteerAllowed(key50) {
+		t.Fatal("a second steer for the same piece within gapSteerInterval must be refused")
+	}
+	// A different piece is a different hole and must not be suppressed.
+	if !gapSteerAllowed(key200) {
+		t.Fatal("a steer for a different piece must not be suppressed by an unrelated one")
+	}
+
+	// After the interval elapses, piece 50 is allowed again.
+	lastGapSteerTimes.Store(key50, time.Now().Add(-gapSteerInterval-time.Second))
+	if !gapSteerAllowed(key50) {
+		t.Fatal("after gapSteerInterval elapses a steer must be allowed again")
+	}
+
+	lastGapSteerTimes.Delete(key50)
+	lastGapSteerTimes.Delete(key200)
+}
+
+// TestGapSteerKeyIsPieceSpecific: the key includes the piece so a steer for one
+// hole cannot suppress another. A key collision would make a stuck piece 200
+// wait behind an unrelated piece 50's throttle.
+func TestGapSteerKeyIsPieceSpecific(t *testing.T) {
+	got := gapSteerKey("qb:type:https://x", "ABCDEF", 50)
+	want := "qb:type:https://x\x00abcdef\x0050"
+	if got != want {
+		t.Fatalf("gapSteerKey = %q, want %q", got, want)
+	}
+	if gapSteerKey("c", "h", 50) == gapSteerKey("c", "h", 200) {
+		t.Fatal("keys for different pieces must differ")
+	}
+	if gapSteerKey("c1", "h", 50) == gapSteerKey("c2", "h", 50) {
+		t.Fatal("keys for different clients must differ")
+	}
+}

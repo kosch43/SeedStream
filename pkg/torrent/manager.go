@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -460,6 +461,40 @@ var managedFilePriorities = struct {
 // quick succession is the shape of "steering itself keeps piece 0 from
 // arriving". The shared map collapses them to one steer per interval.
 var lastReAnchorTimes sync.Map
+
+// lastGapSteerTimes shares the gap-steer throttle across every reader on one
+// torrent. The key is gapSteerKey (client identity + hash + piece); the value
+// is when the last SteerToPiece was issued for that piece. Per-reader pacing
+// in steerAtGap only gates one SeekableFileReader, and each player reconnect
+// gets a fresh reader, so N concurrent range requests used to fire N gap-steers
+// per interval on the same stalled piece. Keying on the piece — not the hash
+// — keeps a steer for piece 50 from suppressing one for piece 200: a different
+// hole is a different steer.
+//
+// Entries outlive the stall they record (pieces never un-download, so a stored
+// steer for an arrived piece is simply never consulted again). The growth is
+// bounded by the number of distinct pieces ever steered, and the same property
+// holds for lastReAnchorTimes; neither is evicted today.
+var lastGapSteerTimes sync.Map
+
+// gapSteerKey is the throttle key for one missing piece of one torrent on one
+// client. Lowercased hash for case-insensitive matching, piece as decimal.
+func gapSteerKey(clientIdentity, hash string, piece int) string {
+	return strings.TrimSpace(clientIdentity) + "\x00" + strings.ToLower(strings.TrimSpace(hash)) + "\x00" + strconv.Itoa(piece)
+}
+
+// gapSteerAllowed reports whether a steer for this piece may be issued now
+// under the shared throttle. true when no steer has been recorded within
+// gapSteerInterval; the caller records one on success by calling
+// lastGapSteerTimes.Store.
+func gapSteerAllowed(key string) bool {
+	if v, ok := lastGapSteerTimes.Load(key); ok {
+		if t, okT := v.(time.Time); okT && time.Since(t) < gapSteerInterval {
+			return false
+		}
+	}
+	return true
+}
 
 const playbackPriorityGrace = 30 * time.Second
 
@@ -1007,6 +1042,17 @@ func (m *Manager) OpenForPlayback(ctx context.Context, res *PrepareResult, ph *P
 			if !ok {
 				return
 			}
+			// Share the steer throttle across every reader on this torrent.
+			// steerAtGap already paces one reader, but each player reconnect
+			// gets a fresh reader with its own lastGapSteer, so N concurrent
+			// reads on the same stalled piece used to fire N steers per
+			// interval. The key includes the piece so a steer for one hole
+			// never suppresses a steer for a different one.
+			key := gapSteerKey(res.ClientIdentity, res.Hash, piece)
+			if !gapSteerAllowed(key) {
+				return
+			}
+			lastGapSteerTimes.Store(key, time.Now())
 			if err := steerClient.SteerToPiece(steerCtx, res.Hash, piece); err != nil {
 				logger.Debug("gap steer: could not re-anchor download at the missing piece",
 					"hash", shortHash(res.Hash), "piece", piece, "byte_offset", byteOffset, "err", err)
@@ -1026,10 +1072,14 @@ type PrepareResult struct {
 	AbsPath    string
 	Name       string
 	Size       int64
-	Hash       string  // torrent infohash for progress polling
-	FileIndex  int     // file index within the torrent
-	ClientName string  // name of the download client that holds this torrent
-	Progress   float64 // download progress at prepare time (0..1)
+	Hash       string // torrent infohash for progress polling
+	FileIndex  int    // file index within the torrent
+	ClientName string // name of the download client that holds this torrent
+	// ClientIdentity is the unique "type:url" key for the download client,
+	// used to key per-torrent steering throttles shared across readers. May
+	// be empty for results that were never steered (a complete file).
+	ClientIdentity string
+	Progress       float64 // download progress at prepare time (0..1)
 
 	releaseSelection func()
 }
@@ -1534,6 +1584,7 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 						Hash:             info.Hash,
 						FileIndex:        f.Index,
 						ClientName:       clientName,
+						ClientIdentity:   clientIdentity,
 						Progress:         f.Progress,
 						releaseSelection: releaseSelection,
 					}
