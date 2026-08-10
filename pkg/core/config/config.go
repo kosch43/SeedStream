@@ -996,6 +996,13 @@ func Load() (*Config, error) {
 	if cfg.backfillLegacySearchQuerySettings() {
 		needSave = true
 	}
+	// Always ensure the default search queries exist. They are idempotent
+	// (only added if missing by name), so this is safe on every load and
+	// restores defaults if a config edit, manual wipe, or a failed upgrade
+	// left them gone — without them no stream can return results.
+	if cfg.ensureDefaultMigrationSearchQueries() {
+		needSave = true
+	}
 	if streamModelUpgrade && cfg.applyStreamModelUpgradeDefaults() {
 		needSave = true
 	}

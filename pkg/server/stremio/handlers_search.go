@@ -857,9 +857,9 @@ func (s *Server) runConfiguredSearchRequests(contentType, id, streamLabel string
 	// indexers yet. Each query gets its own clone of the base params so
 	// parallel execution cannot race on shared label fields.
 	type searchJob struct {
-		idx          indexer.Indexer
-		reqVariant   indexer.SearchRequest
-		contentType  string
+		idx         indexer.Indexer
+		reqVariant  indexer.SearchRequest
+		contentType string
 	}
 	jobs := make([]searchJob, 0, len(selectedQueries))
 	executedRequests := 0
@@ -1204,6 +1204,17 @@ func dedupeCombinedSearchResults(streamLabel string, stream *auth.Stream, releas
 
 func (s *Server) buildRawSearchResult(ctx context.Context, contentType, id string, stream *auth.Stream) (*rawSearchResult, error) {
 	selectedQueries := streamSearchQueryNames(stream, contentType)
+	if len(selectedQueries) == 0 {
+		// Fall back to all global search queries of this content type, so a
+		// stream that was created before search requests were configured
+		// (or had them removed) still returns results. Matches what
+		// GetSearchReleases does for its own fallback stream.
+		if contentType == "movie" {
+			selectedQueries = allSearchQueryNames(s.config.MovieSearchQueries)
+		} else {
+			selectedQueries = allSearchQueryNames(s.config.SeriesSearchQueries)
+		}
+	}
 	if len(selectedQueries) == 0 {
 		return nil, fmt.Errorf("stream is missing at least one %s search request", contentType)
 	}
