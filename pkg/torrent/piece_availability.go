@@ -405,3 +405,87 @@ func (a *fileAvailability) PieceForByte(ctx context.Context, byteOffset int64) (
 	}
 	return piece, true
 }
+
+// FirstMissingPiece returns the torrent index of the first piece covering
+// [offset, offset+length) that is not on disk, and true. It returns false
+// when every piece in the range is downloaded, or when piece-level tracking
+// cannot answer (complete latch, no bitmap, client without piece data).
+//
+// This exists because "the head is fragmented" is not one condition. On a
+// swarm delivering pieces out of order the run from byte zero usually exists
+// up to some point — pieces 0..k on disk, piece k+1 missing, later pieces
+// scattered beyond. Re-anchoring the download at piece 0 then asks for
+// something the picker already has at the top of its list; anchoring at k+1
+// puts the actual hole at the top, which is the only request that moves the
+// run forward. The same applies mid-playback to a gap the viewer is sitting
+// on.
+//
+// A cached bitmap is trusted for this: pieces do not become un-downloaded, so
+// a piece missing in a snapshot up to the cache window old is still missing,
+// and steering at it costs nothing even in the unlikely stale case.
+func (a *fileAvailability) FirstMissingPiece(ctx context.Context, offset, length int64) (int, bool) {
+	if length <= 0 {
+		return 0, false
+	}
+	end := offset + length
+	if end > a.fileSize {
+		end = a.fileSize
+	}
+	if offset >= a.fileSize {
+		return 0, false
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.complete {
+		return 0, false
+	}
+	a.initLocked(ctx)
+	if !a.pieceMode {
+		return 0, false
+	}
+	if len(a.states) <= a.lastPiece {
+		// No bitmap yet. Fetch one, on the same floor used for negative
+		// availability answers, so a wait does not become a request loop.
+		if time.Since(a.lastFetch) < negativeRecheckInterval {
+			return 0, false
+		}
+		states, err := a.client.PieceStates(ctx, a.hash)
+		a.lastFetch = time.Now()
+		if err != nil || len(states) <= a.lastPiece {
+			return 0, false
+		}
+		a.states = states
+	}
+	first := a.firstPiece + int(offset/a.pieceSize)
+	last := a.firstPiece + int((end-1)/a.pieceSize)
+	if !a.aligned {
+		last++ // unknown intra-piece start: widen as piecesAvailableLocked does
+	}
+	if last > a.lastPiece {
+		last = a.lastPiece
+	}
+	if first > a.lastPiece {
+		first = a.lastPiece
+	}
+	for i := first; i <= last; i++ {
+		if a.states[i] != qbittorrent.PieceDownloaded {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+// PieceSize reports the torrent's piece size, or 0 when piece tracking is off
+// or not yet initialised. Triggers initialisation on first call, so the cost
+// is one round trip per prepare rather than per poll.
+func (a *fileAvailability) PieceSize(ctx context.Context) int64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.initLocked(ctx)
+	if !a.pieceMode {
+		return 0
+	}
+	return a.pieceSize
+}

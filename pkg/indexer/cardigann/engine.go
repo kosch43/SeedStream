@@ -161,8 +161,14 @@ func (e *Engine) do(ctx context.Context, method, rawURL string, form url.Values,
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Cache-Control", "max-age=0")
 	if form != nil && method == http.MethodPost {
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Origin", strings.TrimRight(e.baseURL, "/"))
+		req.Header.Set("Referer", rawURL)
+	} else {
+		req.Header.Set("Referer", strings.TrimRight(e.baseURL, "/")+"/")
 	}
 	// A pasted session cookie is how trackers behind a captcha are supported.
 	if c := strings.TrimSpace(e.config["cookie"]); c != "" {

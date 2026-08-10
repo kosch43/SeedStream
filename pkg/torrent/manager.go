@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -125,6 +126,15 @@ func KeepReleaseOnRetry(err error) bool {
 // that cannot assert itself before the file is simply finished delays nothing
 // and reports a fault that is not there.
 const fastCompletionWindow = 30 * time.Second
+
+// maxDeadlineExtensions bounds how far a nearly-finished download may push the
+// prepare deadline out. Each extension is one fastCompletionWindow, so this
+// caps the total reprieve rather than letting a stalled torrent wait forever.
+const maxDeadlineExtensions = 4
+
+// stallGrace is how long progress may sit still before a deadline extension is
+// refused. A download that has stopped moving is not "about to finish".
+const stallGrace = 15 * time.Second
 
 // nearCompletionProgress is how far in a download must be before "it will
 // finish inside the prepare budget" is accepted as a reason to stop caring
@@ -442,6 +452,49 @@ var managedFilePriorities = struct {
 	sync.Mutex
 	original map[string]map[int]int // client/hash -> file index -> prior priority
 }{original: make(map[string]map[int]int)}
+
+// lastReAnchorTimes shares the re-anchor steering throttle across every
+// concurrent prepare for one torrent. The key is playbackSelectionKey
+// (client identity + hash); the value is when the last SteerToPiece was
+// issued for it. Per-prepare pacing used to let N concurrent prepares re-anchor
+// at N×reAnchorInterval, and on Transmission that many torrent-set calls in
+// quick succession is the shape of "steering itself keeps piece 0 from
+// arriving". The shared map collapses them to one steer per interval.
+var lastReAnchorTimes sync.Map
+
+// lastGapSteerTimes shares the gap-steer throttle across every reader on one
+// torrent. The key is gapSteerKey (client identity + hash + piece); the value
+// is when the last SteerToPiece was issued for that piece. Per-reader pacing
+// in steerAtGap only gates one SeekableFileReader, and each player reconnect
+// gets a fresh reader, so N concurrent range requests used to fire N gap-steers
+// per interval on the same stalled piece. Keying on the piece — not the hash
+// — keeps a steer for piece 50 from suppressing one for piece 200: a different
+// hole is a different steer.
+//
+// Entries outlive the stall they record (pieces never un-download, so a stored
+// steer for an arrived piece is simply never consulted again). The growth is
+// bounded by the number of distinct pieces ever steered, and the same property
+// holds for lastReAnchorTimes; neither is evicted today.
+var lastGapSteerTimes sync.Map
+
+// gapSteerKey is the throttle key for one missing piece of one torrent on one
+// client. Lowercased hash for case-insensitive matching, piece as decimal.
+func gapSteerKey(clientIdentity, hash string, piece int) string {
+	return strings.TrimSpace(clientIdentity) + "\x00" + strings.ToLower(strings.TrimSpace(hash)) + "\x00" + strconv.Itoa(piece)
+}
+
+// gapSteerAllowed reports whether a steer for this piece may be issued now
+// under the shared throttle. true when no steer has been recorded within
+// gapSteerInterval; the caller records one on success by calling
+// lastGapSteerTimes.Store.
+func gapSteerAllowed(key string) bool {
+	if v, ok := lastGapSteerTimes.Load(key); ok {
+		if t, okT := v.(time.Time); okT && time.Since(t) < gapSteerInterval {
+			return false
+		}
+	}
+	return true
+}
 
 const playbackPriorityGrace = 30 * time.Second
 
@@ -975,6 +1028,39 @@ func (m *Manager) OpenForPlayback(ctx context.Context, res *PrepareResult, ph *P
 					"hash", shortHash(res.Hash), "piece", piece, "byte_offset", byteOffset, "err", err)
 			}
 		}
+		// A read blocked on a gap is steered at the missing piece itself, not
+		// at the piece that merely contains the offset: the run up to the gap
+		// is usually already on disk, and the freeze ends when the hole is
+		// fetched, which is what anchoring the sequential order at it does.
+		reader.gapSteerFunc = func(steerCtx context.Context, byteOffset int64) {
+			piece, ok := avail.FirstMissingPiece(steerCtx, byteOffset, res.Size-byteOffset)
+			if !ok {
+				if p, ok2 := avail.PieceForByte(steerCtx, byteOffset); ok2 {
+					piece, ok = p, true
+				}
+			}
+			if !ok {
+				return
+			}
+			// Share the steer throttle across every reader on this torrent.
+			// steerAtGap already paces one reader, but each player reconnect
+			// gets a fresh reader with its own lastGapSteer, so N concurrent
+			// reads on the same stalled piece used to fire N steers per
+			// interval. The key includes the piece so a steer for one hole
+			// never suppresses a steer for a different one.
+			key := gapSteerKey(res.ClientIdentity, res.Hash, piece)
+			if !gapSteerAllowed(key) {
+				return
+			}
+			lastGapSteerTimes.Store(key, time.Now())
+			if err := steerClient.SteerToPiece(steerCtx, res.Hash, piece); err != nil {
+				logger.Debug("gap steer: could not re-anchor download at the missing piece",
+					"hash", shortHash(res.Hash), "piece", piece, "byte_offset", byteOffset, "err", err)
+				return
+			}
+			logger.Info("Playback: read stalled on a gap — steering the download at the missing piece",
+				"hash", shortHash(res.Hash), "piece", piece, "byte_offset", byteOffset)
+		}
 	}
 	return reader, nil
 }
@@ -986,10 +1072,14 @@ type PrepareResult struct {
 	AbsPath    string
 	Name       string
 	Size       int64
-	Hash       string  // torrent infohash for progress polling
-	FileIndex  int     // file index within the torrent
-	ClientName string  // name of the download client that holds this torrent
-	Progress   float64 // download progress at prepare time (0..1)
+	Hash       string // torrent infohash for progress polling
+	FileIndex  int    // file index within the torrent
+	ClientName string // name of the download client that holds this torrent
+	// ClientIdentity is the unique "type:url" key for the download client,
+	// used to key per-torrent steering throttles shared across readers. May
+	// be empty for results that were never steered (a complete file).
+	ClientIdentity string
+	Progress       float64 // download progress at prepare time (0..1)
 
 	releaseSelection func()
 }
@@ -1223,6 +1313,8 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 	var lastClientErr error
 	clientErrs := 0
 	lastProgress := -1.0
+	progressAt := time.Now()
+	extensions := 0
 	// Readiness is decided on the piece bitmap, not on a byte count. Created
 	// once the video file is known and reused across polls so its cached bitmap
 	// and complete-latch survive the loop.
@@ -1238,7 +1330,6 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 	needHead := bufferBytes
 	warnedRevised := false
 	anchoredHead := false
-	var lastReAnchor time.Time
 	// Swarm health: a freshly added torrent needs a moment to find peers, so the
 	// live seeder count is only judged after a grace period, and only when the
 	// download has also failed to advance — a small but fast swarm is fine.
@@ -1247,11 +1338,22 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 	selectionKey := ""
 	selectionFileIndex := -1
 	for {
+		infoFresh := false
 		if current, getErr := c.Get(ctx, info.Hash); getErr == nil && current != nil {
 			*info = *current
+			infoFresh = true
 			if err := ensurePlaybackStarted(info); err != nil {
 				return nil, fmt.Errorf("start torrent for playback: %w", err)
 			}
+		}
+		// infoArg is the torrent state reviseHead/nearingCompletion use for the
+		// download rate, passed in instead of letting each refetch it. nil when
+		// the top-of-poll Get failed, so those helpers fall back to their own
+		// fetch (which will also fail and leave the head unchanged) rather than
+		// shrinking from a stale rate.
+		var infoArg *qbittorrent.TorrentInfo
+		if infoFresh {
+			infoArg = info
 		}
 		files, err := c.Files(ctx, info.Hash)
 		if err != nil {
@@ -1275,6 +1377,9 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 		if err == nil && len(files) > 0 {
 			f := pickVideoFile(files, season, episode)
 			if f != nil {
+				if f.Progress > lastProgress {
+					progressAt = time.Now()
+				}
 				lastProgress = f.Progress
 				// On a multi-file torrent (e.g. a season pack), pull the file
 				// being played ahead of the rest so its head buffers first.
@@ -1316,6 +1421,13 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 				if avail == nil && f.Size > 0 {
 					avail = newFileAvailability(c, info.Hash, f.Index, f.Size)
 				}
+				// Piece size, known once the availability tracker has
+				// initialised. Zero until then, or when the client offers no
+				// piece bitmap — in which case the head stays byte-floored.
+				var pieceSize int64
+				if avail != nil {
+					pieceSize = avail.PieceSize(ctx)
+				}
 				// Point the download at the piece playback starts on, for a
 				// client that can be told. Done once, and only once the file
 				// list has arrived, because the video's first piece is not the
@@ -1336,7 +1448,7 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 					}
 				}
 				needHead = m.reviseHead(ctx, c, info.Hash, needHead,
-					requiredHeadBytes(bufferBytes, f.Size), profile, &warnedRevised)
+					requiredHeadBytes(bufferBytes, f.Size), profile, pieceSize, infoArg, &warnedRevised)
 
 				// A fragmented head is a download whose data is arriving out
 				// of order. The download-speed shrink is only safe when data
@@ -1362,6 +1474,14 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 
 				headReady := false
 				if avail != nil {
+					// Round the head up to whole pieces so the byte target and
+					// the piece check ask for the same thing: a 23.5 MiB head
+					// on 4 MiB pieces is six pieces either way, but stating it
+					// in pieces keeps the timeout message and the fragmented
+					// detection consistent with what was actually required.
+					if pieceSize > 0 {
+						needHead = AlignHeadToPieces(needHead, pieceSize)
+					}
 					headReady = avail.BytesAvailable(ctx, 0, needHead)
 				}
 				if !headReady && f.Size > 0 {
@@ -1372,7 +1492,7 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 					// for the file IS waiting for the head, and both arrive at the
 					// same moment. Saying otherwise sends an operator hunting for a
 					// fault in piece ordering that is not there.
-					fast, remain := nearingCompletion(ctx, c, info.Hash, deadline)
+					fast, remain := nearingCompletion(ctx, c, info.Hash, deadline, infoArg)
 					fastFinish = fast
 					if fast {
 						fragmentedHead = false
@@ -1399,16 +1519,38 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 						// Rate-limited instead of unbounded: it is a cheap RPC,
 						// but repeating it every 1.5s poll would be noise rather
 						// than pressure.
-						if len(f.PieceRange) == 2 && f.PieceRange[0] >= 0 &&
-							time.Since(lastReAnchor) >= reAnchorInterval {
-							{
-								lastReAnchor = time.Now()
-								if err := c.SteerToPiece(ctx, info.Hash, f.PieceRange[0]); err != nil {
+						if len(f.PieceRange) == 2 && f.PieceRange[0] >= 0 {
+							steerKey := playbackSelectionKey(clientIdentity, info.Hash)
+							canSteer := true
+							if v, ok := lastReAnchorTimes.Load(steerKey); ok {
+								if t, okT := v.(time.Time); okT && time.Since(t) < reAnchorInterval {
+									canSteer = false
+								}
+							}
+							if canSteer {
+								lastReAnchorTimes.Store(steerKey, time.Now())
+								// Steer at the hole, not at the file's first
+								// piece. A fragmented head normally has a run
+								// from byte zero — pieces 0..k on disk, piece
+								// k+1 missing, later pieces scattered beyond —
+								// and anchoring at piece 0 asks for what the
+								// picker already has. Measured on a 71 GB
+								// remux: four minutes of re-anchors at piece 0
+								// while the run sat waiting on one early piece
+								// that never climbed the queue. The missing
+								// piece is the anchor that moves the run.
+								target := f.PieceRange[0]
+								if avail != nil {
+									if missing, ok := avail.FirstMissingPiece(ctx, 0, needHead); ok {
+										target = missing
+									}
+								}
+								if err := c.SteerToPiece(ctx, info.Hash, target); err != nil {
 									logger.Debug("could not re-anchor sequential download",
 										"hash", shortHash(info.Hash), "err", err)
 								} else {
-									logger.Info("Playback: head still fragmented, re-anchoring the download at the video's first piece",
-										"hash", shortHash(info.Hash), "piece", f.PieceRange[0], "progress", f.Progress)
+									logger.Info("Playback: head still fragmented, re-anchoring the download at the first missing head piece",
+										"hash", shortHash(info.Hash), "piece", target, "progress", f.Progress)
 								}
 							}
 						}
@@ -1442,6 +1584,7 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 						Hash:             info.Hash,
 						FileIndex:        f.Index,
 						ClientName:       clientName,
+						ClientIdentity:   clientIdentity,
 						Progress:         f.Progress,
 						releaseSelection: releaseSelection,
 					}
@@ -1490,30 +1633,43 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 			}
 		}
 		if time.Now().After(deadline) {
-			if lastClientErr != nil {
-				return nil, fmt.Errorf("torrent client error while preparing playback after %s: %w", timeout, lastClientErr)
+			// Having decided to wait for the whole file, honour that decision.
+			// A download at 99.9% and still climbing finishes sooner than a
+			// retry would, and failing here throws away the wait already spent.
+			// The guards keep this from rewarding a stall: progress must still
+			// be advancing inside stallGrace, and the total reprieve is capped.
+			if fastFinish && lastProgress >= nearCompletionProgress &&
+				time.Since(progressAt) < stallGrace && extensions < maxDeadlineExtensions {
+				extensions++
+				deadline = time.Now().Add(fastCompletionWindow)
+				logger.Info("Playback: nearly complete and still advancing — extending the prepare deadline",
+					"hash", shortHash(info.Hash), "progress", lastProgress, "extension", extensions)
+			} else {
+				if lastClientErr != nil {
+					return nil, fmt.Errorf("torrent client error while preparing playback after %s: %w", timeout, lastClientErr)
+				}
+				if lastProgress < 0 {
+					return nil, fmt.Errorf("torrent metadata not available after %s (no file list from client)", timeout)
+				}
+				// Every remaining case is a torrent that is downloading and simply
+				// has not got there yet, so all of them wrap ErrStillBuffering: the
+				// caller must retry this same torrent rather than start another for
+				// the same film.
+				if fastFinish {
+					// The download was outrunning the clock, not misbehaving. Naming
+					// ordering here would point at the wrong thing entirely.
+					return nil, fmt.Errorf("%w: still finishing after %s (file %.1f%% downloaded, and downloading fast — the prepare timeout is the limit here, not the swarm)",
+						ErrStillBuffering, timeout, lastProgress*100)
+				}
+				if fragmentedHead {
+					// The data is arriving fine, just not at the front of the file,
+					// and the operator needs to know that to act on it.
+					return nil, fmt.Errorf("%w: downloaded %.1f%% of the file but not the first %d bytes continuously after %s (pieces are arriving out of order)",
+						ErrStillBuffering, lastProgress*100, needHead, timeout)
+				}
+				return nil, fmt.Errorf("%w: after %s the file is %.1f%% downloaded and needs %d bytes of head",
+					ErrStillBuffering, timeout, lastProgress*100, needHead)
 			}
-			if lastProgress < 0 {
-				return nil, fmt.Errorf("torrent metadata not available after %s (no file list from client)", timeout)
-			}
-			// Every remaining case is a torrent that is downloading and simply
-			// has not got there yet, so all of them wrap ErrStillBuffering: the
-			// caller must retry this same torrent rather than start another for
-			// the same film.
-			if fastFinish {
-				// The download was outrunning the clock, not misbehaving. Naming
-				// ordering here would point at the wrong thing entirely.
-				return nil, fmt.Errorf("%w: still finishing after %s (file %.1f%% downloaded, and downloading fast — the prepare timeout is the limit here, not the swarm)",
-					ErrStillBuffering, timeout, lastProgress*100)
-			}
-			if fragmentedHead {
-				// The data is arriving fine, just not at the front of the file,
-				// and the operator needs to know that to act on it.
-				return nil, fmt.Errorf("%w: downloaded %.1f%% of the file but not the first %d bytes continuously after %s (pieces are arriving out of order)",
-					ErrStillBuffering, lastProgress*100, needHead, timeout)
-			}
-			return nil, fmt.Errorf("%w: after %s the file is %.1f%% downloaded and needs %d bytes of head",
-				ErrStillBuffering, timeout, lastProgress*100, needHead)
 		}
 		select {
 		case <-ctx.Done():
@@ -1536,18 +1692,41 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 // momentary dip in the rate would extend a wait already in progress, and the
 // caller has a fixed budget to spend. ceiling is the requirement as first
 // computed, which nothing may exceed.
-func (m *Manager) reviseHead(ctx context.Context, c tclient.Client, hash string, current, ceiling int64, profile PlaybackProfile, warned *bool) int64 {
+//
+// pieceSize, when positive, lowers the floor from MinHeadBytes (four 4 MiB
+// pieces) to one piece. With exact piece tracking a contiguous prefix is
+// provable rather than assumed, so a single piece at the playhead is enough
+// runway for the check to pass; the byte floor's four-piece margin exists for
+// the byte-progress case that cannot say where the data is.
+func (m *Manager) reviseHead(ctx context.Context, c tclient.Client, hash string, current, ceiling int64, profile PlaybackProfile, pieceSize int64, info *qbittorrent.TorrentInfo, warned *bool) int64 {
+	floorMin := MinHeadBytes
+	if pieceSize > 0 && pieceSize < floorMin {
+		floorMin = pieceSize
+	}
 	if current <= 0 || current > ceiling {
 		current = ceiling
 	}
-	if !profile.Valid() || current <= MinHeadBytes {
+	if !profile.Valid() || current <= floorMin {
 		return current
 	}
-	info, err := c.Get(ctx, hash)
-	if err != nil || info == nil || info.DlSpeed <= 0 {
-		return current // no rate to go on; the opening figure stands
+	// info, when non-nil, is the torrent state the prepare loop already fetched
+	// this poll, so re-fetching it here would be a redundant round trip to the
+	// seedbox. nil (a failed top-of-poll Get, or a test) falls back to fetching.
+	if info == nil {
+		fetched, err := c.Get(ctx, hash)
+		if err != nil || fetched == nil || fetched.DlSpeed <= 0 {
+			return current // no rate to go on; the opening figure stands
+		}
+		info = fetched
+	} else if info.DlSpeed <= 0 {
+		return current
 	}
-	want := HeadBytesFor(profile, info.DlSpeed)
+	var want int64
+	if pieceSize > 0 {
+		want = HeadBytesForPieceTracking(profile, info.DlSpeed, pieceSize)
+	} else {
+		want = HeadBytesFor(profile, info.DlSpeed)
+	}
 	if want >= current {
 		return current
 	}
@@ -1574,9 +1753,17 @@ func (m *Manager) reviseHead(ctx context.Context, c tclient.Client, hash string,
 // Deliberately conservative: an unreadable torrent, an unknown size, or a
 // download rate of zero all report false, so the ordinary path is what runs
 // whenever this cannot be established.
-func nearingCompletion(ctx context.Context, c tclient.Client, hash string, deadline time.Time) (bool, time.Duration) {
-	info, err := c.Get(ctx, hash)
-	if err != nil || info == nil || info.Size <= 0 || info.DlSpeed <= 0 {
+func nearingCompletion(ctx context.Context, c tclient.Client, hash string, deadline time.Time, info *qbittorrent.TorrentInfo) (bool, time.Duration) {
+	// info is the torrent state the prepare loop already fetched this poll;
+	// nil falls back to fetching, preserving the old behaviour for callers
+	// without a fresh snapshot (tests, and a failed top-of-poll Get).
+	if info == nil {
+		fetched, err := c.Get(ctx, hash)
+		if err != nil || fetched == nil || fetched.Size <= 0 || fetched.DlSpeed <= 0 {
+			return false, 0
+		}
+		info = fetched
+	} else if info.Size <= 0 || info.DlSpeed <= 0 {
 		return false, 0
 	}
 	remaining := info.Size - int64(info.Progress*float64(info.Size))
@@ -1584,7 +1771,16 @@ func nearingCompletion(ctx context.Context, c tclient.Client, hash string, deadl
 		return true, 0
 	}
 	eta := time.Duration(float64(remaining) / float64(info.DlSpeed) * float64(time.Second))
-	if eta <= fastCompletionWindow {
+	// The thirty-second window is subject to the same progress gate as the
+	// budget branch below. Measured in the field: a 5.6 GB file 48% downloaded
+	// at 125 MB/s had a 27-second ETA, took this branch, and playback waited
+	// for the whole file — because on a swarm that fast the in-flight window
+	// scatters pieces across the whole file, the continuous head does not
+	// complete until near the end, and "the file is moments away" said nothing
+	// about where those moments of data were landing. Below the gate the
+	// honest answer is "head still fragmented", which keeps the steering
+	// pressure on instead of silently waiting for 100%.
+	if eta <= fastCompletionWindow && info.Progress >= nearCompletionProgress {
 		return true, eta
 	}
 	// The prepare budget is not evidence about piece order.

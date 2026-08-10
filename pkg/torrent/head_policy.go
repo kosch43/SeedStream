@@ -136,20 +136,61 @@ func legacyTierSeconds(bitrate float64) int64 {
 
 // clampHead applies the bounds that hold whatever the arithmetic produced.
 func clampHead(want, fileBytes int64) int64 {
+	return clampHeadTo(want, fileBytes, MinHeadBytes)
+}
+
+// clampHeadTo is clampHead with an explicit floor. A caller that can prove a
+// contiguous run through the piece bitmap may lower the floor to one piece,
+// where the byte-default MinHeadBytes (four 4 MiB pieces) is unnecessary.
+func clampHeadTo(want, fileBytes, minHead int64) int64 {
 	if want > MaxHeadBytes {
 		want = MaxHeadBytes
 	}
 	// A tenth of the file is minutes of video at any bitrate, so it is always
 	// enough to start on, and it keeps a bad runtime estimate from becoming a
 	// long wait.
-	if ceiling := int64(float64(fileBytes) * StreamableHeadFraction); ceiling > 0 && want > ceiling && ceiling >= MinHeadBytes {
+	if ceiling := int64(float64(fileBytes) * StreamableHeadFraction); ceiling > 0 && want > ceiling && ceiling >= minHead {
 		want = ceiling
 	}
-	if want < MinHeadBytes {
-		want = MinHeadBytes
+	if want < minHead {
+		want = minHead
 	}
 	if want > fileBytes {
 		want = fileBytes
 	}
 	return want
+}
+
+// AlignHeadToPieces rounds a head requirement up to whole pieces and floors it
+// at one piece.
+//
+// The head is checked against the piece bitmap, so a byte target is really a
+// piece target: 16 MiB means four consecutive 4 MiB pieces but only half of a
+// 32 MiB piece. Sizing in bytes therefore asks small-piece torrents for four
+// times the consecutive run, which is exactly where out-of-order arrival is
+// most likely to leave a hole.
+func AlignHeadToPieces(head, pieceSize int64) int64 {
+	if pieceSize <= 0 {
+		return head
+	}
+	if head < pieceSize {
+		return pieceSize
+	}
+	return ((head + pieceSize - 1) / pieceSize) * pieceSize
+}
+
+// HeadBytesForPieceTracking is HeadBytesFor with the floor lowered to one piece,
+// for callers that can prove a contiguous run via the piece bitmap rather than
+// assume one from byte progress. A single piece at the playhead is enough to
+// pass the head check there, so the four-piece MinHeadBytes floor is not needed.
+//
+// Returns HeadBytesFor's answer when pieceSize is not positive.
+func HeadBytesForPieceTracking(p PlaybackProfile, dlBytesPerSec, pieceSize int64) int64 {
+	if !p.Valid() || pieceSize <= 0 {
+		return HeadBytesFor(p, dlBytesPerSec)
+	}
+	playback := p.BytesPerSecond()
+	seconds := headSecondsFor(p, dlBytesPerSec)
+	want := int64(math.Ceil(float64(seconds) * playback))
+	return clampHeadTo(want, p.FileBytes, pieceSize)
 }

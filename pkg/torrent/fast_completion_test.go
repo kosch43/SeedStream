@@ -99,7 +99,7 @@ func TestNearingCompletionUsesTheDownloadRate(t *testing.T) {
 	// 1 MiB/s: about 2 seconds left — comfortably inside the window.
 	q := fragmentedFast(1 << 20)
 	c := qbittorrent.New(qbittorrent.Options{BaseURL: q.server(t).URL, Category: "seedstream"})
-	fast, remain := nearingCompletion(ctx, c, "abcdefabcdefabcdefabcdefabcdefabcdefabcd", time.Time{})
+	fast, remain := nearingCompletion(ctx, c, "abcdefabcdefabcdefabcdefabcdefabcdefabcd", time.Time{}, nil)
 	if !fast {
 		t.Fatalf("2 MiB left at 1 MiB/s is seconds away, got not-fast (%v)", remain)
 	}
@@ -107,7 +107,7 @@ func TestNearingCompletionUsesTheDownloadRate(t *testing.T) {
 	// 16 KiB/s: over two minutes left — this download is not about to finish.
 	slow := fragmentedFast(16 << 10)
 	cs := qbittorrent.New(qbittorrent.Options{BaseURL: slow.server(t).URL, Category: "seedstream"})
-	if fast, remain := nearingCompletion(ctx, cs, "abcdefabcdefabcdefabcdefabcdefabcdefabcd", time.Time{}); fast {
+	if fast, remain := nearingCompletion(ctx, cs, "abcdefabcdefabcdefabcdefabcdefabcdefabcd", time.Time{}, nil); fast {
 		t.Fatalf("2 MiB left at 16 KiB/s is %v away, which is not 'nearing completion'", remain)
 	}
 }
@@ -117,7 +117,7 @@ func TestNearingCompletionUsesTheDownloadRate(t *testing.T) {
 func TestNearingCompletionIsConservative(t *testing.T) {
 	q := fragmentedFast(0) // stalled: no rate to extrapolate from
 	c := qbittorrent.New(qbittorrent.Options{BaseURL: q.server(t).URL, Category: "seedstream"})
-	if fast, _ := nearingCompletion(context.Background(), c, "abcdefabcdefabcdefabcdefabcdefabcdefabcd", time.Time{}); fast {
+	if fast, _ := nearingCompletion(context.Background(), c, "abcdefabcdefabcdefabcdefabcdefabcdefabcd", time.Time{}, nil); fast {
 		t.Fatal("a stalled download must not be treated as about to finish")
 	}
 }
@@ -232,7 +232,7 @@ func TestHeadRevisionNeverGrows(t *testing.T) {
 	warned := false
 	const current = 8 << 20
 	got := mgr.reviseHead(context.Background(), c, "abcdefabcdefabcdefabcdefabcdefabcdefabcd",
-		current, 120<<20, profile, &warned)
+		current, 120<<20, profile, 0, nil, &warned)
 	if got > current {
 		t.Fatalf("the requirement grew from %d to %d mid-wait", current, got)
 	}
@@ -248,7 +248,7 @@ func TestHeadRevisionWithoutAProfileIsANoOp(t *testing.T) {
 	warned := false
 	const current = 64 << 20
 	got := mgr.reviseHead(context.Background(), c, "abcdefabcdefabcdefabcdefabcdefabcdefabcd",
-		current, current, PlaybackProfile{}, &warned)
+		current, current, PlaybackProfile{}, 0, nil, &warned)
 	if got != current {
 		t.Fatalf("without a profile the head must be left alone, got %d want %d", got, current)
 	}

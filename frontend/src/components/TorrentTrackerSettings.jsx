@@ -183,7 +183,7 @@ function TrackerDialog({ open, onOpenChange, initialValue, onSave, onClearStatus
   const handleSave = async () => {
     const nextFieldErrors = {}
     if (!draft.name?.trim()) nextFieldErrors.name = 'Tracker name is required'
-    if (!draft.url?.trim()) nextFieldErrors.url = 'URL is required'
+    if (!isDefinition && !draft.url?.trim()) nextFieldErrors.url = 'URL is required'
     if (duplicateName) nextFieldErrors.name = 'A tracker with this name already exists'
     if (duplicateTracker) nextFieldErrors.url = `An identical tracker already exists: "${duplicateTracker.name}".`
     if (Object.keys(nextFieldErrors).length > 0) {

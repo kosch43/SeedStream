@@ -453,12 +453,6 @@ function StreamDialog({
     if (next.indexers.length === 0) {
       nextFieldErrors.indexers = 'Add at least one tracker.'
     }
-    if (next.movie_search_queries.length === 0) {
-      nextFieldErrors.movie_search_queries = 'Add at least one movie search request.'
-    }
-    if (next.series_search_queries.length === 0) {
-      nextFieldErrors.series_search_queries = 'Add at least one TV search request.'
-    }
     if (Object.keys(nextFieldErrors).length > 0) {
       setFieldErrors(nextFieldErrors)
       setSaveError(
