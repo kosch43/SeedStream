@@ -75,7 +75,7 @@ func (m *Manager) EvaluateRetention(
 		return v
 	}
 	if e.Progress < 0.999 {
-		v.Reason = fmt.Sprintf("torrent is only %.1f%% complete", e.Progress*100)
+		v.Reason = fmt.Sprintf("torrent is only %.2f%% complete", floorPercent(e.Progress))
 		return v
 	}
 

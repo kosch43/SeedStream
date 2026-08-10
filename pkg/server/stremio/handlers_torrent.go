@@ -133,13 +133,18 @@ func (s *Server) serveTorrent(w http.ResponseWriter, r *http.Request, sess *sess
 
 	// The profile lets prepare shrink the head once it can see the real download
 	// rate. The opening bufferBytes above was necessarily a guess from bitrate.
-	res, err := s.torrentManager.PrepareForPlayback(prepCtx, playRelease, season, episode,
-		bufferBytes, s.playbackProfile(sess), prepareTimeout, nil)
+	//
+	// Routed through preparePlayback rather than called directly so that the
+	// several range requests a player opens for one title share a single
+	// prepare loop. Two loops on one torrent double the polling and the
+	// steering RPCs without buffering it any faster.
+	res, releasePrepare, err := s.preparePlayback(prepCtx, sess, playRelease, playHash,
+		season, episode, bufferBytes, prepareTimeout)
 	if err != nil {
 		logger.Warn("Torrent prepare failed", "session", sess.ID, "title", playRelease.Title, "err", err)
 		return fmt.Errorf("torrent still preparing: %w", err)
 	}
-	defer s.torrentManager.ReleasePlayback(res)
+	defer releasePrepare()
 
 	// The torrent is now accepted by a download client, which is what taking a
 	// release from a tracker amounts to here. Counted once per session against

@@ -1,13 +1,16 @@
 package tmdb
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
-	"strconv"
 	"seedstream/pkg/core/logger"
 	"seedstream/pkg/release"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -130,10 +133,12 @@ type TVTranslationData struct {
 	Overview string `json:"overview"`
 }
 
-func (c *Client) doRequest(endpoint string, params url.Values) (*http.Response, error) {
-	// TMDB v3 API keys (32 hex chars) are rejected as Bearer tokens and must be
-	// sent as the api_key query parameter. v4 access tokens (JWT) use the
-	// Authorization: Bearer header.
+// newRequest builds an authenticated GET for a TMDB endpoint.
+//
+// TMDB v3 API keys (32 hex chars) are rejected as Bearer tokens and must be
+// sent as the api_key query parameter. v4 access tokens (JWT) use the
+// Authorization: Bearer header.
+func (c *Client) newRequest(ctx context.Context, endpoint string, params url.Values) (*http.Request, error) {
 	useQueryKey := isV3APIKey(c.apiKey)
 	if useQueryKey {
 		params = cloneValues(params)
@@ -141,7 +146,7 @@ func (c *Client) doRequest(endpoint string, params url.Values) (*http.Response, 
 	}
 	reqURL := fmt.Sprintf("%s?%s", endpoint, params.Encode())
 
-	req, err := http.NewRequest("GET", reqURL, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -150,7 +155,14 @@ func (c *Client) doRequest(endpoint string, params url.Values) (*http.Response, 
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
 	req.Header.Set("accept", "application/json")
+	return req, nil
+}
 
+func (c *Client) doRequest(endpoint string, params url.Values) (*http.Response, error) {
+	req, err := c.newRequest(context.Background(), endpoint, params)
+	if err != nil {
+		return nil, err
+	}
 	return c.client.Do(req)
 }
 
@@ -172,6 +184,41 @@ func cloneValues(v url.Values) url.Values {
 		out[k] = append([]string(nil), vals...)
 	}
 	return out
+}
+
+// ErrNoAPIKey reports that no TMDB key is configured at all, as distinct from
+// one TMDB refused.
+var ErrNoAPIKey = errors.New("TMDB API key not configured")
+
+// Ping asks TMDB whether the configured key works, using /configuration —
+// the cheapest authenticated endpoint, and one that needs no content ID.
+//
+// It exists because a bad key is otherwise invisible: every lookup fails, the
+// search pipeline finds no metadata for the title, and the addon answers with
+// an empty stream list that looks exactly like "no releases found". The
+// distinction between "TMDB rejected the key" and "TMDB was unreachable"
+// matters to whoever reads the log, so the two are reported differently.
+func (c *Client) Ping(ctx context.Context) error {
+	if c == nil || strings.TrimSpace(c.apiKey) == "" {
+		return ErrNoAPIKey
+	}
+	req, err := c.newRequest(ctx, "https://api.themoviedb.org/3/configuration", url.Values{})
+	if err != nil {
+		return err
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("TMDB unreachable: %w", err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	switch {
+	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+		return fmt.Errorf("TMDB rejected the API key (HTTP %d)", resp.StatusCode)
+	case resp.StatusCode >= 400:
+		return fmt.Errorf("TMDB returned HTTP %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func (c *Client) Find(externalID, source string) (*FindResponse, error) {

@@ -477,6 +477,16 @@ var lastReAnchorTimes sync.Map
 // holds for lastReAnchorTimes; neither is evicted today.
 var lastGapSteerTimes sync.Map
 
+// openingAnchors records the torrents whose sequential download has already
+// been pointed at the video's first piece, keyed by playbackSelectionKey
+// (client identity + hash). The anchor is state held by the download client,
+// so the latch has to outlive the prepare that placed it; without that, every
+// player retry re-anchored at the file's head and undid the steering the
+// previous attempt had done. Stored only on a successful steer, and bounded
+// by the number of distinct torrents played — the same growth property as the
+// two throttle maps above, and evicted no more than they are.
+var openingAnchors sync.Map
+
 // gapSteerKey is the throttle key for one missing piece of one torrent on one
 // client. Lowercased hash for case-insensitive matching, piece as decimal.
 func gapSteerKey(clientIdentity, hash string, piece int) string {
@@ -1432,19 +1442,34 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 				// client that can be told. Done once, and only once the file
 				// list has arrived, because the video's first piece is not the
 				// torrent's first piece on a multi-file torrent.
+				//
+				// Once per torrent, not once per prepare. A player retries — a
+				// new range request, a reconnect, a failover that comes back to
+				// the same release — and each retry enters this loop afresh.
+				// Anchoring at the file's first piece again on every one of them
+				// discards whatever better anchor the previous attempt reached:
+				// the re-anchor below and the reader's gap steering both move the
+				// anchor to the piece actually being waited on, and a retry that
+				// resets it to the file's head sends the picker back to data it
+				// already has. The latch is shared across prepares because the
+				// anchor lives in the download client, not in this call.
 				if !anchoredHead && len(f.PieceRange) == 2 && f.PieceRange[0] >= 0 {
-					{
-						anchoredHead = true
-						if err := c.SteerToPiece(ctx, info.Hash, f.PieceRange[0]); err != nil {
-							// Best-effort: an older daemon has no such lever, and
-							// saying so once is more useful than failing playback
-							// over an optimisation.
-							logger.Debug("could not anchor sequential download at the video's first piece",
-								"hash", shortHash(info.Hash), "piece", f.PieceRange[0], "err", err)
-						} else {
-							logger.Info("Playback: sequential download anchored at the video's first piece",
-								"hash", shortHash(info.Hash), "file", f.Index, "piece", f.PieceRange[0])
-						}
+					anchoredHead = true
+					anchorKey := playbackSelectionKey(clientIdentity, info.Hash)
+					if _, already := openingAnchors.LoadOrStore(anchorKey, time.Now()); already {
+						logger.Debug("sequential download already anchored for this torrent, leaving the current anchor alone",
+							"hash", shortHash(info.Hash), "file", f.Index)
+					} else if err := c.SteerToPiece(ctx, info.Hash, f.PieceRange[0]); err != nil {
+						// Best-effort: an older daemon has no such lever, and
+						// saying so once is more useful than failing playback
+						// over an optimisation. Drop the latch so a later attempt
+						// can try again — nothing was anchored.
+						openingAnchors.Delete(anchorKey)
+						logger.Debug("could not anchor sequential download at the video's first piece",
+							"hash", shortHash(info.Hash), "piece", f.PieceRange[0], "err", err)
+					} else {
+						logger.Info("Playback: sequential download anchored at the video's first piece",
+							"hash", shortHash(info.Hash), "file", f.Index, "piece", f.PieceRange[0])
 					}
 				}
 				needHead = m.reviseHead(ctx, c, info.Hash, needHead,
@@ -1623,8 +1648,8 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 					// download has also failed to advance, which together do mean
 					// this is going nowhere.
 					if info2.NumSeeds < m.MinSeeders && lastProgress <= graceProgress {
-						return nil, fmt.Errorf("swarm too small to stream: %d connected seeder(s), need %d, and the download is not advancing (%.1f%%)",
-							info2.NumSeeds, m.MinSeeders, lastProgress*100)
+						return nil, fmt.Errorf("swarm too small to stream: %d connected seeder(s), need %d, and the download is not advancing (%.2f%%)",
+							info2.NumSeeds, m.MinSeeders, floorPercent(lastProgress))
 					}
 					if lastProgress > graceProgress {
 						graceProgress = lastProgress
@@ -1658,17 +1683,17 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 				if fastFinish {
 					// The download was outrunning the clock, not misbehaving. Naming
 					// ordering here would point at the wrong thing entirely.
-					return nil, fmt.Errorf("%w: still finishing after %s (file %.1f%% downloaded, and downloading fast — the prepare timeout is the limit here, not the swarm)",
-						ErrStillBuffering, timeout, lastProgress*100)
+					return nil, fmt.Errorf("%w: still finishing after %s (file %.2f%% downloaded, and downloading fast — the prepare timeout is the limit here, not the swarm)",
+						ErrStillBuffering, timeout, floorPercent(lastProgress))
 				}
 				if fragmentedHead {
 					// The data is arriving fine, just not at the front of the file,
 					// and the operator needs to know that to act on it.
-					return nil, fmt.Errorf("%w: downloaded %.1f%% of the file but not the first %d bytes continuously after %s (pieces are arriving out of order)",
-						ErrStillBuffering, lastProgress*100, needHead, timeout)
+					return nil, fmt.Errorf("%w: downloaded %.2f%% of the file but not the first %d bytes continuously after %s (pieces are arriving out of order)",
+						ErrStillBuffering, floorPercent(lastProgress), needHead, timeout)
 				}
-				return nil, fmt.Errorf("%w: after %s the file is %.1f%% downloaded and needs %d bytes of head",
-					ErrStillBuffering, timeout, lastProgress*100, needHead)
+				return nil, fmt.Errorf("%w: after %s the file is %.2f%% downloaded and needs %d bytes of head",
+					ErrStillBuffering, timeout, floorPercent(lastProgress), needHead)
 			}
 		}
 		select {

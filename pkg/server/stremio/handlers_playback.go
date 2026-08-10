@@ -151,7 +151,10 @@ func (s *Server) GetStreams(ctx context.Context, contentType, id string, stream 
 	const streamRequestTimeout = 30 * time.Second
 	ctx, cancel := context.WithTimeout(ctx, streamRequestTimeout)
 	defer cancel()
-	baseURL := s.baseURLWithToken(stream)
+	// No request here: GetStreams is the programmatic entry point (AIOStreams
+	// and friends), so the base URL falls back to the configured value or the
+	// listen address.
+	baseURL := s.baseURLWithToken(nil, stream)
 	key := StreamSlotKey{StreamID: streamID(stream), ContentType: contentType, ID: id}
 	streams, _, err := s.buildStreamsForKey(ctx, key, stream, baseURL)
 	if err != nil {
@@ -194,8 +197,11 @@ func (k StreamSlotKey) RawCacheKey() string {
 	return k.ContentType + ":" + k.ID
 }
 
-func (s *Server) baseURLWithToken(stream *auth.Stream) string {
-	base := strings.TrimSuffix(s.baseURL, "/")
+// baseURLWithToken builds the stream's own URL prefix. r may be nil for the
+// paths that construct URLs outside a request; resolveBaseURL falls back to
+// the listen address there.
+func (s *Server) baseURLWithToken(r *http.Request, stream *auth.Stream) string {
+	base := s.resolveBaseURL(r)
 	if stream != nil && stream.Token != "" {
 		base += "/" + stream.Token
 	}
@@ -587,7 +593,7 @@ func (s *Server) handleNextRelease(w http.ResponseWriter, r *http.Request, strea
 		http.Error(w, "No next release available", http.StatusNotFound)
 		return
 	}
-	nextURL := s.baseURLWithToken(stream) + "/play/" + nextSlotID + "?next=1"
+	nextURL := s.baseURLWithToken(r, stream) + "/play/" + nextSlotID + "?next=1"
 	logger.Info("Next release redirect", "from", sessionID, "to", nextSlotID)
 	w.Header().Set("Location", nextURL)
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
@@ -754,13 +760,13 @@ func (s *Server) handlePlay(w http.ResponseWriter, r *http.Request, streamConfig
 		// redirect the client to the next working slot rather than 404.
 		if streamFailoverEnabled(streamConfig) && s.sessionManager.GetSlotFailedDuringPlaybackForStream(sessionID, streamID(streamConfig)) {
 			if nextID, deriveErr := s.deriveNextSlotID(r.Context(), sessionID, streamConfig); nextID != "" && deriveErr == nil {
-				nextURL := s.baseURLWithToken(streamConfig) + "/play/" + nextID
+				nextURL := s.baseURLWithToken(r, streamConfig) + "/play/" + nextID
 				logger.Info("Session deleted (slot failed during playback), redirecting to next", "from", sessionID, "to", nextID)
 				w.Header().Set("Location", nextURL)
 				w.WriteHeader(http.StatusFound)
 				return
 			}
-			forceDisconnect(w, r, s.baseURL)
+			forceDisconnect(w, r, s.resolveBaseURL(r))
 			return
 		}
 		recoveredSess, recoveredID, recoverErr := s.recoverPlaySessionAfterEviction(r.Context(), sessionID, streamConfig)
@@ -774,13 +780,13 @@ func (s *Server) handlePlay(w http.ResponseWriter, r *http.Request, streamConfig
 		sessionID = recoveredID
 	} else if streamFailoverEnabled(streamConfig) && s.sessionManager.GetSlotFailedDuringPlaybackForStream(sessionID, streamID(streamConfig)) {
 		if nextID, deriveErr := s.deriveNextSlotID(r.Context(), sessionID, streamConfig); nextID != "" && deriveErr == nil {
-			nextURL := s.baseURLWithToken(streamConfig) + "/play/" + nextID
+			nextURL := s.baseURLWithToken(r, streamConfig) + "/play/" + nextID
 			logger.Info("Redirecting to next fallback (slot failed during playback)", "from", sessionID, "to", nextID)
 			w.Header().Set("Location", nextURL)
 			w.WriteHeader(http.StatusFound)
 			return
 		}
-		forceDisconnect(w, r, s.baseURL)
+		forceDisconnect(w, r, s.resolveBaseURL(r))
 		return
 	}
 

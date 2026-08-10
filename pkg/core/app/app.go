@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -18,8 +19,13 @@ import (
 )
 
 type BuildOpts struct {
-	TMDBAPIKey         string
-	TVDBAPIKey         string
+	TMDBAPIKey string
+	TVDBAPIKey string
+	// Fallback keys are baked in at link time (-X main.TMDBKey=…) by the
+	// release workflow, so official builds work with no key configured. A
+	// build from source has no such secret and leaves them empty — which is
+	// why ValidateTMDBKey says so at startup rather than letting searches come
+	// back empty with no explanation.
 	FallbackTMDBAPIKey string
 	FallbackTVDBAPIKey string
 	DataDir            string
@@ -120,6 +126,38 @@ func (a *App) buildFull(cfg *config.Config, opts BuildOpts) (*Components, error)
 		TVDBClient:   tvdbClient,
 		UsageManager: base.UsageManager,
 	}, nil
+}
+
+// ValidateTMDBKey says out loud, once, whether metadata lookups can work.
+//
+// Without this a missing or rejected key is silent: every TMDB lookup fails,
+// the search pipeline has no title to match releases against, and the addon
+// answers {"streams":[]} — which is indistinguishable from "this title has no
+// releases". Three rounds of diagnosis went into that gap once already.
+//
+// Never fatal. TMDB being unreachable for a minute at boot is not a reason to
+// refuse to start, and an operator who runs without metadata has been told.
+func (a *App) ValidateTMDBKey(ctx context.Context) {
+	a.mu.RLock()
+	client := (*tmdb.Client)(nil)
+	if a.components != nil {
+		client = a.components.TMDBClient
+	}
+	key := a.effectiveTMDBKey()
+	a.mu.RUnlock()
+
+	if key == "" {
+		logger.Warn("TMDB API key is not set — metadata lookups will fail and searches will return no streams. Set it in Settings → General, the TMDB_API_KEY environment variable, or config.json.")
+		return
+	}
+	if client == nil {
+		return
+	}
+	if err := client.Ping(ctx); err != nil {
+		logger.Warn("TMDB API key check failed — if the key was rejected, every search will return no streams", "err", err)
+		return
+	}
+	logger.Info("TMDB API key accepted")
 }
 
 type ReloadScope int

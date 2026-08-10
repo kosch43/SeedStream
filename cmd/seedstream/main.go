@@ -177,6 +177,16 @@ func main() {
 		initialization.WaitForInputAndExit(fmt.Errorf("failed to build components: %w", err))
 	}
 
+	// Say whether metadata lookups can work before anyone tries to stream. A
+	// bad or missing key makes every search return an empty list that looks
+	// exactly like "nothing found". In the background so a slow TMDB never
+	// delays startup.
+	go func() {
+		checkCtx, cancelCheck := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancelCheck()
+		application.ValidateTMDBKey(checkCtx)
+	}()
+
 	var cerberusOpts []cerberus.Option
 	if backend := cerberus.NewHTTPBackend(cfg.CerberusBaseURL, cfg.CerberusAPIKey); backend != nil {
 		cerberusOpts = append(cerberusOpts, cerberus.WithBackend(backend))
@@ -252,6 +262,19 @@ func main() {
 	if mismatch, want := comp.Config.BaseURLSchemeMismatch(); mismatch {
 		logger.Warn("Base URL scheme does not match the TLS setting — Stremio will be handed URLs that cannot be fetched",
 			"base_url", comp.Config.AddonBaseURL, "expected_scheme", want)
+	}
+	// Two settings whose absence breaks playback silently: with no base URL the
+	// stream URLs come out relative and no player can fetch them, and with no
+	// stream token every request 401s while the app looks perfectly healthy.
+	// Neither shows up anywhere else in the logs, so they are named here.
+	if strings.TrimSpace(comp.Config.AddonBaseURL) == "" {
+		logger.Warn("addon_base_url is not set — stream URLs will be derived from each incoming request. Set it in Settings → General to the URL players use to reach SeedStream.")
+	}
+	for name, stream := range comp.Config.Streams {
+		if stream != nil && strings.TrimSpace(stream.Token) == "" {
+			logger.Warn("Stream has no access token — every request for it will be rejected until a token is generated",
+				"stream", name)
+		}
 	}
 
 	logger.Info("Stremio addon server starting",

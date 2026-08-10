@@ -154,7 +154,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, stream *au
 	defer cancel()
 
 	logger.Trace("stream request start", "type", contentType, "id", id)
-	baseURL := s.baseURLWithToken(stream)
+	baseURL := s.baseURLWithToken(r, stream)
 	key := StreamSlotKey{StreamID: streamID(stream), ContentType: contentType, ID: id}
 	streams, list, err := s.buildStreamsForKey(ctx, key, stream, baseURL)
 	if err != nil {

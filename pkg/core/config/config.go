@@ -1420,6 +1420,13 @@ func (c *Config) SaveFile(path string) error {
 		if c.AdminToken == "" {
 			c.AdminToken = existing.AdminToken
 		}
+		// A stream's token is the whole of its authentication. AuthenticateToken
+		// can never match an empty one, so a save that blanks it locks the
+		// viewer out of every request while the app still reports healthy — the
+		// hardest kind of breakage to diagnose, because nothing looks wrong.
+		// Treated exactly like the admin secrets above: an absent token in the
+		// payload means "unchanged", never "delete".
+		restoreBlankStreamTokens(c.Streams, existing.Streams)
 	}
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
@@ -1457,6 +1464,18 @@ func (c *Config) SaveFile(path string) error {
 	if err := temp.Close(); err != nil {
 		return err
 	}
+	// Keep the outgoing file. The temp-and-rename above makes the write atomic
+	// — the config on disk is never half-written — but atomicity says nothing
+	// about the CONTENT being right. A save that is perfectly well-formed and
+	// simply wrong (a payload that drops fields, an operator who clears the
+	// wrong box) overwrites the good config just as completely, and there is
+	// nothing to go back to. One save's worth of history costs a file copy.
+	//
+	// Best-effort by design: a backup that cannot be written is a reason to
+	// mention it, not a reason to refuse a legitimate save.
+	if err := backupConfigFile(path); err != nil {
+		logger.Warn("Could not keep a backup of the previous config", "path", path+configBackupSuffix, "err", err)
+	}
 	if err := os.Rename(tempPath, path); err != nil {
 		return err
 	}
@@ -1474,6 +1493,69 @@ func (c *Config) SaveFile(path string) error {
 	}
 	c.LoadedPath = path
 	return nil
+}
+
+// restoreBlankStreamTokens fills in any stream token the outgoing config left
+// empty from the copy already on disk, matching streams by username.
+func restoreBlankStreamTokens(next, existing map[string]*StreamEntry) {
+	if len(next) == 0 || len(existing) == 0 {
+		return
+	}
+	for key, entry := range next {
+		if entry == nil || strings.TrimSpace(entry.Token) != "" {
+			continue
+		}
+		prior, ok := existing[key]
+		if !ok || prior == nil || strings.TrimSpace(prior.Token) == "" {
+			continue
+		}
+		entry.Token = prior.Token
+		logger.Warn("Config save left a stream with no token; keeping the one already saved",
+			"stream", key)
+	}
+}
+
+// configBackupSuffix names the copy of the config as it was before the most
+// recent save.
+const configBackupSuffix = ".bak"
+
+// backupConfigFile copies the current config alongside itself as
+// config.json.bak, atomically, so an interrupted backup cannot leave a
+// truncated one. Returns nil when there is nothing to back up yet.
+func backupConfigFile(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // first save; nothing to preserve
+		}
+		return err
+	}
+	dir := filepath.Dir(path)
+	if dir == "" {
+		dir = "."
+	}
+	temp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".bak-*")
+	if err != nil {
+		return err
+	}
+	tempPath := temp.Name()
+	defer func() { _ = os.Remove(tempPath) }() // no-op once renamed away
+	if err := temp.Chmod(0600); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if _, err := temp.Write(data); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if err := temp.Sync(); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tempPath, path+configBackupSuffix)
 }
 
 func existingConfigForSave(path string) (*Config, error) {

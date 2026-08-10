@@ -47,6 +47,13 @@ type Server struct {
 	webHandler                http.Handler
 	apiHandler                http.Handler
 	uniqueIndexerHits         map[string]int64
+	// prepares joins concurrent play requests for the same torrent onto one
+	// prepare loop instead of running a loop per request.
+	prepares prepareGroup
+	// listenPort is the last-resort origin for building stream URLs when
+	// addon_base_url is unset and there is no request to derive one from.
+	listenPort      int
+	warnedNoBaseURL sync.Once
 }
 
 const FailoverOrderPath = "/failover_order"
@@ -91,6 +98,7 @@ func NewServer(opts *ServerOptions) (*Server, error) {
 		uploadMeter:       opts.UploadMeter,
 		usageManager:      opts.UsageManager,
 		uniqueIndexerHits: make(map[string]int64),
+		listenPort:        opts.Port,
 	}
 	if opts.Config != nil {
 		mgr := torrent.NewManager(opts.Config.TorrentClients)
@@ -199,6 +207,9 @@ func (s *Server) Reload(opts *ServerOptions) {
 
 	s.config = opts.Config
 	s.baseURL = opts.BaseURL
+	if opts.Port > 0 {
+		s.listenPort = opts.Port
+	}
 	if opts.Config != nil {
 		mgr := torrent.NewManager(opts.Config.TorrentClients)
 		mgr.BufferBytes = opts.Config.EffectiveTorrentBufferBytes()

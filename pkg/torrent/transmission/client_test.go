@@ -230,6 +230,71 @@ func TestFilesDeriveAPieceRange(t *testing.T) {
 	}
 }
 
+// TestFilesPreferTheReportedPieceRange covers the 4.1 path: the daemon states
+// each file's piece span, and that answer beats the one derived from a running
+// byte offset. The span is half-open, so end_piece is one past the last piece
+// — reading it as inclusive would claim a piece the file does not occupy, and
+// on the final file of a torrent a piece that does not exist at all.
+func TestFilesPreferTheReportedPieceRange(t *testing.T) {
+	tor := baseTorrent()
+	// Deliberately inconsistent with the byte offsets: the derived computation
+	// would say [0 0] and [1 15], so a test that passes here can only be
+	// reading the reported values.
+	tor["files"] = []any{
+		map[string]any{"name": "a.nfo", "length": 1 << 20, "bytesCompleted": 1 << 20,
+			"begin_piece": 0, "end_piece": 2},
+		map[string]any{"name": "video.mkv", "length": 15 << 20, "bytesCompleted": 5 << 20,
+			"begin_piece": 2, "end_piece": 16},
+	}
+	tor["fileStats"] = []any{
+		map[string]any{"bytesCompleted": 1 << 20, "wanted": true, "priority": 0},
+		map[string]any{"bytesCompleted": 5 << 20, "wanted": true, "priority": 0},
+	}
+	d := &mockDaemon{torrent: tor}
+	c := d.client(t)
+
+	files, err := c.Files(context.Background(), testHash)
+	if err != nil {
+		t.Fatalf("Files: %v", err)
+	}
+	if got := files[0].PieceRange; len(got) != 2 || got[0] != 0 || got[1] != 1 {
+		t.Errorf("first file piece range %v, want [0 1] from begin_piece=0 end_piece=2", got)
+	}
+	if got := files[1].PieceRange; len(got) != 2 || got[0] != 2 || got[1] != 15 {
+		t.Errorf("video piece range %v, want [2 15] from begin_piece=2 end_piece=16", got)
+	}
+}
+
+func TestReportedPieceRangeConversions(t *testing.T) {
+	cases := []struct {
+		name                   string
+		begin, end, pieceCount int
+		want                   []int
+	}{
+		{"absent on a pre-4.1 daemon", 0, 0, 16, nil},
+		{"whole single-file torrent", 0, 16, 16, []int{0, 15}},
+		{"one piece", 3, 4, 16, []int{3, 3}},
+		{"end past the torrent is clamped", 14, 99, 16, []int{14, 15}},
+		{"begin past the torrent is refused", 20, 24, 16, nil},
+		{"unknown piece count is trusted", 2, 5, 0, []int{2, 4}},
+		{"reversed span is refused", 9, 4, 16, nil},
+		{"negative begin is refused", -1, 4, 16, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := reportedPieceRange(tc.begin, tc.end, tc.pieceCount)
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("got %v, want %v", got, tc.want)
+				}
+			}
+		})
+	}
+}
+
 func TestFilePriorityUsesSharedVocabulary(t *testing.T) {
 	tor := baseTorrent()
 	tor["files"] = []any{map[string]any{"name": "video.mkv", "length": 16 << 20, "bytesCompleted": 0}}

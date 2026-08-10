@@ -2,6 +2,7 @@ package torrent
 
 import (
 	"context"
+	"math"
 	"sync"
 	"time"
 
@@ -380,6 +381,18 @@ func shortHash(h string) string {
 		return h[:8]
 	}
 	return h
+}
+
+// floorPercent turns a 0..1 progress fraction into a percentage that is never
+// rounded up. A file at 99.963% printed as "100.0%" reads as "complete but
+// broken" — which sends the reader hunting an availability bug that does not
+// exist — so the last incomplete percent is always shown as incomplete. Two
+// decimals because one cannot distinguish 99.96% from 100%.
+func floorPercent(progress float64) float64 {
+	if progress <= 0 {
+		return 0
+	}
+	return math.Floor(progress*10000) / 100
 }
 
 // PieceForByte returns the torrent piece index covering the given file byte

@@ -218,6 +218,17 @@ type rpcTorrent struct {
 		Name           string `json:"name"`
 		Length         int64  `json:"length"`
 		BytesCompleted int64  `json:"bytesCompleted"`
+		// Transmission 4.1 reports each file's piece span directly. The keys
+		// stay snake_case even over the legacy RPC envelope this client speaks:
+		// the 4.1 compatibility layer rewrites the response to the old
+		// camelCase spelling only for keys that existed before 4.1, and these
+		// two are new. Absent on older daemons, which leaves both zero.
+		//
+		// EndPiece is EXCLUSIVE — tr_file_view documents it as "piece index
+		// where this file ends (exclusive)" — so the last piece of the file is
+		// EndPiece-1.
+		BeginPiece int `json:"begin_piece"`
+		EndPiece   int `json:"end_piece"`
 	} `json:"files"`
 	FileStats []struct {
 		BytesCompleted int64 `json:"bytesCompleted"`
@@ -471,16 +482,44 @@ func (c *Client) Files(ctx context.Context, hash string) ([]tclient.FileInfo, er
 				fi.Priority = 1
 			}
 		}
-		// Piece range, derived rather than reported. Transmission lays files out
-		// end to end across the torrent's pieces in listing order, so a running
-		// byte offset gives the pieces each file spans exactly as qBittorrent
-		// reports them — which is what makes the streaming path work unchanged.
-		if t.PieceSize > 0 {
+		// Piece range: what the daemon reports when it can, derived when it
+		// cannot. 4.1 answers with the file's own piece span, which is the
+		// authority — deriving it from a running byte offset assumes every
+		// preceding file's length is exactly what the torrent laid out, and on
+		// a multi-file torrent whose sizes do not land on piece boundaries the
+		// derived range drifts by a piece. Older daemons omit the fields, which
+		// leaves them zero, and the offset computation stands in.
+		if pr := reportedPieceRange(f.BeginPiece, f.EndPiece, t.PieceCount); pr != nil {
+			fi.PieceRange = pr
+		} else if t.PieceSize > 0 {
 			fi.PieceRange = pieceRangeFor(t, i)
 		}
 		out = append(out, fi)
 	}
 	return out, nil
+}
+
+// reportedPieceRange converts Transmission's half-open [begin_piece,
+// end_piece) span into the inclusive [first, last] pair the rest of SeedStream
+// uses, or nil when the daemon did not report one.
+//
+// Treating the exclusive end as inclusive would claim one piece past the file,
+// which on the last file of a torrent is a piece index that does not exist —
+// so the conversion is the whole point of this function.
+func reportedPieceRange(begin, end, pieceCount int) []int {
+	if begin < 0 || end <= begin {
+		return nil // absent (both zero on pre-4.1) or nonsensical
+	}
+	last := end - 1
+	if pieceCount > 0 {
+		if begin >= pieceCount {
+			return nil
+		}
+		if last >= pieceCount {
+			last = pieceCount - 1
+		}
+	}
+	return []int{begin, last}
 }
 
 // pieceRangeFor computes [firstPiece, lastPiece] for file index idx.

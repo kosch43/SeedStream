@@ -106,7 +106,7 @@ func TestTorrentStreamServedOverHTTPS(t *testing.T) {
 // stream links rather than silently downgrading to http.
 func TestStreamURLsInheritBaseURLScheme(t *testing.T) {
 	srv := &Server{baseURL: "https://seedstream.example.com"}
-	base := srv.baseURLWithToken(nil)
+	base := srv.baseURLWithToken(nil, nil)
 	if base != "https://seedstream.example.com" {
 		t.Fatalf("baseURLWithToken = %q", base)
 	}
