@@ -577,3 +577,106 @@ func TestMapCaseWildcardAndLiteral(t *testing.T) {
 		t.Fatalf("nil case must pass through, got %q", got)
 	}
 }
+
+// TestJSONSearchSendsAcceptJSONHeader is the fix for TorrentLeech returning
+// its HTML browse page instead of JSON. The search endpoint is
+// content-negotiated: TorrentLeech returns HTML when Accept is text/html and
+// JSON when Accept is application/json. The default Accept header hardcoded
+// in do() was text/html, so even with a valid session the JSON parser got an
+// HTML body and returned 0 rows. This test proves searchPath injects
+// Accept: application/json when the path declares response.type: json.
+func TestJSONSearchSendsAcceptJSONHeader(t *testing.T) {
+	const def = `
+id: jsonaccept
+name: JSON Accept
+type: private
+links:
+  - %s
+caps:
+  categorymappings:
+    - {id: "1", cat: Movies}
+  modes:
+    search: [q]
+settings:
+  - name: cookie
+    type: text
+    label: Cookie
+login:
+  path: login.php
+  method: form
+  form: form#login
+  inputs:
+    username: "{{ .Config.username }}"
+    password: "{{ .Config.password }}"
+  error:
+    - selector: span.error
+search:
+  paths:
+    - path: browse.php
+      response:
+        type: json
+  inputs:
+    search: "{{ .Keywords }}"
+  rows:
+    selector: torrentList
+  fields:
+    title:
+      selector: name
+    download:
+      selector: download
+    seeders:
+      selector: seeders
+`
+	var gotAccept string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/login.php", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			fmt.Fprint(w, `<html><body><form id="login"><input name="username"><input name="password"><input name="csrf" value="tok" type="hidden"></form></body></html>`)
+			return
+		}
+		http.SetCookie(w, &http.Cookie{Name: "session", Value: "ok", Path: "/"})
+		fmt.Fprint(w, `<html><body><a href="/logout.php">Logout</a></body></html>`)
+	})
+	mux.HandleFunc("/browse.php", func(w http.ResponseWriter, r *http.Request) {
+		gotAccept = r.Header.Get("Accept")
+		// Content-negotiated: return HTML when Accept is text/html,
+		// JSON when Accept is application/json.
+		if strings.Contains(gotAccept, "text/html") {
+			w.Header().Set("Content-Type", "text/html")
+			fmt.Fprint(w, `<html><body>browse page, not JSON</body></html>`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"torrentList":[{"name":"Result One","download":"/dl/1","seeders":5}],"numFound":1}`)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	d, err := Parse([]byte(fmt.Sprintf(def, srv.URL)))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	eng, err := NewEngine(d, "", map[string]string{"username": "alice", "password": "pw"}, 10*time.Second)
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+
+	results, err := eng.Search(context.Background(), "test", nil, nil)
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+
+	// The Accept header MUST be application/json, not text/html.
+	if !strings.Contains(gotAccept, "application/json") {
+		t.Fatalf("search request sent Accept: %q — must be application/json for JSON search paths", gotAccept)
+	}
+	if strings.Contains(gotAccept, "text/html") && !strings.Contains(gotAccept, "application/json") {
+		t.Fatalf("search request sent the HTML Accept header to a JSON endpoint: %q", gotAccept)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 JSON result, got %d — the server returned HTML because the Accept header was wrong", len(results))
+	}
+	if results[0].Title != "Result One" {
+		t.Fatalf("title wrong: %q", results[0].Title)
+	}
+}

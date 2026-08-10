@@ -428,7 +428,21 @@ func (e *Engine) searchPath(ctx context.Context, p SearchPath, base *Context) ([
 		form = nil
 	}
 
-	doc, raw, err := e.do(ctx, method, target, form, headerStrings(e.def.Search.Headers))
+	headers := headerStrings(e.def.Search.Headers)
+	if p.Response != nil && strings.EqualFold(strings.TrimSpace(p.Response.Type), "json") {
+		// A JSON API endpoint content-negotiates on the Accept header.
+		// TorrentLeech's /torrents/browse/list/... returns the HTML browse
+		// page when it sees Accept: text/html (the default) and JSON only
+		// when it sees Accept: application/json. Prowlarr sends the latter;
+		// without it SeedStream gets HTML, parseJSONRows returns 0, and the
+		// search looks empty even with a valid logged-in session.
+		if headers == nil {
+			headers = map[string]string{}
+		}
+		headers["Accept"] = "application/json"
+	}
+
+	doc, raw, err := e.do(ctx, method, target, form, headers)
 	if err != nil {
 		return nil, err
 	}
