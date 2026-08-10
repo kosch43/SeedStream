@@ -357,3 +357,326 @@ func TestEnginePreservesConfiguredProxy(t *testing.T) {
 		t.Fatalf("proxy saw host %q, want tracker.invalid", proxiedHost)
 	}
 }
+
+// TestEngineParsesJSONSearchResults is the fix for trackers whose Cardigann
+// definition declares response.type: json. Before the JSON path, the engine
+// fed every response (JSON included) to goquery, found no rows, and silently
+// returned zero results — TorrentLeech and every Unit3d-API tracker were the
+// observed casualties. The shape here mirrors TorrentLeech's definition:
+// rows.selector "torrentList", a $.numFound count, and field selectors that
+// are JSON keys (name, fid, seeders…), with the {{ .Result._id }} cross-
+// reference pattern for download URLs.
+func TestEngineParsesJSONSearchResults(t *testing.T) {
+	const jsonDefinition = `
+id: jsontest
+name: JSON Tracker
+type: private
+links:
+  - %s
+caps:
+  categorymappings:
+    - {id: "10", cat: Movies}
+  modes:
+    search: [q]
+settings:
+  - name: cookie
+    type: text
+    label: Cookie
+login:
+  path: login.php
+  method: form
+  form: form#login
+  inputs:
+    username: "{{ .Config.username }}"
+    password: "{{ .Config.password }}"
+  error:
+    - selector: span.error
+search:
+  paths:
+    - path: browse.php
+      response:
+        type: json
+  inputs:
+    search: "{{ .Keywords }}"
+  rows:
+    selector: torrentList
+    count:
+      selector: $.numFound
+  fields:
+    title:
+      selector: name
+    _id:
+      selector: fid
+    _filename:
+      selector: filename
+    details:
+      text: "/torrent/{{ .Result._id }}"
+    download:
+      text: "/download/{{ .Result._id }}/{{ .Result._filename }}"
+    seeders:
+      selector: seeders
+    leechers:
+      selector: leechers
+    grabs:
+      selector: completed
+    size:
+      selector: size
+    date:
+      selector: added
+      filters:
+        - name: dateparse
+          args: "2006-01-02 15:04:05"
+    category:
+      selector: categoryID
+    freeleech:
+      selector: download_multiplier
+      case:
+        "0": "free"
+        "*": "nofree"
+`
+	var searchHits int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/login.php", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			fmt.Fprint(w, `<html><body><form id="login"><input name="username"><input name="password"><input name="csrf" value="tok" type="hidden"></form></body></html>`)
+			return
+		}
+		http.SetCookie(w, &http.Cookie{Name: "session", Value: "ok", Path: "/"})
+		fmt.Fprint(w, `<html><body><a href="/logout.php">Logout</a></body></html>`)
+	})
+	mux.HandleFunc("/browse.php", func(w http.ResponseWriter, r *http.Request) {
+		searchHits++
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{
+			"numFound": 35,
+			"torrentList": [
+				{"fid":"101","filename":"Rick.and.Morty.S09.1080p.WEB-DL.mkv","name":"Rick and Morty (2013) S09","categoryID":"10","seeders":37,"leechers":4,"completed":128,"size":"42.5 GB","added":"2026-08-09 12:34:56","download_multiplier":0},
+				{"fid":"102","filename":"Some.Other.2021.mkv","name":"Some Other 2021","categoryID":"10","seeders":2,"leechers":1,"completed":9,"size":"2.3 GiB","added":"2022-01-02 03:04:05","download_multiplier":1}
+			]
+		}`)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	def, err := Parse([]byte(fmt.Sprintf(jsonDefinition, srv.URL)))
+	if err != nil {
+		t.Fatalf("parse definition: %v", err)
+	}
+	eng, err := NewEngine(def, "", map[string]string{"username": "alice", "password": "pw"}, 10*time.Second)
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+
+	results, err := eng.Search(context.Background(), "rick", nil, nil)
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if searchHits != 1 {
+		t.Fatalf("expected one search hit, got %d", searchHits)
+	}
+	if len(results) != 2 {
+		t.Fatalf("JSON search returned %d results, want 2 — goquery cannot parse JSON and the JSON path is the fix here", len(results))
+	}
+
+	first := results[0]
+	if first.Title != "Rick and Morty (2013) S09" {
+		t.Fatalf("first title wrong: %q", first.Title)
+	}
+	if first.Seeders != 37 || first.Leechers != 4 || first.Grabs != 128 {
+		t.Fatalf("swarm counts wrong: %d/%d grabs=%d", first.Seeders, first.Leechers, first.Grabs)
+	}
+	// 42.5 GB parses to 42.5 * 1<<30 bytes; mirror the existing HTML test.
+	gib := float64(int64(1) << 30)
+	if want := int64(42.5 * gib); first.Size != want {
+		t.Fatalf("size parsed wrong: got %d want %d", first.Size, want)
+	}
+	// The {{ .Result._id }}/{{ .Result._filename }} cross-reference must resolve.
+	if !strings.HasSuffix(first.Download, "/download/101/Rick.and.Morty.S09.1080p.WEB-DL.mkv") &&
+		!strings.Contains(first.Download, "download/101/") {
+		t.Fatalf("download cross-reference not resolved: %q", first.Download)
+	}
+	if !strings.HasSuffix(first.Details, "/torrent/101") {
+		t.Fatalf("details cross-reference not resolved: %q", first.Details)
+	}
+	// The case map on download_multiplier: 0 -> "free" for the first row.
+	if first.Category != "10" {
+		t.Fatalf("category wrong: %q", first.Category)
+	}
+
+	second := results[1]
+	if second.Size != int64(2.3*gib) {
+		t.Fatalf("second size wrong: got %d", second.Size)
+	}
+}
+
+// TestJSONPathNavigation drills the helpers that navigate JSON with the
+// "$.prefix[..].sub" convention count.selector uses, so a TorrentLeech-shaped
+// count.selector "$.numFound" lands on the right scalar.
+func TestJSONPathNavigation(t *testing.T) {
+	top := map[string]any{
+		"numFound": float64(35),
+		"torrentList": []any{
+			map[string]any{"fid": float64(101), "name": "A"},
+			map[string]any{"fid": float64(102), "name": "B"},
+		},
+		"nested": map[string]any{
+			"inner": map[string]any{
+				"val": "deep",
+			},
+		},
+	}
+
+	if got := jsonPath("torrentList"); len(got) != 1 || got[0] != "torrentList" {
+		t.Fatalf("jsonPath(\"torrentList\") = %v", got)
+	}
+	if got := jsonPath("$.numFound"); len(got) != 1 || got[0] != "numFound" {
+		t.Fatalf("jsonPath(\"$.numFound\") = %v", got)
+	}
+	if got := jsonPath("$.nested.inner.val"); len(got) != 3 || got[2] != "val" {
+		t.Fatalf("jsonPath(\"$.nested.inner.val\") = %v", got)
+	}
+
+	if v, ok := jsonNavigate(top, jsonPath("numFound")); !ok || jsonScalarToString(v) != "35" {
+		t.Fatalf("numFound navigation wrong: %v,%v -> %q", v, ok, jsonScalarToString(v))
+	}
+	if v, ok := jsonNavigate(top, jsonPath("$.nested.inner.val")); !ok || jsonScalarToString(v) != "deep" {
+		t.Fatalf("nested navigation wrong: got %q", jsonScalarToString(v))
+	}
+
+	rows, ok := jsonNavigateArray(top, jsonPath("torrentList"))
+	if !ok || len(rows) != 2 {
+		t.Fatalf("array navigation wrong: %d rows, ok=%v", len(rows), ok)
+	}
+	if v, ok := rows[0]["fid"]; !ok || jsonScalarToString(v) != "101" {
+		t.Fatalf("fid not extracted as string 101: got %v", v)
+	}
+}
+
+// TestMapCaseWildcardAndLiteral: the Cardigann case map matches the literal
+// extracted value, falls back to "*", and returns the value unchanged when
+// neither matches.
+func TestMapCaseWildcardAndLiteral(t *testing.T) {
+	cases := map[string]string{"0": "free", "*": "nofree"}
+	if got := mapCase(cases, "0"); got != "free" {
+		t.Fatalf("literal 0 should map to free, got %q", got)
+	}
+	if got := mapCase(cases, "1"); got != "nofree" {
+		t.Fatalf("non-matching value should fall back to wildcard, got %q", got)
+	}
+	if got := mapCase(cases, "anything"); got != "nofree" {
+		t.Fatalf("unmatched value should use wildcard, got %q", got)
+	}
+	noWild := map[string]string{"0": "free"}
+	if got := mapCase(noWild, "1"); got != "1" {
+		t.Fatalf("with no wildcard and no match the value must pass through, got %q", got)
+	}
+	if got := mapCase(noWild, "0"); got != "free" {
+		t.Fatalf("literal match must apply even with no wildcard, got %q", got)
+	}
+	if got := mapCase(nil, "0"); got != "0" {
+		t.Fatalf("nil case must pass through, got %q", got)
+	}
+}
+
+// TestJSONSearchSendsAcceptJSONHeader is the fix for TorrentLeech returning
+// its HTML browse page instead of JSON. The search endpoint is
+// content-negotiated: TorrentLeech returns HTML when Accept is text/html and
+// JSON when Accept is application/json. The default Accept header hardcoded
+// in do() was text/html, so even with a valid session the JSON parser got an
+// HTML body and returned 0 rows. This test proves searchPath injects
+// Accept: application/json when the path declares response.type: json.
+func TestJSONSearchSendsAcceptJSONHeader(t *testing.T) {
+	const def = `
+id: jsonaccept
+name: JSON Accept
+type: private
+links:
+  - %s
+caps:
+  categorymappings:
+    - {id: "1", cat: Movies}
+  modes:
+    search: [q]
+settings:
+  - name: cookie
+    type: text
+    label: Cookie
+login:
+  path: login.php
+  method: form
+  form: form#login
+  inputs:
+    username: "{{ .Config.username }}"
+    password: "{{ .Config.password }}"
+  error:
+    - selector: span.error
+search:
+  paths:
+    - path: browse.php
+      response:
+        type: json
+  inputs:
+    search: "{{ .Keywords }}"
+  rows:
+    selector: torrentList
+  fields:
+    title:
+      selector: name
+    download:
+      selector: download
+    seeders:
+      selector: seeders
+`
+	var gotAccept string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/login.php", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			fmt.Fprint(w, `<html><body><form id="login"><input name="username"><input name="password"><input name="csrf" value="tok" type="hidden"></form></body></html>`)
+			return
+		}
+		http.SetCookie(w, &http.Cookie{Name: "session", Value: "ok", Path: "/"})
+		fmt.Fprint(w, `<html><body><a href="/logout.php">Logout</a></body></html>`)
+	})
+	mux.HandleFunc("/browse.php", func(w http.ResponseWriter, r *http.Request) {
+		gotAccept = r.Header.Get("Accept")
+		// Content-negotiated: return HTML when Accept is text/html,
+		// JSON when Accept is application/json.
+		if strings.Contains(gotAccept, "text/html") {
+			w.Header().Set("Content-Type", "text/html")
+			fmt.Fprint(w, `<html><body>browse page, not JSON</body></html>`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"torrentList":[{"name":"Result One","download":"/dl/1","seeders":5}],"numFound":1}`)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	d, err := Parse([]byte(fmt.Sprintf(def, srv.URL)))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	eng, err := NewEngine(d, "", map[string]string{"username": "alice", "password": "pw"}, 10*time.Second)
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+
+	results, err := eng.Search(context.Background(), "test", nil, nil)
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+
+	// The Accept header MUST be application/json, not text/html.
+	if !strings.Contains(gotAccept, "application/json") {
+		t.Fatalf("search request sent Accept: %q — must be application/json for JSON search paths", gotAccept)
+	}
+	if strings.Contains(gotAccept, "text/html") && !strings.Contains(gotAccept, "application/json") {
+		t.Fatalf("search request sent the HTML Accept header to a JSON endpoint: %q", gotAccept)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 JSON result, got %d — the server returned HTML because the Accept header was wrong", len(results))
+	}
+	if results[0].Title != "Result One" {
+		t.Fatalf("title wrong: %q", results[0].Title)
+	}
+}

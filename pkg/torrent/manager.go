@@ -193,11 +193,13 @@ func newClient(c config.TorrentClientConfig) tclient.Client {
 	switch config.NormalizeTorrentClientType(c.Type) {
 	case config.TorrentClientQbittorrent:
 		return qbittorrent.New(qbittorrent.Options{
-			BaseURL:  c.URL,
-			Username: c.Username,
-			Password: c.Password,
-			Category: c.CategoryOrDefault(),
-			SavePath: clientSavePath,
+			BaseURL:         c.URL,
+			Username:        c.Username,
+			Password:        c.Password,
+			Category:        c.CategoryOrDefault(),
+			SavePath:        clientSavePath,
+			SequentialOrder: c.SequentialOrder,
+			FirstLastFirst:  c.FirstLastFirst,
 		})
 	case config.TorrentClientTransmission:
 		return transmission.New(transmission.Options{
@@ -271,6 +273,11 @@ type TorrentHealthEntry struct {
 	SequentialDL            bool
 	FirstLastPiecePrio      bool
 	StreamingOrderSupported bool
+	// WantSequentialDL and WantFirstLastPiecePrio are the streaming-order flags
+	// the owning client is configured to ask for, so the watchdog repairs only
+	// flags the client actually wants.
+	WantSequentialDL       bool
+	WantFirstLastPiecePrio bool
 }
 
 // ListAll returns all SeedStream-category torrents across every configured
@@ -302,6 +309,8 @@ func (m *Manager) ListAll(ctx context.Context) ([]TorrentHealthEntry, error) {
 				SequentialDL:            t.SequentialDL,
 				FirstLastPiecePrio:      t.FirstLastPiecePrio,
 				StreamingOrderSupported: t.StreamingOrderSupported,
+				WantSequentialDL:        e.cfg.SequentialOrderOrDefault(),
+				WantFirstLastPiecePrio:  e.cfg.FirstLastFirstOrDefault(),
 			})
 		}
 	}

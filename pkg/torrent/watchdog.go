@@ -357,7 +357,8 @@ func (w *Watchdog) verifyStreamingOrder(ctx context.Context, entries []TorrentHe
 			continue
 		}
 
-		orderMissing := e.StreamingOrderSupported && (!e.SequentialDL || !e.FirstLastPiecePrio)
+		orderMissing := e.StreamingOrderSupported &&
+			((e.WantSequentialDL && !e.SequentialDL) || (e.WantFirstLastPiecePrio && !e.FirstLastPiecePrio))
 		if orderMissing {
 			logger.Warn("Cerberus watchdog: torrent is not set to download from the front — enabling sequential download and first/last-piece priority",
 				"hash", e.Hash, "name", e.Name, "client", e.ClientName,

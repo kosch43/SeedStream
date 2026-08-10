@@ -2,6 +2,7 @@ package cardigann
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,10 +22,28 @@ import (
 
 // Engine drives one tracker: it holds the definition, the operator's
 // credentials, and the logged-in session.
+// defaultUserAgent is deliberately NOT a browser string.
+//
+// Claiming to be Chrome while presenting Go's TLS and HTTP/2 fingerprints is a
+// mismatch Cloudflare detects and challenges: measured against TorrentLeech,
+// the Chrome UA returns 403 with `cf-mitigated: challenge` on every request —
+// GET and POST, HTTP/1.1 and HTTP/2, and with the full Sec-Fetch/sec-ch-ua set
+// attached. An honest non-browser agent from the same IP returns 200. Passing
+// as a browser needs a matching TLS fingerprint, which this client cannot
+// provide, so the reachable option is not to pretend.
+//
+// Trackers that genuinely gate on a browser UA can set query_header per
+// indexer.
+const defaultUserAgent = "SeedStream/1.0 (+https://github.com/kosch43/SeedStream)"
+
 type Engine struct {
 	def     *Definition
 	baseURL string
 	config  map[string]string
+
+	// userAgent is sent on every request. Per-indexer query_header overrides
+	// the default when a tracker needs something specific.
+	userAgent string
 
 	http *http.Client
 
@@ -121,11 +140,16 @@ func NewEngine(def *Definition, baseURLOverride string, settings map[string]stri
 		MaxConnsPerHost:     100,
 		IdleConnTimeout:     90 * time.Second,
 	}
+	ua := strings.TrimSpace(indexerCfg.QueryHeader)
+	if ua == "" {
+		ua = defaultUserAgent
+	}
 	return &Engine{
-		def:     def,
-		baseURL: base,
-		config:  cfg,
-		http:    &http.Client{Jar: jar, Timeout: timeout, Transport: transport},
+		def:       def,
+		baseURL:   base,
+		config:    cfg,
+		userAgent: ua,
+		http:      &http.Client{Jar: jar, Timeout: timeout, Transport: transport},
 	}, nil
 }
 
@@ -159,7 +183,7 @@ func (e *Engine) do(ctx context.Context, method, rawURL string, form url.Values,
 	if err != nil {
 		return nil, "", err
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+	req.Header.Set("User-Agent", e.userAgent)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 	req.Header.Set("Cache-Control", "max-age=0")
@@ -384,6 +408,8 @@ func (e *Engine) searchPath(ctx context.Context, p SearchPath, base *Context) ([
 		method = http.MethodPost
 	}
 
+	logger.Debug("cardigann: search request", "tracker", e.def.Name, "url", target)
+
 	if method == http.MethodGet {
 		q := form.Encode()
 		if rawExtra != "" {
@@ -402,9 +428,34 @@ func (e *Engine) searchPath(ctx context.Context, p SearchPath, base *Context) ([
 		form = nil
 	}
 
-	doc, _, err := e.do(ctx, method, target, form, headerStrings(e.def.Search.Headers))
+	headers := headerStrings(e.def.Search.Headers)
+	if p.Response != nil && strings.EqualFold(strings.TrimSpace(p.Response.Type), "json") {
+		// A JSON API endpoint content-negotiates on the Accept header.
+		// TorrentLeech's /torrents/browse/list/... returns the HTML browse
+		// page when it sees Accept: text/html (the default) and JSON only
+		// when it sees Accept: application/json. Prowlarr sends the latter;
+		// without it SeedStream gets HTML, parseJSONRows returns 0, and the
+		// search looks empty even with a valid logged-in session.
+		if headers == nil {
+			headers = map[string]string{}
+		}
+		headers["Accept"] = "application/json"
+	}
+
+	doc, raw, err := e.do(ctx, method, target, form, headers)
 	if err != nil {
 		return nil, err
+	}
+	logger.Debug("cardigann: search response", "tracker", e.def.Name, "url", target, "html_bytes", len(raw))
+	if len(raw) > 0 {
+		sample := string(raw)
+		if len(sample) > 500 {
+			sample = sample[:500]
+		}
+		logger.Debug("cardigann: search html sample", "tracker", e.def.Name, "html", sample)
+	}
+	if p.Response != nil && strings.EqualFold(strings.TrimSpace(p.Response.Type), "json") {
+		return e.parseJSONRows([]byte(raw)), nil
 	}
 	return e.parseRows(doc), nil
 }
@@ -478,6 +529,230 @@ func (e *Engine) extractField(row *goquery.Selection, f Field, ctx *Context) str
 	}
 	value = strings.TrimSpace(value)
 	return ApplyFilters(value, f.Filters, ctx)
+}
+
+// parseJSONRows parses a JSON search response the way Cardigann's HTML
+// engine parses HTML: walk rows.selector as a JSON path (a top-level key
+// like "torrentList", with or without a "$." prefix as count.selector uses),
+// and for each object in the resulting list extract every configured field
+// by its JSON key. goquery cannot find elements in a JSON document — it
+// treats the whole body as one text node — so without this path a tracker
+// that declares response.type: json returns zero rows silently, even when
+// the response itself is correct. The Cardigann definitions of TorrentLeech
+// and every Unit3d-API tracker are JSON-shaped.
+//
+// Field selectors are JSON keys: "fid", "seeders", "addedTimestamp". Nested
+// keys are written with dots ("group.name"). Filters and the Text/template
+// cross-reference pattern ({{ .Result._id }}) work the same way as in HTML
+// mode because the surrounding machinery (ApplyFilters, ctx.Expand) is
+// unchanged — only the extraction step reads from a parsed JSON object.
+func (e *Engine) parseJSONRows(raw []byte) []Result {
+	sel := strings.TrimSpace(e.def.Search.Rows.Selector)
+	if sel == "" {
+		return nil
+	}
+	path := jsonPath(sel)
+	top, err := parseJSONObject(raw)
+	if err != nil || top == nil {
+		bodyPrefix := string(raw)
+		if len(bodyPrefix) > 500 {
+			bodyPrefix = bodyPrefix[:500]
+		}
+		logger.Warn("cardigann: JSON response did not parse as an object — this is the body SeedStream received", "base", e.baseURL, "rows_selector", sel, "err", err, "body_prefix", bodyPrefix)
+		return nil
+	}
+	arr, ok := jsonNavigateArray(top, path)
+	if !ok {
+		bodyPrefix := string(raw)
+		if len(bodyPrefix) > 500 {
+			bodyPrefix = bodyPrefix[:500]
+		}
+		logger.Warn("cardigann: rows JSON path did not locate an array — the response parsed as JSON but the rows selector missed", "base", e.baseURL, "rows_selector", sel, "path", path, "body_prefix", bodyPrefix)
+		return nil
+	}
+	var out []Result
+	after := e.def.Search.Rows.After
+	for i, obj := range arr {
+		if after > 0 && i < after {
+			continue
+		}
+		ctx := e.newContext()
+		values := map[string]string{}
+		for name, f := range e.def.Search.Fields {
+			v := e.extractJSONField(obj, f, ctx)
+			values[name] = v
+			ctx.Result[name] = v
+		}
+		for name, f := range e.def.Search.Fields {
+			if strings.Contains(f.Text, "{{") {
+				v := e.extractJSONField(obj, f, ctx)
+				values[name] = v
+				ctx.Result[name] = v
+			}
+		}
+		if r, ok := e.toResult(values); ok {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// extractJSONField resolves one field from a JSON row object, mirroring the
+// HTML extractor's selector/text/attribute precedence. In JSON mode a
+// selector is a key into the object (or a dotted path); text is a literal
+// template (constants and {{ .Result.X }} cross-references); attribute is
+// unused but tolerated to keep definitions portable.
+func (e *Engine) extractJSONField(obj map[string]any, f Field, ctx *Context) string {
+	var value string
+	switch {
+	case strings.TrimSpace(f.Selector) != "":
+		if v, ok := jsonNavigate(obj, jsonPath(f.Selector)); ok {
+			value = jsonScalarToString(v)
+		} else if !f.Optional {
+			// A mandatory field that is absent is an empty string; filters
+			// and case maps run on it exactly as they would on an empty
+			// HTML find.
+			value = ""
+		}
+		// Case maps are how definitions like TorrentLeech's download_multiplier
+		// translate "0" into "freeleech-based" values. They match against
+		// the raw extracted scalar string, the same shape the HTML path
+		// would have produced.
+		if len(f.Case) > 0 {
+			value = mapCase(f.Case, value)
+		}
+	case f.Text != "":
+		value = ctx.Expand(f.Text)
+	default:
+		// No selector and no text: nothing to extract; fall through with
+		// an empty value so filters still run.
+		value = ""
+	}
+	value = strings.TrimSpace(value)
+	return ApplyFilters(value, f.Filters, ctx)
+}
+
+// parseJSONObject unmarshals a JSON document into a tree of map[string]any
+// and []any values. A non-object document (e.g. a bare array) returns an
+// error because every Cardigann JSON definition's rows.selector points INTO
+// an object top-level (torrentList, numFound, etc).
+func parseJSONObject(raw []byte) (map[string]any, error) {
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return nil, err
+	}
+	obj, ok := v.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("JSON response is not an object (got %T)", v)
+	}
+	return obj, nil
+}
+
+// jsonPath strips an optional leading "$." from a Cardigann selector so the
+// same convention used for count.selector ("$.numFound") works for rows and
+// fields too. The remainder is the dotted JSON path to navigate.
+func jsonPath(sel string) []string {
+	s := strings.TrimSpace(sel)
+	s = strings.TrimPrefix(s, "$")
+	s = strings.TrimPrefix(s, ".")
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, ".")
+}
+
+// jsonNavigate walks a dotted JSON path through nested objects. Strings are
+// coerced to scalar values via jsonScalarToString so callers always receive
+// the same shape as a leaf value as they would from the HTML extractor.
+func jsonNavigate(obj map[string]any, path []string) (any, bool) {
+	var cur any = obj
+	for _, seg := range path {
+		switch m := cur.(type) {
+		case map[string]any:
+			v, ok := m[seg]
+			if !ok {
+				return nil, false
+			}
+			cur = v
+		default:
+			return nil, false
+		}
+	}
+	return cur, true
+}
+
+// jsonNavigateArray navigates a path and asserts the result is a JSON array.
+func jsonNavigateArray(obj map[string]any, path []string) ([]map[string]any, bool) {
+	v, ok := jsonNavigate(obj, path)
+	if !ok {
+		return nil, false
+	}
+	arr, ok := v.([]any)
+	if !ok {
+		return nil, false
+	}
+	out := make([]map[string]any, 0, len(arr))
+	for _, item := range arr {
+		row, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		out = append(out, row)
+	}
+	return out, true
+}
+
+// jsonScalarToString coerces a parsed JSON scalar (string, number, bool, null)
+// to the same plain string the HTML extractor would produce. Numbers and
+// bools follow Go's default formatting, matching what a definition author
+// would write in a Cardigann selector (e.g. "0" for freeleech).
+func jsonScalarToString(v any) string {
+	switch x := v.(type) {
+	case string:
+		return x
+	case float64:
+		// JSON numbers always come through as float64; print without a
+		// trailing .0 when the value is integral, so "0" stays "0" and
+		// "1.5" stays "1.5".
+		if x == float64(int64(x)) {
+			return strconv.FormatInt(int64(x), 10)
+		}
+		return strconv.FormatFloat(x, 'f', -1, 64)
+	case bool:
+		if x {
+			return "true"
+		}
+		return "false"
+	case nil:
+		return ""
+	case map[string]any, []any:
+		// A row field that points at a sub-object or array: stringify the
+		// JSON as a fallback rather than emit "[map[X:%!s(...)" garbage.
+		b, err := json.Marshal(x)
+		if err != nil {
+			return ""
+		}
+		return string(b)
+	default:
+		return fmt.Sprintf("%v", x)
+	}
+}
+
+// mapCase applies a Cardigann field's case map to an extracted value. The
+// YAML loader stores keys as strings (JSON keys are strings, Go map keys are
+// strings), so "0" maps to the configured override and "*" is the wildcard.
+// Returns the value unchanged when no case matched and there is no wildcard.
+func mapCase(cases map[string]string, value string) string {
+	if cases == nil {
+		return value
+	}
+	if v, ok := cases[value]; ok {
+		return v
+	}
+	if v, ok := cases["*"]; ok {
+		return v
+	}
+	return value
 }
 
 // toResult converts extracted field values into a Result, dropping rows without

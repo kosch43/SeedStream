@@ -104,6 +104,45 @@ func TestEnsureStreamingOrderPartial(t *testing.T) {
 	}
 }
 
+func TestEnsureStreamingOrderSkipsDisabledFlags(t *testing.T) {
+	var calls []string
+	state := &TorrentInfo{Hash: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}
+	off := false
+	c := New(Options{
+		BaseURL:         orderServer(t, &calls, state).URL,
+		Category:        "seedstream",
+		SequentialOrder: &off,
+		FirstLastFirst:  &off,
+	})
+
+	info := &TorrentInfo{Hash: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}
+	if err := c.EnsureStreamingOrder(context.Background(), info); err != nil {
+		t.Fatalf("EnsureStreamingOrder: %v", err)
+	}
+	if len(calls) != 0 {
+		t.Fatalf("flags disabled in the client settings must not be enforced, got %v", calls)
+	}
+}
+
+func TestEnsureStreamingOrderEnforcesOnlyWantedFlags(t *testing.T) {
+	var calls []string
+	state := &TorrentInfo{Hash: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}
+	off := false
+	c := New(Options{
+		BaseURL:         orderServer(t, &calls, state).URL,
+		Category:        "seedstream",
+		SequentialOrder: &off,
+	})
+
+	info := &TorrentInfo{Hash: "abcdefabcdefabcdefabcdefabcdefabcdefabcd"}
+	if err := c.EnsureStreamingOrder(context.Background(), info); err != nil {
+		t.Fatalf("EnsureStreamingOrder: %v", err)
+	}
+	if len(calls) != 1 || calls[0] != "flpp" {
+		t.Fatalf("only first/last-piece priority is wanted, got %v", calls)
+	}
+}
+
 // TestEnsureStreamingOrderRaceCondition covers the race where a newly added
 // torrent has its flags set by Add(), but Get() returns stale data showing
 // them as off. The confirmation read must observe the settled add state and
