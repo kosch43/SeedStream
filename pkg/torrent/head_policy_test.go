@@ -1,6 +1,7 @@
 package torrent
 
 import (
+	"math"
 	"testing"
 )
 
@@ -183,5 +184,62 @@ func TestPieceTrackingFallsBackWithoutPieceSize(t *testing.T) {
 	want := HeadBytesFor(p, 557_000_000)
 	if got := HeadBytesForPieceTracking(p, 557_000_000, 0); got != want {
 		t.Fatalf("without a piece size the piece-tracking path must match HeadBytesFor, got %d want %d", got, want)
+	}
+}
+
+// TestPieceTrackingRequiresTwoLargePieces is the 80 GB remux field case: 64 MiB
+// pieces, a 99 Mbps-class stream delivered faster than playback. The rate-aware
+// head shrinks to jitter, which one piece would satisfy — but a 64 MiB piece is a
+// cliff, so the head must round up to two. A scattered sequential download that
+// has only piece 0 on disk must not be declared ready.
+func TestPieceTrackingRequiresTwoLargePieces(t *testing.T) {
+	// 80,773,656,621 bytes, ~7.9 MB/s playback (matches the logged run).
+	p := PlaybackProfile{FileBytes: 80_773_656_621, RuntimeSeconds: 10_201}
+	const piece = 64 << 20
+	got := HeadBytesForPieceTracking(p, 52_000_000, piece)
+	aligned := AlignHeadToPieces(got, piece)
+	if aligned < piece*2 {
+		t.Fatalf("a 64 MiB-piece remux needs at least two pieces of head, got %d (aligned %d)", got, aligned)
+	}
+	if aligned%piece != 0 {
+		t.Fatalf("piece-tracking head %d is not a whole number of pieces", aligned)
+	}
+}
+
+// TestPieceTrackingFloorIsDecidedByTimeNotSize: what makes one piece a cliff is
+// how many seconds of video it holds, not how many bytes. At this profile's
+// 7.9 MB/s every piece here is under lowRunwaySeconds — including the 32 MiB-1
+// piece, which is 4.2 seconds — so all of them take the two-piece floor.
+//
+// This replaces a byte-threshold version of the same test that expected a
+// one-piece floor "just below" MinHeadBytes*2. That boundary is not a property
+// of playback: 32 MiB is four seconds on this remux and half a minute on an
+// ordinary 1080p release, and only one of those is a cliff. The floor binds on
+// none of these cases anyway except where the rate model asks for less than it
+// — which is the point, and is why the small-piece fast start is untouched.
+func TestPieceTrackingFloorIsDecidedByTimeNotSize(t *testing.T) {
+	p := PlaybackProfile{FileBytes: 80_773_656_621, RuntimeSeconds: 10_201}
+	want := int64(math.Ceil(float64(headSecondsFor(p, 52_000_000)) * p.BytesPerSecond()))
+	cases := []struct {
+		name     string
+		piece    int64
+		minFloor int64
+	}{
+		{"small piece", 4 << 20, 2 * (4 << 20)},
+		{"byte-floor piece", MinHeadBytes, 2 * MinHeadBytes},
+		{"just below the old byte boundary", MinHeadBytes*2 - 1, 2 * (MinHeadBytes*2 - 1)},
+		{"at the old byte boundary", MinHeadBytes * 2, MinHeadBytes * 4},
+		{"large piece", 64 << 20, 128 << 20},
+	}
+	for _, tc := range cases {
+		if runway := float64(tc.piece) / p.BytesPerSecond(); runway >= lowRunwaySeconds {
+			t.Fatalf("%s: premise broken, one piece is %.1fs so no floor should apply", tc.name, runway)
+		}
+		got := HeadBytesForPieceTracking(p, 52_000_000, tc.piece)
+		alignedGot := AlignHeadToPieces(got, tc.piece)
+		alignedWant := AlignHeadToPieces(clampHeadTo(want, p.FileBytes, tc.minFloor), tc.piece)
+		if alignedGot != alignedWant {
+			t.Fatalf("%s: got %d, want %d (minFloor %d, piece %d)", tc.name, alignedGot, alignedWant, tc.minFloor, tc.piece)
+		}
 	}
 }
