@@ -1514,7 +1514,12 @@ func (m *Manager) PrepareForPlayback(ctx context.Context, rel *release.Release, 
 					// in pieces keeps the timeout message and the fragmented
 					// detection consistent with what was actually required.
 					if pieceSize > 0 {
-						needHead = AlignHeadToPieces(needHead, pieceSize)
+						// Profile-aware, so the anti-cliff floor is applied here
+						// too and not only inside the rate-driven revision:
+						// reviseHead can lower the requirement but never raise
+						// it, so a head that arrived at this point already small
+						// would otherwise keep a one-piece cliff.
+						needHead = AlignHeadToPiecesFor(needHead, pieceSize, profile)
 					}
 					headReady = avail.BytesAvailable(ctx, 0, needHead)
 				}

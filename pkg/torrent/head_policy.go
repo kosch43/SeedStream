@@ -179,6 +179,64 @@ func AlignHeadToPieces(head, pieceSize int64) int64 {
 	return ((head + pieceSize - 1) / pieceSize) * pieceSize
 }
 
+// AlignHeadToPiecesFor is AlignHeadToPieces with the anti-cliff floor applied,
+// for callers that know what the content plays at.
+func AlignHeadToPiecesFor(head, pieceSize int64, p PlaybackProfile) int64 {
+	aligned := AlignHeadToPieces(head, pieceSize)
+	if floor := pieceFloorFor(p, pieceSize); aligned < floor {
+		aligned = floor
+	}
+	return aligned
+}
+
+// pieceFloorFor is the smallest head worth starting on when the head is counted
+// in pieces: one piece, or two when one piece is less playback time than the
+// reader itself treats as a likely stall.
+//
+// One piece is normally plenty of runway — a 4 MiB piece is seconds of video,
+// and the whole point of the piece-tracking floor is not to demand four of them
+// when the bitmap can prove one is contiguous. But piece size does not scale
+// with anything the player cares about. An 80 GB remux published with 64 MiB
+// pieces is 7.9 seconds per piece at 67.8 Mbps, and SeedStream would start
+// playback on exactly one of them — a cliff, with nothing cued behind it, which
+// the reader then immediately reports as "the viewer is catching up with the
+// download" because 7.9 is below its own lowRunwaySeconds. Two parts of the
+// same system disagreeing about whether that is enough is the bug.
+//
+// Two pieces, not more: the guarantee wanted here is that the pipeline is never
+// empty — while the player drains the first piece, the second is already in
+// hand and the third has a full piece-time to arrive. Making it deeper on a
+// prediction is the wrong instrument; the fragmented-head escalation in the
+// prepare loop already does that, and it acts on out-of-order arrival actually
+// observed rather than guessed at.
+//
+// Deliberately silent for small pieces. A 4 MiB piece at this bitrate is half a
+// second, so the byte-sized head is already many pieces and this floor never
+// binds — which is what keeps the fast start on ordinary releases untouched.
+func pieceFloorFor(p PlaybackProfile, pieceSize int64) int64 {
+	if pieceSize <= 0 {
+		return pieceSize
+	}
+	playback := p.BytesPerSecond()
+	if playback <= 0 {
+		// No runtime, so no way to turn a piece into seconds. One piece stands:
+		// inventing a bitrate to justify doubling the wait would be a guess
+		// dressed as a measurement.
+		return pieceSize
+	}
+	if float64(pieceSize)/playback >= lowRunwaySeconds {
+		return pieceSize // one piece is already more runway than a stall warning
+	}
+	two := pieceSize * 2
+	// Never let the anti-cliff floor become most of the file. On a file small
+	// enough that two pieces exceed the streamable fraction, waiting for the
+	// second costs more than the cliff it prevents.
+	if ceiling := int64(float64(p.FileBytes) * StreamableHeadFraction); ceiling > 0 && two > ceiling {
+		return pieceSize
+	}
+	return two
+}
+
 // HeadBytesForPieceTracking is HeadBytesFor with the floor lowered to one piece,
 // for callers that can prove a contiguous run via the piece bitmap rather than
 // assume one from byte progress. A single piece at the playhead is enough to
@@ -192,5 +250,5 @@ func HeadBytesForPieceTracking(p PlaybackProfile, dlBytesPerSec, pieceSize int64
 	playback := p.BytesPerSecond()
 	seconds := headSecondsFor(p, dlBytesPerSec)
 	want := int64(math.Ceil(float64(seconds) * playback))
-	return clampHeadTo(want, p.FileBytes, pieceSize)
+	return clampHeadTo(want, p.FileBytes, pieceFloorFor(p, pieceSize))
 }
